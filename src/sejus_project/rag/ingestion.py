@@ -3,7 +3,7 @@ ingestion.py
 ------------
 Responsabilidade: ENTRADA e PREPARAÇÃO dos documentos.
 
-- Lê os arquivos .md de uma pasta (ex: fontes-rag/)
+- Lê os arquivos .md de uma pasta (ex: docs/fontes-rag/markdown/)
 - Limpa o ruído específico da extração PDF -> MD do Diário Oficial de MT
   (tags de sistema, cabeçalho/rodapé, protocolo, espaçamento irregular)
 - Devolve uma lista de `Document`, prontos para o chunking.py consumir
@@ -14,7 +14,7 @@ texto bruto.
 Uso:
     from ingestion import load_documents
 
-    docs = load_documents("fontes-rag/")
+    docs = load_documents("../../docs/fontes-rag/markdown/")
     for d in docs:
         print(d.source_file, len(d.text))
 """

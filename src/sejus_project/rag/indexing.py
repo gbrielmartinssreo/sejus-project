@@ -16,7 +16,7 @@ Uso:
     from embedding import Embedder
     from indexing import QdrantIndexer, QdrantIndexerConfig
 
-    chunks = chunk_documents(load_documents("fontes-rag/"))
+    chunks = chunk_documents(load_documents("../../docs/fontes-rag/markdown/"))
     embedder = Embedder()
 
     indexer = QdrantIndexer(QdrantIndexerConfig(

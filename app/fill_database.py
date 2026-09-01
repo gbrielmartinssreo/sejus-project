@@ -6,10 +6,10 @@ from sejus_project.rag.indexing import QdrantIndexer, QdrantIndexerConfig
 
 # Definir o diretório raiz do projeto
 script_dir = Path(__file__).parent
-projeto_root = script_dir.parent.parent.parent
+projeto_root = script_dir.parent
 
 # 1. Ler e limpar os .md
-docs = load_documents(projeto_root / "rag" / "fontes-rag" / "markdown")
+docs = load_documents(projeto_root / "docs" / "fontes-rag" / "markdown")
 print(f"{len(docs)} documentos carregados")
 
 # 2. Dividir em chunks

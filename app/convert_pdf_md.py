@@ -4,8 +4,8 @@ from markitdown import MarkItDown
 # Usar caminho relativo baseado no arquivo atual
 script_dir = Path(__file__).parent
 projeto_root = script_dir.parent
-entrada = projeto_root / "src" / "sejus-project" / "rag" / "fontes-rag" / "pdf"
-saida = projeto_root / "src" / "sejus-project" / "rag" / "fontes-rag" / "markdown"
+entrada = projeto_root / "docs" / "fontes-rag" / "pdf"
+saida = projeto_root / "docs" / "fontes-rag" / "markdown"
 
 saida.mkdir(parents=True, exist_ok=True)
 

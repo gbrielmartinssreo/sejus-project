@@ -16,7 +16,7 @@ Uso:
     from ingestion import load_documents
     from chunking import chunk_documents
 
-    docs = load_documents("fontes-rag/")
+    docs = load_documents("../../docs/fontes-rag/markdown/")
     chunks = chunk_documents(docs)
 """
 from __future__ import annotations
