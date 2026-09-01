@@ -1497,6 +1497,7 @@ dependencies = [
     { name = "groq" },
     { name = "markitdown", extra = ["pdf"] },
     { name = "qdrant-client" },
+    { name = "rich" },
     { name = "ruff" },
     { name = "sentence-transformers" },
 ]
@@ -1507,6 +1508,7 @@ requires-dist = [
     { name = "groq", specifier = ">=1.7.0" },
     { name = "markitdown", extras = ["pdf"], specifier = ">=0.1.7" },
     { name = "qdrant-client", specifier = ">=1.19.0" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "ruff", specifier = ">=0.16.5" },
     { name = "sentence-transformers", specifier = ">=6.0.1" },
 ]

@@ -1,5 +1,7 @@
 import json
 
+from sympy import content
+
 from sejus_project.llm.ia import perguntar
 
 from sejus_project.tools.calc import definition as calc_definition, calcular
