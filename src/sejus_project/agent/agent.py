@@ -1,30 +1,83 @@
-import json
-
-from sympy import content
-
 from sejus_project.llm.ia import perguntar
 
 from sejus_project.tools.calc import definition as calc_definition, calcular
 from sejus_project.tools.temperatura import tools as temperatura_tools, temperatura
 from sejus_project.tools.more import definition as more_definition, more_epic
+from sejus_project.tools.retrieval import definition as retrieval_definition, consultar_atos_sejus
+from sejus_project.tools.user_files import definition as user_files_definition, analisar_arquivo_usuario
+
+import json
+import inspect
 
 
 TOOLS = [
     calc_definition,
     *temperatura_tools,
-    more_definition
+    more_definition,
+    retrieval_definition,
+    user_files_definition,
 ]
 
 
 FUNCTIONS = {
     "calcular": calcular,
     "temperatura": temperatura,
-    "more_epic": more_epic
+    "more_epic": more_epic,
+    "consultar_atos_sejus": consultar_atos_sejus,
+    "analisar_arquivo_usuario": analisar_arquivo_usuario,
 }
 
 
-import inspect
-import json
+# Histórico da conversa
+messages = []
+
+# --- Configuração da poda de histórico -------------------------------------
+# Estratégia conservadora: NÃO resumimos e NÃO removemos mensagens de
+# user/assistant (onde fica o texto final, com citações de atos etc.).
+# Apenas truncamos o CONTEÚDO BRUTO de resultados de tools antigas, já que
+# esse conteúdo raramente é reutilizado depois de alguns turnos e costuma
+# ser a maior fonte de inflação de tokens (ex: chunks retornados pelo RAG).
+
+# Quantas mensagens "tool" mais recentes devem ser mantidas por completo.
+# Tool results mais antigos que isso são truncados.
+MANTER_TOOL_RESULTS_COMPLETOS = 4
+
+# Tamanho máximo (em caracteres) de um tool result truncado.
+TRUNCAR_TOOL_RESULT_PARA = 300
+
+
+def _podar_tool_results_antigos():
+    """Trunca o conteúdo de tool results antigos, preservando os mais recentes.
+
+    Não mexe em mensagens 'user' ou 'assistant' — só em 'tool', que é onde
+    ficam os retornos brutos de funções como consultar_atos_sejus. A resposta
+    final do assistente (que já deve conter a citação relevante em texto)
+    permanece intacta no histórico.
+    """
+
+    indices_tool = [
+        i for i, m in enumerate(messages) if m.get("role") == "tool"
+    ]
+
+    # Nada a podar se ainda estamos dentro do limite
+    if len(indices_tool) <= MANTER_TOOL_RESULTS_COMPLETOS:
+        return
+
+    # Todos os índices exceto os N mais recentes serão candidatos à poda
+    indices_para_podar = indices_tool[:-MANTER_TOOL_RESULTS_COMPLETOS]
+
+    for i in indices_para_podar:
+        conteudo = messages[i].get("content", "") or ""
+
+        if (
+            isinstance(conteudo, str)
+            and len(conteudo) > TRUNCAR_TOOL_RESULT_PARA
+            and not conteudo.startswith("[resultado truncado")
+        ):
+            messages[i]["content"] = (
+                conteudo[:TRUNCAR_TOOL_RESULT_PARA]
+                + f"... [resultado truncado — {len(conteudo)} caracteres originais]"
+            )
 
 
 def _executar_tool(tool_call):
@@ -44,40 +97,59 @@ def _executar_tool(tool_call):
     signature = inspect.signature(function)
 
     if not signature.parameters:
-        return function()
+        result = function()
+    else:
+        result = function(**arguments)
 
-    return function(**arguments)
+    return (
+        result
+        if isinstance(result, str)
+        else json.dumps(result, ensure_ascii=False)
+    )
 
 
 def executar(question):
-    """Executa o agente com a pergunta do usuário."""
+    """Executa o agente mantendo o histórico da conversa."""
 
-    messages = [
-        {
-            "role": "user",
-            "content": question
-        }
-    ]
+    # Adiciona a pergunta ao histórico
+    messages.append({
+        "role": "user",
+        "content": question
+    })
 
-    response = perguntar(messages, TOOLS)
+    # Loop para permitir chamadas de ferramentas
+    for _ in range(5):
 
-    message = response.choices[0].message
+        _podar_tool_results_antigos()
 
-    if not message.tool_calls:
-        return message.content
+        response = perguntar(messages, TOOLS)
 
-    messages.append(message)
+        message = response.choices[0].message
 
-    for tool_call in message.tool_calls:
+        # Se o agente respondeu normalmente
+        if not message.tool_calls:
 
-        resultado = _executar_tool(tool_call)
+            messages.append({
+                "role": "assistant",
+                "content": message.content
+            })
 
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": resultado
-        })
+            return message.content or "Não foi possível gerar uma resposta."
 
-    response = perguntar(messages, TOOLS)
+        # Adiciona a mensagem do agente ao histórico
+        messages.append(
+            message.model_dump(exclude_none=True)
+        )
 
-    return response.choices[0].message.content
+        # Executa as ferramentas solicitadas
+        for tool_call in message.tool_calls:
+
+            resultado = _executar_tool(tool_call)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": resultado,
+            })
+
+    return "Não foi possível concluir a consulta."

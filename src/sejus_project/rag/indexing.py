@@ -39,7 +39,7 @@ from qdrant_client.http import models as qmodels
 
 # Import só para type hints, evita import circular em runtime se não precisar
 try:
-    from chunking import Chunk
+    from sejus_project.rag.chunking import Chunk
 except ImportError:
     Chunk = None  # type: ignore
 
@@ -169,8 +169,8 @@ if __name__ == "__main__":
     # deste arquivo, já que não é responsabilidade do indexing.py.
     import argparse
     import json
-    from chunking import Chunk
-    from embedding import Embedder
+    from sejus_project.rag.chunking import Chunk
+    from sejus_project.rag.embedding import Embedder
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--chunks", required=True, help="Arquivo chunks.jsonl gerado pelo chunking.py")

@@ -25,7 +25,7 @@ import json
 import re
 from dataclasses import dataclass, asdict
 
-from ingestion import Document, load_documents
+from sejus_project.rag.ingestion import Document, load_documents
 
 # ---------------------------------------------------------------------------
 # 1. Separação em atos administrativos
