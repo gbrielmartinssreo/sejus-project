@@ -1,7 +1,5 @@
 from sejus_project.llm.ia import perguntar
 
-from sejus_project.tools.calc import definition as calc_definition, calcular
-from sejus_project.tools.temperatura import tools as temperatura_tools, temperatura
 from sejus_project.tools.more import definition as more_definition, more_epic
 from sejus_project.tools.retrieval import definition as retrieval_definition, consultar_atos_sejus
 from sejus_project.tools.user_files import definition as user_files_definition, analisar_arquivo_usuario
@@ -9,10 +7,8 @@ from sejus_project.tools.user_files import definition as user_files_definition, 
 import json
 import inspect
 
-
+    
 TOOLS = [
-    calc_definition,
-    *temperatura_tools,
     more_definition,
     retrieval_definition,
     user_files_definition,
@@ -20,8 +16,6 @@ TOOLS = [
 
 
 FUNCTIONS = {
-    "calcular": calcular,
-    "temperatura": temperatura,
     "more_epic": more_epic,
     "consultar_atos_sejus": consultar_atos_sejus,
     "analisar_arquivo_usuario": analisar_arquivo_usuario,
