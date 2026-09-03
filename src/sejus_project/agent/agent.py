@@ -1,17 +1,25 @@
-from sejus_project.llm.ia import perguntar
-
-from sejus_project.tools.more import definition as more_definition, more_epic
-from sejus_project.tools.retrieval import definition as retrieval_definition, consultar_atos_sejus
-from sejus_project.tools.user_files import definition as user_files_definition, analisar_arquivo_usuario
-
-import json
 import inspect
+import json
 
-    
+from sejus_project.llm.ia import perguntar
+from sejus_project.tools.document_generation import (
+    definition as document_generation_definition,
+)
+from sejus_project.tools.document_generation import (
+    gerar_documento_normativo,
+)
+from sejus_project.tools.more import definition as more_definition
+from sejus_project.tools.more import more_epic
+from sejus_project.tools.retrieval import consultar_atos_sejus
+from sejus_project.tools.retrieval import definition as retrieval_definition
+from sejus_project.tools.user_files import analisar_arquivo_usuario
+from sejus_project.tools.user_files import definition as user_files_definition
+
 TOOLS = [
     more_definition,
     retrieval_definition,
     user_files_definition,
+    document_generation_definition,
 ]
 
 
@@ -19,6 +27,7 @@ FUNCTIONS = {
     "more_epic": more_epic,
     "consultar_atos_sejus": consultar_atos_sejus,
     "analisar_arquivo_usuario": analisar_arquivo_usuario,
+    "gerar_documento_normativo": gerar_documento_normativo,
 }
 
 
@@ -112,6 +121,8 @@ def executar(question):
     })
 
     # Loop para permitir chamadas de ferramentas
+    ultimo_resultado_tool = None
+
     for _ in range(5):
 
         _podar_tool_results_antigos()
@@ -139,6 +150,7 @@ def executar(question):
         for tool_call in message.tool_calls:
 
             resultado = _executar_tool(tool_call)
+            ultimo_resultado_tool = resultado
 
             messages.append({
                 "role": "tool",
@@ -146,4 +158,9 @@ def executar(question):
                 "content": resultado,
             })
 
+    if ultimo_resultado_tool:
+        return (
+            "A ferramenta não concluiu a operação. "
+            f"Último estado retornado: {ultimo_resultado_tool}"
+        )
     return "Não foi possível concluir a consulta."
