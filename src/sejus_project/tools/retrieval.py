@@ -3,7 +3,7 @@ retrieval.py
 ------------
 Responsabilidade: RECUPERAR os chunks relevantes para o agente.
 
-O agente usa o Groq para decidir quando chamar a tool e para sintetizar a
+O agente usa um modelo compatível com OpenAI para decidir quando chamar a tool e para sintetizar a
 resposta. Este módulo não chama nenhum LLM.
 
 Uso standalone:
@@ -11,9 +11,8 @@ Uso standalone:
 """
 from __future__ import annotations
 
-import json
 import atexit
-from dataclasses import dataclass
+import json
 
 from sejus_project.rag.embedding import Embedder
 from sejus_project.rag.indexing import QdrantIndexer, QdrantIndexerConfig
