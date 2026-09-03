@@ -1,0 +1,1 @@
+Gere uma portaria conjunta entre a SEJUS e a Secretaria de Saude para estabelecer cooperacao na higienizacao das unidades prisionais. Use o RAG e gere o documento DOCX para revisao.

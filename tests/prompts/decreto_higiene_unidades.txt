@@ -1,0 +1,1 @@
+Gere um decreto sobre medidas de higiene e limpeza nas unidades prisionais de Mato Grosso. Use os atos recuperados pelo RAG como fundamento e produza o DOCX preenchido como minuta revisavel.

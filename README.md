@@ -85,7 +85,9 @@ Na CLI, solicite o documento ao agente. O fluxo e:
 
 Para autorizar uma minuta com dados plausiveis, informe explicitamente que o
 agente pode usar o banco e que o documento sera revisado. O arquivo original do
-template nunca e sobrescrito.
+template nunca e sobrescrito. Se ja houver uma minuta pendente, comandos como
+`pode inventar`, `pode gerar` ou `gere o arquivo` finalizam a geracao diretamente
+pela CLI.
 
 Os templates atuais usam marcadores entre colchetes, por exemplo `[XX]`,
 `[ANO]` e `[NOME DO SIGNATARIO]`. A tool preenche texto em paragrafos e tabelas.
@@ -117,3 +119,14 @@ uv run ruff check src app
 
 O `ruff` pode apontar problemas preexistentes em scripts que nao foram
 alterados pela feature de geracao de documentos.
+
+Para executar os testes da geracao de documentos:
+
+```bash
+uv run pytest tests/test_document_generation.py -q
+```
+
+Os cenarios ficam em `tests/prompts/`. Cada prompt e associado a um tipo de
+ato e testa a selecao do template, a consulta ao RAG e a abertura do DOCX
+gerado sem placeholders pendentes. O RAG e simulado nos testes para evitar
+download de modelos e chamadas externas.

@@ -7,17 +7,6 @@ load_dotenv()
 _client = None
 _provider = None
 
-SYSTEM_INSTRUCTIONS = (
-    "Voce e o agente da SEJUS. Responda em portugues. "
-    "Quando o usuario pedir um arquivo DOCX, use a ferramenta "
-    "gerar_documento_normativo. Se a ferramenta retornar campos pendentes, "
-    "pergunte pelos dados. Se o usuario autorizar inventar com base no RAG "
-    "ou disser para gerar o arquivo, faca uma nova chamada da ferramenta "
-    "enviando values com todos os placeholders retornados, usando dados "
-    "plausiveis e marcando claramente que sao uma minuta para revisao. "
-    "Nao responda somente com uma minuta em texto quando o usuario pediu o arquivo."
-)
-
 
 def _get_client():
     global _client, _provider
@@ -54,14 +43,8 @@ def _get_model() -> str:
 
 
 def perguntar(messages, tools):
-    request_messages = messages
-    if not messages or messages[0].get("role") != "system":
-        request_messages = [
-            {"role": "system", "content": SYSTEM_INSTRUCTIONS},
-            *messages,
-        ]
     return _get_client().chat.completions.create(
         model=_get_model(),
-        messages=request_messages,
+        messages=messages,
         tools=tools,
     )

@@ -1,12 +1,16 @@
 import inspect
 import json
 
+from sejus_project.agent.skills.loader import (
+    build_system_message,
+)
 from sejus_project.llm.ia import perguntar
 from sejus_project.tools.document_generation import (
     definition as document_generation_definition,
 )
 from sejus_project.tools.document_generation import (
     gerar_documento_normativo,
+    has_pending_document,
 )
 from sejus_project.tools.more import definition as more_definition
 from sejus_project.tools.more import more_epic
@@ -34,39 +38,56 @@ FUNCTIONS = {
 # Histórico da conversa
 messages = []
 
+SYSTEM_INSTRUCTIONS = (
+    "Voce e o agente da SEJUS. Responda em portugues. "
+    "Quando o usuario pedir um arquivo DOCX, use a ferramenta "
+    "gerar_documento_normativo. Se a ferramenta retornar campos pendentes, "
+    "pergunte pelos dados. Se o usuario autorizar inventar com base no RAG "
+    "ou disser para gerar o arquivo, faca uma nova chamada da ferramenta "
+    "enviando values com todos os placeholders retornados, usando dados "
+    "plausiveis e marcando claramente que sao uma minuta para revisao. "
+    "Nao responda somente com uma minuta em texto quando o usuario pediu o arquivo."
+)
+
+def _messages_for_llm() -> list[dict]:
+    return [build_system_message(SYSTEM_INSTRUCTIONS, messages), *messages]
+
 # --- Configuração da poda de histórico -------------------------------------
-# Estratégia conservadora: NÃO resumimos e NÃO removemos mensagens de
-# user/assistant (onde fica o texto final, com citações de atos etc.).
-# Apenas truncamos o CONTEÚDO BRUTO de resultados de tools antigas, já que
-# esse conteúdo raramente é reutilizado depois de alguns turnos e costuma
-# ser a maior fonte de inflação de tokens (ex: chunks retornados pelo RAG).
+# Estratégia: truncar CONTEÚDO BRUTO de resultados de tools antigas de forma
+# agressiva (raramente reutilizado depois de alguns turnos, e costuma ser a
+# maior fonte de inflação de tokens — ex: chunks retornados pelo RAG) e
+# truncar respostas do assistant de forma mais generosa (o texto final tem
+# citações e resumos úteis, mas ainda assim precisa de um teto — uma única
+# resposta grande, como uma tabela markdown extensa, pode sozinha estourar
+# o limite de tokens por minuto em conversas de vários turnos).
 
 # Quantas mensagens "tool" mais recentes devem ser mantidas por completo.
-# Tool results mais antigos que isso são truncados.
 MANTER_TOOL_RESULTS_COMPLETOS = 4
-
 # Tamanho máximo (em caracteres) de um tool result truncado.
 TRUNCAR_TOOL_RESULT_PARA = 300
+
+# Quantas respostas "assistant" mais recentes devem ser mantidas por completo.
+MANTER_ASSISTANT_COMPLETOS = 3
+# Tamanho máximo (em caracteres) de uma resposta assistant truncada.
+# Bem mais generoso que o de tool — preserva a maior parte do texto final,
+# incluindo normalmente a citação/conclusão, só corta o excesso.
+TRUNCAR_ASSISTANT_PARA = 1500
 
 
 def _podar_tool_results_antigos():
     """Trunca o conteúdo de tool results antigos, preservando os mais recentes.
 
-    Não mexe em mensagens 'user' ou 'assistant' — só em 'tool', que é onde
-    ficam os retornos brutos de funções como consultar_atos_sejus. A resposta
-    final do assistente (que já deve conter a citação relevante em texto)
-    permanece intacta no histórico.
+    Fica com retornos brutos de funções como consultar_atos_sejus — dado bruto,
+    pode ser truncado de forma curta sem grande perda.
     """
 
     indices_tool = [
         i for i, m in enumerate(messages) if m.get("role") == "tool"
     ]
 
-    # Nada a podar se ainda estamos dentro do limite
     if len(indices_tool) <= MANTER_TOOL_RESULTS_COMPLETOS:
         return
 
-    # Todos os índices exceto os N mais recentes serão candidatos à poda
     indices_para_podar = indices_tool[:-MANTER_TOOL_RESULTS_COMPLETOS]
 
     for i in indices_para_podar:
@@ -80,6 +101,41 @@ def _podar_tool_results_antigos():
             messages[i]["content"] = (
                 conteudo[:TRUNCAR_TOOL_RESULT_PARA]
                 + f"... [resultado truncado — {len(conteudo)} caracteres originais]"
+            )
+
+
+def _podar_assistant_antigos():
+    """Trunca respostas antigas do assistant, com limite bem mais generoso
+    que o de tool results.
+
+    Objetivo: evitar que uma única resposta grande (ex. tabela markdown
+    extensa, resumo longo de documento) fique intacta para sempre no
+    histórico e acabe estourando o limite de tokens por minuto em
+    conversas de vários turnos — sem descartar de forma agressiva o
+    conteúdo, que costuma carregar citações relevantes.
+    """
+
+    indices_assistant = [
+        i
+        for i, m in enumerate(messages)
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+    ]
+
+    if len(indices_assistant) <= MANTER_ASSISTANT_COMPLETOS:
+        return
+
+    indices_para_podar = indices_assistant[:-MANTER_ASSISTANT_COMPLETOS]
+
+    for i in indices_para_podar:
+        conteudo = messages[i].get("content", "") or ""
+
+        if (
+            len(conteudo) > TRUNCAR_ASSISTANT_PARA
+            and not conteudo.startswith("[resposta anterior truncada")
+        ):
+            messages[i]["content"] = (
+                conteudo[:TRUNCAR_ASSISTANT_PARA]
+                + f"... [resposta anterior truncada — {len(conteudo)} caracteres originais]"
             )
 
 
@@ -120,14 +176,37 @@ def executar(question):
         "content": question
     })
 
+    # Finaliza diretamente uma minuta pendente quando o usuario autoriza
+    # dados plausiveis ou pede o arquivo, sem depender de nova tool call do LLM.
+    normalized_question = question.casefold()
+    generation_phrases = (
+        "gere o arquivo",
+        "gerar o arquivo",
+        "pode gerar",
+        "pode preencher",
+        "pode inventar",
+        "prossiga",
+    )
+    if has_pending_document() and any(
+        phrase in normalized_question for phrase in generation_phrases
+    ):
+        result = json.loads(gerar_documento_normativo(question))
+        if result.get("status") == "generated":
+            return (
+                "Documento gerado com sucesso. "
+                f"Arquivo: {result['output_path']}\n\n"
+                "A minuta foi preenchida automaticamente e precisa ser revisada."
+            )
+
     # Loop para permitir chamadas de ferramentas
     ultimo_resultado_tool = None
 
     for _ in range(5):
 
         _podar_tool_results_antigos()
+        _podar_assistant_antigos()
 
-        response = perguntar(messages, TOOLS)
+        response = perguntar(_messages_for_llm(), TOOLS)
 
         message = response.choices[0].message
 
