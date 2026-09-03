@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 
 from sejus_project.tools.docx_templates import (
@@ -123,38 +124,92 @@ def _automatic_values(placeholders: list[str], request: str) -> dict[str, str]:
     values = {}
     current_date = datetime.now(UTC).date()
     year = str(current_date.year)
-    subject = request.strip().rstrip(".")
+    subject = _extract_subject(request)
+    months = (
+        "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+    )
+    formatted_date = (
+        f"{current_date.day} de {months[current_date.month - 1]} de {year}"
+    )
     for placeholder in placeholders:
         normalized = placeholder.casefold()
-        if "ano" in normalized:
-            value = year
-        elif normalized in {"[xx]", "[n]"}:
-            value = "001"
-        elif "ementa" in normalized or "objeto" in normalized:
-            value = f"Dispoe sobre {subject}"
-        elif "fundament" in normalized:
-            value = (
-                "Considerando a necessidade administrativa relacionada ao objeto "
-                "deste ato e a legislacao aplicavel"
-            )
+        if "acrescentar" in normalized or normalized == "[...]":
+            value = ""
+        elif "opcional" in normalized or "se houver" in normalized:
+            value = ""
         elif "artigo 1" in normalized:
-            value = f"Fica estabelecida a medida referente a {subject}."
-        elif "artigo 2" in normalized:
-            value = "A unidade competente adotara as providencias necessarias."
+            value = f"Fica estabelecida a medida referente à {subject}"
+        elif "artigo" in normalized:
+            value = "A unidade competente adotará as providências necessárias"
+        elif "ementa" in normalized:
+            value = f"Dispõe sobre {subject}"
+        elif "objeto" in normalized:
+            value = f"Fica estabelecida a medida referente à {subject}"
+        elif normalized == "[n]":
+            value = "3º"
+        elif normalized == "[n-1]":
+            value = "2º"
+        elif normalized in {"[xx]", "[xxxx]"}:
+            value = "001"
+        elif "ano" in normalized:
+            value = year
+        elif normalized == "[xxx]":
+            value = "202"
+        elif "fundamentação 1" in normalized or "fundamentacao 1" in normalized:
+            value = (
+                "a necessidade administrativa relacionada ao objeto deste ato e "
+                "à legislação aplicável"
+            )
+        elif "fundament" in normalized:
+            value = ""
         elif "signat" in normalized or "nome" in normalized:
-            value = "A DEFINIR"
+            value = "Nome do signatário a confirmar"
         elif "cargo" in normalized:
-            value = "Secretario de Estado de Justica"
+            value = "Secretário de Estado de Justiça"
         elif "revog" in normalized:
-            value = "Mantem-se a regulamentacao vigente"
-        elif "acrescentar" in normalized or normalized == "[...]":
-            value = "Demais disposicoes serao definidas na revisao da minuta."
+            value = "Não há revogação expressa"
         elif "data" in normalized or "dia" in normalized or "mes" in normalized:
-            value = current_date.strftime("%d de %B de %Y")
+            value = formatted_date
         else:
-            value = "A DEFINIR"
+            value = "Informação a confirmar"
         values[placeholder] = value
     return values
+
+
+def _extract_subject(request: str) -> str:
+    """Retira comandos do usuario para formar uma ementa gramatical."""
+    subject = re.sub(r"[.!?]+$", "", request.strip())
+    subject = re.sub(
+        r"^(?:gere|gerar|crie|criar|elabore|elaborar|produza|produzir)\s+",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    subject = re.sub(
+        r"^(?:uma|um)\s+(?:portaria(?:\s+conjunta)?|decreto|instru[cç][aã]o\s+normativa|retifica[cç][aã]o(?:\s+de\s+portaria)?)\s+",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    subject = re.sub(r"^(?:sobre|a respeito de|referente a)\s+", "", subject, flags=re.IGNORECASE)
+    subject = subject[:1].lower() + subject[1:] if subject else "a matéria indicada no pedido"
+    corrections = {
+        "higienizacao": "higienização",
+        "higienização": "higienização",
+        "limpeza": "limpeza",
+        "publica": "pública",
+        "publica de": "pública de",
+        "cuiaba": "Cuiabá",
+        "justica": "justiça",
+        "saude": "saúde",
+        "fiscalizacao": "fiscalização",
+        "instrucao": "instrução",
+        "retificacao": "retificação",
+    }
+    for source, corrected in corrections.items():
+        subject = re.sub(rf"\b{source}\b", corrected, subject, flags=re.IGNORECASE)
+    return subject
 
 
 def gerar_documento_normativo(

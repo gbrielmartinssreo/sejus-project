@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from docx import Document
@@ -49,6 +50,12 @@ def _paragraphs(document):
         for row in table.rows:
             for cell in row.cells:
                 yield from cell.paragraphs
+
+
+def _remove_empty_considerandos(document) -> None:
+    for paragraph in _paragraphs(document):
+        if re.fullmatch(r"CONSIDERANDO\s*[;,]?", paragraph.text.strip(), re.IGNORECASE):
+            paragraph._element.getparent().remove(paragraph._element)
 
 
 def _placeholder_tokens(document) -> list[str]:
@@ -139,6 +146,7 @@ def fill_template(template_name: str, values: dict[str, str]) -> dict:
         _replace_in_paragraph(paragraph, values)
         for paragraph in _paragraphs(document)
     )
+    _remove_empty_considerandos(document)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUTS_DIR / f"{path.stem}_{uuid4().hex[:8]}.docx"
     document.save(str(output_path))

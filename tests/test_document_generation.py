@@ -120,6 +120,27 @@ def test_authorization_generates_pending_document(
     assert result["remaining_placeholders"] == []
 
 
+def test_automatic_draft_uses_formal_text_without_request_command(
+    fake_retrieval, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(docx_templates, "OUTPUTS_DIR", tmp_path)
+    generation._pending_document = None
+    request = "Gere uma instrucao normativa sobre rotina de limpeza nas unidades."
+
+    json.loads(generation.gerar_documento_normativo(request))
+    result = json.loads(
+        generation.gerar_documento_normativo("pode inventar consultando o banco")
+    )
+    document = Document(result["output_path"])
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+    assert "Dispõe sobre rotina de limpeza nas unidades." in text
+    assert "Dispõe sobre Gere uma" not in text
+    assert "CONSIDERANDO Considerando" not in text
+    assert "Art. 3º A DEFINIR" not in text
+    assert "Secretário de Estado de Justiça" in text
+
+
 def test_docx_placeholder_can_cross_runs(tmp_path):
     document = Document()
     paragraph = document.add_paragraph()
