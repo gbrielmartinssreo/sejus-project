@@ -120,6 +120,24 @@ def test_authorization_generates_pending_document(
     assert result["remaining_placeholders"] == []
 
 
+def test_short_confirmation_generates_pending_document(
+    fake_retrieval, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(docx_templates, "OUTPUTS_DIR", tmp_path)
+    generation._pending_document = None
+    request = "Gere uma porta ria sobre limpeza da cadeia em Cuiaba."
+
+    first = json.loads(generation.gerar_documento_normativo(request))
+    assert first["status"] == "awaiting_confirmation"
+
+    result = json.loads(generation.gerar_documento_normativo("sim"))
+
+    assert result["status"] == "generated"
+    assert result["review_required"] is True
+    assert Path(result["output_path"]).is_file()
+    assert result["remaining_placeholders"] == []
+
+
 def test_automatic_draft_uses_formal_text_without_request_command(
     fake_retrieval, monkeypatch, tmp_path
 ):

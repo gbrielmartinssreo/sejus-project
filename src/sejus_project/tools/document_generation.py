@@ -107,7 +107,7 @@ def has_pending_document() -> bool:
 
 
 def _is_generation_confirmation(request: str) -> bool:
-    normalized = request.casefold()
+    normalized = request.casefold().strip()
     phrases = (
         "gere o arquivo",
         "gerar o arquivo",
@@ -115,8 +115,22 @@ def _is_generation_confirmation(request: str) -> bool:
         "pode preencher",
         "pode inventar",
         "prossiga",
+        "sim",
+        "ok",
+        "okay",
+        "concordo",
+        "confirmo",
+        "confirma",
+        "continua",
+        "prossegue",
+        "pode seguir",
     )
-    return any(phrase in normalized for phrase in phrases)
+    return any(
+        normalized == phrase or normalized.startswith(f"{phrase} ")
+        or normalized.endswith(f" {phrase}")
+        or f" {phrase} " in f" {normalized} "
+        for phrase in phrases
+    )
 
 
 def _automatic_values(placeholders: list[str], request: str) -> dict[str, str]:

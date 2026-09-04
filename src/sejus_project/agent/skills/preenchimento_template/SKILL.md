@@ -20,6 +20,51 @@ Os templates atuais usam marcadores entre colchetes, como `[XX]`, `[ANO]`,
 `[NOME DO SIGNATÁRIO]` e `[TEXTO DO ARTIGO 1º ...]`. Não substitua esses
 marcadores por nomes inventados como `{numero}` sem antes verificar o DOCX.
 
+## Regra anti-loop (leia antes de tudo)
+
+O erro mais comum desta skill é ficar perguntando a mesma coisa em vários
+turnos, sem avançar. Para evitar isso:
+
+1. **Mantenha um estado acumulado de `values` durante toda a conversa.**
+   Toda resposta que o usuário já deu (em qualquer turno anterior) conta como
+   preenchida. Nunca volte a perguntar um campo que já foi respondido, mesmo
+   que a resposta tenha vindo junto com outra coisa ou em uma mensagem curta.
+2. **Peça os dados pendentes reais uma única vez, em uma lista consolidada.**
+   Não faça rodadas sucessivas de "ainda faltam alguns dados" indo campo por
+   campo. Se após a inspeção do template restarem N marcadores sem valor,
+   pergunte os N de uma vez.
+3. **No máximo uma rodada de perguntas.** Depois que o usuário responder
+   (mesmo que parcialmente) a essa lista consolidada, não pergunte de novo.
+   Para qualquer marcador que ainda faltar, siga para "Preenchimento
+   automático" abaixo em vez de abrir uma nova rodada.
+4. **Frases de autorização finalizam a minuta imediatamente.** Trate como
+   autorização para preencher o restante com RAG/dados plausíveis e gerar o
+   arquivo já nesse turno — sem novas perguntas — qualquer variação de:
+   "o resto pega da base de dados", "pode inventar", "pode gerar", "gera o
+   arquivo", "manda ver", "da seu pulo" / "dá seu pulo", "segue com o que
+   tiver" ou equivalentes. Não interprete essas frases como pedido de mais
+   detalhes.
+
+## Marcadores reais vs. instruções estruturais do template
+
+Nem todo texto entre colchetes é um campo a ser respondido pelo usuário.
+Antes de listar pendências, classifique cada marcador:
+
+- **Campo de dado real** (precisa de valor específico): `[XX]`, `[ANO]`,
+  `[NOME DO SIGNATÁRIO]`, `[CARGO]`, `[EMENTA]`, `[TEXTO DO ARTIGO 1º —
+  OBJETO PRINCIPAL]`, etc.
+- **Instrução estrutural/opcional do template** (não é um campo, é uma nota
+  de como redigir): coisas como `[... ACRESCENTAR DEMAIS ARTIGOS,
+  PARÁGRAFOS E INCISOS CONFORME NECESSÁRIO ...]` ou `[OU: revogando-se a
+  Portaria n.º [XX]/[ANO]/GAB-SEJUS/MT]`.
+  - Essas instruções **nunca bloqueiam a geração**. Se o usuário não disse
+    nada sobre artigos adicionais ou revogação, **não pergunte** — omita a
+    seção opcional ou gere sem revogação, e sinalize isso no checklist final
+    como algo a revisar, não como pendência que impede o documento.
+
+Só entram na lista consolidada de pendências os campos de dado real que a
+tool `gerar_documento_normativo` retornar como marcador sem valor.
+
 ## Fluxo
 
 1. **Identifique o tipo do ato** no pedido e selecione o template correspondente.
@@ -36,40 +81,56 @@ marcadores por nomes inventados como `{numero}` sem antes verificar o DOCX.
    o template escolhido e o contexto recuperado. Não presuma campos com base
    em outro tipo de ato.
 
-3. **Classifique cada campo**:
+3. **Classifique cada campo** (ver seção acima):
    - **Do pedido:** objeto, ementa, artigos e finalidade.
    - **Do RAG:** fundamentos, leis, decretos e padrões de atos semelhantes.
    - **Do usuário:** valores monetários, nomes, matrículas, números oficiais
      e datas específicas quando não estiverem comprovados.
+   - **Estrutural/opcional:** ver seção "Marcadores reais vs. instruções
+     estruturais" — não gera pendência.
    Nunca trate um trecho recuperado como autorização para afirmar um dado
    específico que não esteja no ato consultado.
 
 4. **Consulte o RAG** com `consultar_atos_sejus` ou pela própria tool de
    geração para encontrar atos relacionados e fundamentos. O RAG é fonte de
-   apoio e não deve ser usado para fabricar numeração, nomes ou valores.
+   apoio e não deve ser usado para fabricar numeração, nomes ou valores, mas
+   pode ser usado livremente para redigir fundamentação, considerandos e
+   linguagem padrão quando o usuário autorizar a minuta (ver regra anti-loop).
 
 5. **Preencha usando a tool oficial.** Envie `values` como um objeto cujas
    chaves sejam exatamente os marcadores retornados pela inspeção, por exemplo:
-   `{"[XX]": "001", "[ANO]": "2026"}`. Não edite o XML do DOCX manualmente
-   e não escreva o arquivo por fora de `gerar_documento_normativo`.
+   `{"[XX]": "001", "[ANO]": "2026"}`. Inclua nesse objeto TODOS os valores já
+   coletados em turnos anteriores, não só os do último turno. Não edite o
+   XML do DOCX manualmente e não escreva o arquivo por fora de
+   `gerar_documento_normativo`.
 
-6. **Confirmação antes da geração:**
-   - Se faltarem dados relevantes, retorne os campos pendentes e pergunte.
-   - Se o usuário confirmar dados específicos, envie-os em `values`.
-   - Se o usuário autorizar uma minuta com dados plausíveis, pode usar os
-     valores automáticos da tool, mas informe que o documento é uma minuta e
-     exige revisão jurídica.
-   - Um pedido como `pode inventar consultando o banco`, `pode gerar` ou
-     `gere o arquivo` finaliza uma minuta pendente na CLI.
+6. **Confirmação antes da geração — apenas uma rodada:**
+   - Se faltarem campos de dado real após a inspeção, liste todos de uma vez
+     e pergunte.
+   - Assim que o usuário responder (total ou parcialmente) ou usar uma frase
+     de autorização, siga para o passo 7. Não abra uma segunda rodada de
+     perguntas pelos mesmos campos ou por instruções estruturais opcionais.
 
-7. **Valide o retorno da tool:** o sucesso deve ter `status: generated`,
+7. **Preenchimento automático dos campos restantes.** Para qualquer campo de
+   dado real que continue sem valor depois da única rodada de perguntas (ou
+   quando o usuário autorizar a minuta explicitamente):
+   - Use o valor mais plausível sustentado pelo RAG quando existir base.
+   - Caso não haja base no RAG, use um placeholder plausível e sinalize
+     claramente no rodapé da resposta ao usuário (não silenciosamente) quais
+     campos foram preenchidos automaticamente e exigem revisão.
+   - Gere o documento nesse mesmo turno. Não devolva uma nova lista de
+     pendências para o usuário confirmar de novo.
+
+8. **Valide o retorno da tool:** o sucesso deve ter `status: generated`,
    `output_path` apontando para `outputs/` e `remaining_placeholders` vazio.
    Se o status for `awaiting_confirmation`, não diga que o arquivo foi criado.
    Se for `error`, mostre o problema e peça a correção necessária.
 
-8. **Faça o checklist final:** confirme que o tipo do ato corresponde ao
+9. **Faça o checklist final:** confirme que o tipo do ato corresponde ao
    template, a ementa corresponde ao objeto, a vigência está presente, a
    assinatura tem cargo compatível e a minuta está marcada para revisão.
+   Liste também, em uma linha, quais campos foram preenchidos automaticamente
+   (RAG ou plausíveis) para facilitar a revisão jurídica.
 
 ## Regra de ouro
 Não confunda uma minuta autorizada com um ato oficial. Nunca apresente como

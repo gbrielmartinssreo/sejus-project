@@ -186,6 +186,15 @@ def executar(question):
         "pode preencher",
         "pode inventar",
         "prossiga",
+        "sim",
+        "ok",
+        "okay",
+        "concordo",
+        "confirmo",
+        "confirma",
+        "continua",
+        "prossegue",
+        "pode seguir",
     )
     if has_pending_document() and any(
         phrase in normalized_question for phrase in generation_phrases
