@@ -31,9 +31,14 @@ body {
 .topo {
   padding: 14px 4px 10px;
   border-bottom: 1px solid var(--borda);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 .topo-titulo { margin: 0; font-size: 1.25rem; color: var(--acento); }
 .topo-sub { color: var(--texto-suave); font-size: 0.85rem; }
+.topo-limpar { margin-left: auto; }
 
 .mensagens {
   flex: 1;
@@ -103,22 +108,62 @@ body {
 /* ---------- Documento (minuta renderizada) ---------- */
 .minuta-documento {
   margin-top: 12px;
-  padding: 28px 34px;
-  background: #fffdf8;
-  border: 1px solid #d8d2c0;
-  border-radius: 4px;
+  padding: 30px 36px;
+  background: #fff;
+  border: 1px solid #c9c9c9;
   font-family: "Times New Roman", Georgia, serif;
-  font-size: 12pt;
-  line-height: 1.55;
+  font-size: 10.5pt;
+  line-height: 1.5;
   text-align: justify;
   color: #111;
 }
+
+/* Cabeçalho institucional (Diário Oficial + faixa SEJUS) */
+.minuta-cabecalho {
+  margin-bottom: 14px;
+}
+.minuta-cabecalho-linha {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 2px solid #111;
+  padding-bottom: 4px;
+  font-size: 9pt;
+}
+.minuta-cabecalho-esq { font-size: 7.5pt; }
+.minuta-cabecalho-meio {
+  font-size: 20pt;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #004080;
+}
+.minuta-cabecalho-dir { font-size: 7.5pt; text-align: right; }
+.minuta-cabecalho-faixa {
+  margin: 6px 0 12px;
+  background: #1d3f8f;
+  color: #fff;
+  text-align: center;
+  padding: 4px 0;
+  font-weight: 700;
+  font-size: 9pt;
+  letter-spacing: 0.06em;
+}
+
 .minuta-numero {
   text-align: center;
-  font-size: 13pt;
-  margin: 0 0 12px;
+  font-size: 11pt;
+  margin: 10px 0 8px;
   text-transform: uppercase;
   letter-spacing: 0.02em;
+}
+.minuta-rodape {
+  margin-top: 18px;
+  border-top: 1px solid #111;
+  padding-top: 6px;
+  font-size: 6pt;
+  text-align: center;
+  color: #333;
 }
 .minuta-ementa {
   font-style: italic;
@@ -246,10 +291,33 @@ body {
   z-index: 30;
 }
 
-/* ---------- Impressao ---------- */
+/* ---------- Impressao (A4, moldura de pagina) ---------- */
+@page {
+  size: A4;
+  margin: 0;
+}
 @media print {
-  body { height: auto; }
+  html, body {
+    width: 210mm;
+    height: auto;
+    margin: 0 auto;
+    padding: 0;
+    background: #fff;
+  }
   body * { visibility: hidden; }
   #impressao, #impressao * { visibility: visible; }
-  #impressao { position: absolute; inset: 0; }
+  #impressao {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 210mm;
+    min-height: 297mm;
+    padding: 8mm;
+  }
+  #impressao .minuta-pagina {
+    border: 1.2px solid #111;
+    padding: 10mm 12mm;
+    min-height: 279mm;
+    box-sizing: border-box;
+  }
 }

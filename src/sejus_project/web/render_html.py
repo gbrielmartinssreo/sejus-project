@@ -1,8 +1,10 @@
 """Renderiza a estrutura JSON de uma minuta em HTML (e texto puro).
 
 O LLM devolve a minuta estruturada (ver sejus_project.tools.minuta) e este
-modulo transforma essa estrutura em um documento formatado via CSS. Toda
-string vinda do LLM e escapada antes de entrar no HTML.
+modulo transforma essa estrutura em um documento formatado no estilo oficial
+da SEJUS/MT: cabecalho institucional do Diario Oficial, faixa azul da pasta,
+moldura de pagina e rodape de imprensa. Toda string vinda do LLM e escapada
+antes de entrar no HTML.
 """
 from __future__ import annotations
 
@@ -48,8 +50,33 @@ def minuta_para_texto(estructura: dict) -> str:
     return "\n".join(linhas)
 
 
-def minuta_para_html(estructura: dict) -> str:
-    """Converte a estrutura em um documento HTML oficial (escapes aplicados)."""
+def _cabecalho() -> str:
+    """Cabeçalho institucional (Diário Oficial + faixa SEJUS)."""
+    return (
+        "<div class='minuta-cabecalho'>"
+        "<div class='minuta-cabecalho-linha'>"
+        "<span class='minuta-cabecalho-esq'>Diário Oficial de Mato Grosso</span>"
+        "<span class='minuta-cabecalho-meio'>&#9633;&nbsp;Diário&nbsp;Oficial</span>"
+        "<span class='minuta-cabecalho-dir'>Edição</span>"
+        "</div>"
+        "<div class='minuta-cabecalho-faixa'>"
+        "<span class='minuta-cabecalho-sejus'>SECRETARIA DE ESTADO DE JUSTIÇA</span>"
+        "</div>"
+        "</div>"
+    )
+
+
+def _rodape() -> str:
+    """Rodapé de imprensa (linha final do Diário)."""
+    return (
+        "<div class='minuta-rodape'>"
+        "GOVERNO DO ESTADO DE MATO GROSSO &middot; Secretaria de Estado de "
+        "Planejamento e Gest&atilde;o - SEPLAG - Imprensa Oficial - IOMAT"
+        "</div>"
+    )
+
+
+def _corpo_html(estructura: dict) -> list[str]:
     partes: list[str] = []
     p = partes.append
 
@@ -104,4 +131,16 @@ def minuta_para_html(estructura: dict) -> str:
             blocos.append('<div class="minuta-assinatura">' + " ".join(linha) + "</div>")
         p('<div class="minuta-assinaturas">' + "".join(blocos) + "</div>")
 
-    return '<div class="minuta-documento">' + "".join(partes) + "</div>"
+    return partes
+
+
+def minuta_para_html(estructura: dict) -> str:
+    """Converte a estrutura em um documento HTML no estilo oficial SEJUS."""
+    corpo = "".join(_corpo_html(estructura))
+    return (
+        '<div class="minuta-documento">'
+        + _cabecalho()
+        + corpo
+        + _rodape()
+        + "</div>"
+    )

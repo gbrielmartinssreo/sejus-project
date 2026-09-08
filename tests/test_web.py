@@ -131,3 +131,50 @@ def test_upload_rejeita_formato_invalido(monkeypatch, tmp_path):
     )
 
     assert resp.status_code == 400
+
+
+def test_chat_mensagem_vazia():
+    client = TestClient(app)
+    resp = client.post("/api/chat", json={"message": "   "})
+
+    assert resp.status_code == 400
+    dados = resp.json()
+    assert "reply" in dados
+
+
+def test_chat_mensagem_muito_longa():
+    from sejus_project.web import server
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/chat", json={"message": "a" * (server.MAX_MESSAGE_CHARS + 1)}
+    )
+
+    assert resp.status_code == 400
+    assert "longa" in resp.json()["reply"]
+
+
+def test_chat_excecao_nao_vaza_html(monkeypatch):
+    def estourar(_msg):
+        raise RuntimeError("Qdrant fora do ar")
+
+    monkeypatch.setattr(agent, "executar", estourar)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/api/chat", json={"message": "gere uma portaria"})
+
+    assert resp.status_code == 500
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "<html" not in resp.text
+    dados = resp.json()
+    assert "detail" in dados
+    assert "Qdrant fora do ar" in dados["error"]
+
+
+def test_limpar_conversa_reseta_estado(monkeypatch):
+    monkeypatch.setattr(agent, "limpar_conversa", lambda: None)
+    client = TestClient(app)
+    resp = client.post("/api/conversa/limpar")
+
+    assert resp.status_code == 200
+    assert resp.json()["detail"] == "Conversa limpa."

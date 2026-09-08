@@ -116,6 +116,7 @@ var $overlayCampos = document.getElementById("overlay-campos");
 var $formCampos = document.getElementById("form-campos");
 var $camposLista = document.getElementById("campos-lista");
 var $toast = document.getElementById("toast");
+var $limpar = document.getElementById("limpar");
 
 var DICIONARIO_CAMPOS = {
   numero_ato: "Número do ato",
@@ -192,7 +193,10 @@ function anexarMinuta(bubble, minutaHtml, minutaTexto) {
 function imprimirMinuta(zona) {
   var impressao = document.createElement("div");
   impressao.id = "impressao";
-  impressao.innerHTML = zona.querySelector(".minuta-documento").outerHTML;
+  var pagina = document.createElement("div");
+  pagina.className = "minuta-pagina";
+  pagina.innerHTML = zona.querySelector(".minuta-documento").outerHTML;
+  impressao.appendChild(pagina);
   document.body.appendChild(impressao);
   window.print();
   document.body.removeChild(impressao);
@@ -251,8 +255,24 @@ async function enviar(texto) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: texto }),
     });
-    var dados = await resposta.json();
+
+    var dados;
+    try {
+      dados = await resposta.json();
+    } catch (e) {
+      throw new Error(
+        resposta.ok
+          ? "O servidor nao devolveu JSON valido."
+          : "Servidor indisponivel (HTTP " + resposta.status + ")."
+      );
+    }
+
     pensando.remove();
+
+    if (!resposta.ok) {
+      criarBubble("agente", dados.reply || dados.detail || "Erro ao processar o pedido.");
+      return;
+    }
 
     var bubble = criarBubble("agente", dados.reply || "Sem resposta.");
 
@@ -269,6 +289,18 @@ async function enviar(texto) {
     $entrada.disabled = false;
     $entrada.focus();
   }
+}
+
+function limparConversa() {
+  if (aguardando) return;
+  fetch("/api/conversa/limpar", { method: "POST" })
+    .catch(function () { return null; })
+    .then(function () {
+      $mensagens.innerHTML = "";
+      criarBubble("agente",
+        "Conversa reiniciada. Posso **gerar minutas** ou consultar o acervo " +
+        "normativo da SEJUS. Ex.: *Gere uma portaria sobre limpeza das unidades*.");
+    });
 }
 
 /* ---------------------------------------------------------------- */
@@ -318,6 +350,7 @@ $formCampos.addEventListener("submit", function (evento) {
 });
 
 document.getElementById("cancelar-campos").addEventListener("click", fecharOverlayCampos);
+$limpar.addEventListener("click", limparConversa);
 
 criarBubble("agente",
   "Olá! Sou o agente da SEJUS. Posso responder sobre os atos normativos " +

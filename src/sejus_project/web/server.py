@@ -3,7 +3,9 @@
 Endpoint principal: ``POST /api/chat`` chama ``agent.executar`` e devolve a
 resposta em markdown junto com a ultima minuta gerada (renderizada em HTML),
 quando houver. O upload de arquivos alimenta a pasta ``importacoes_usuario/``
-usada pela tool ``analisar_arquivo_usuario``.
+usada pela tool ``analisar_arquivo_usuario``. Qualquer exceção não tratada
+vira uma ``JSONResponse`` (nunca um 500 em HTML) para a interface conseguir
+interpretar o erro.
 
 Rodar local:
     uv run uvicorn sejus_project.web.server:app --reload
@@ -12,8 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -25,6 +27,9 @@ from sejus_project.web.render_html import minuta_para_html, minuta_para_texto
 STATIC_DIR = Path(__file__).parent / "static"
 IMPORTACOES_DIR = Path(__file__).resolve().parents[3] / "importacoes_usuario"
 
+# Teto para a mensagem vinda do navegador antes de chegar às tools.
+MAX_MESSAGE_CHARS = 80_000
+
 app = FastAPI(title="SEJUS Chat", docs_url="/docs", redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -33,16 +38,24 @@ class ChatMessage(BaseModel):
     message: str
 
 
+@app.exception_handler(Exception)
+async def _erro_interno(_request: Request, exc: Exception) -> JSONResponse:
+    """Garante resposta JSON para qualquer erro inesperado (nunca HTML 500)."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Erro interno no servidor.",
+            "error": str(exc),
+        },
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
 
-@app.post("/api/chat")
-def chat(payload: ChatMessage) -> dict:
-    """Executa a mensagem no agente e devolve resposta + minuta renderizada."""
-    reply = agent.executar(payload.message)
-
+def _resposta_chat(reply: str) -> dict:
     minuta_html = None
     minuta_texto = None
     ultima = generation.ultima_minuta()
@@ -57,6 +70,38 @@ def chat(payload: ChatMessage) -> dict:
         "pendente": generation.has_pending_document(),
         "campos": generation.CAMPOS_BASE,
     }
+
+
+@app.post("/api/chat")
+def chat(payload: ChatMessage) -> dict:
+    """Executa a mensagem no agente e devolve resposta + minuta renderizada."""
+    if not payload.message or not payload.message.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Mensagem vazia.", "reply": "Envie uma mensagem."},
+        )
+
+    if len(payload.message) > MAX_MESSAGE_CHARS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": (
+                    f"Mensagem muito longa (máximo de {MAX_MESSAGE_CHARS} "
+                    "caracteres)."
+                ),
+                "reply": "A mensagem é muito longa. Tente resumir o pedido.",
+            },
+        )
+
+    reply = agent.executar(payload.message)
+    return _resposta_chat(reply)
+
+
+@app.post("/api/conversa/limpar")
+def limpar_conversa() -> dict:
+    """Reseta o histórico da conversa e o estado de geração."""
+    agent.limpar_conversa()
+    return {"detail": "Conversa limpa."}
 
 
 @app.post("/api/upload")

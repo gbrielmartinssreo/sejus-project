@@ -11,6 +11,7 @@ from sejus_project.tools.document_generation import (
 from sejus_project.tools.document_generation import (
     gerar_documento_normativo,
     has_pending_document,
+    limpar_estado,
 )
 from sejus_project.tools.more import definition as more_definition
 from sejus_project.tools.more import more_epic
@@ -142,25 +143,38 @@ def _podar_assistant_antigos():
 
 
 def _executar_tool(tool_call):
-    """Executa uma ferramenta baseada no tool_call."""
+    """Executa uma ferramenta baseada no tool_call, sem nunca estourar exceções.
+    Qualquer falha interna vira um resultado de tool com ``status: error`` para
+    que o LLM consiga explicar o problema em texto — e a interface nunca receba
+    um 500 com HTML."""
 
     function_name = tool_call.function.name
-
-    arguments = json.loads(
-        tool_call.function.arguments or "{}"
-    )
 
     function = FUNCTIONS.get(function_name)
 
     if not function:
         return f"Ferramenta desconhecida: {function_name}"
 
-    signature = inspect.signature(function)
+    try:
+        arguments = json.loads(
+            tool_call.function.arguments or "{}"
+        )
 
-    if not signature.parameters:
-        result = function()
-    else:
-        result = function(**arguments)
+        signature = inspect.signature(function)
+
+        if not signature.parameters:
+            result = function()
+        else:
+            result = function(**arguments)
+    except Exception as error:  # noqa: BLE001 - erro vira tool result
+        return json.dumps(
+            {
+                "status": "error",
+                "error": f"A ferramenta {function_name} falhou.",
+                "detail": str(error),
+            },
+            ensure_ascii=False,
+        )
 
     return (
         result
@@ -217,7 +231,14 @@ def executar(question):
         _podar_tool_results_antigos()
         _podar_assistant_antigos()
 
-        response = perguntar(_messages_for_llm(), TOOLS)
+        try:
+            response = perguntar(_messages_for_llm(), TOOLS)
+        except Exception as error:  # noqa: BLE001 - LLM/API indisponivel
+            mensagem_erro = (
+                f"Não foi possível consultar o modelo de linguagem: {error}"
+            )
+            messages.append({"role": "assistant", "content": mensagem_erro})
+            return mensagem_erro
 
         message = response.choices[0].message
 
@@ -254,3 +275,9 @@ def executar(question):
             f"Último estado retornado: {ultimo_resultado_tool}"
         )
     return "Não foi possível concluir a consulta."
+
+
+def limpar_conversa():
+    """Apaga o histórico da conversa e o estado de geração pendente."""
+    messages.clear()
+    limpar_estado()

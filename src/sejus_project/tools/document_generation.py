@@ -10,8 +10,18 @@ from sejus_project.tools.retrieval import retrieve
 _pending_document: dict | None = None
 _ultima_minuta: dict | None = None
 
+# Teto de tamanho do pedido para nao estourar contexto indefinidamente.
+MAX_REQUEST_CHARS = 40_000
+
 # Campos que o usuario pode informar antes da geracao.
 CAMPOS_BASE = ["numero_ato", "data_ato", "local", "signatario", "cargo", "ementa"]
+
+
+def limpar_estado():
+    """Reseta o estado interno (usado pelo botao 'Limpar conversa')."""
+    global _pending_document, _ultima_minuta
+    _pending_document = None
+    _ultima_minuta = None
 
 
 def _context_for_request(request: str, perfil: modelos.PerfilModelo) -> list[dict]:
@@ -167,6 +177,18 @@ def gerar_documento_normativo(
     """Seleciona o modelo, recupera contexto e gera/encaminha a minuta."""
     global _pending_document
 
+    if len(request or "") > MAX_REQUEST_CHARS:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": (
+                    f"O pedido é muito grande "
+                    f"(máximo de {MAX_REQUEST_CHARS} caracteres)."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
     try:
         if not values and _pending_document and _is_generation_confirmation(request):
             pendente = _pending_document
@@ -213,4 +235,13 @@ def gerar_documento_normativo(
     except (ValueError, OSError) as error:
         return json.dumps(
             {"status": "error", "error": str(error)}, ensure_ascii=False
+        )
+    except Exception as error:  # noqa: BLE001 - falha vira resultado de tool
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "Falha ao gerar o documento normativo.",
+                "detail": str(error),
+            },
+            ensure_ascii=False,
         )
