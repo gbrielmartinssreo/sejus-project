@@ -29,9 +29,32 @@ OPENAI_MODEL=gpt-4o-mini
 como fallback temporario quando `OPENAI_API_KEY` nao estiver configurada. Nunca
 versione ou compartilhe o arquivo `.env`.
 
-## Executar o agente
+## Interface web (chat localhost)
 
-Inicie a CLI interativa com:
+O chat no navegador e o jeito principal de usar o agente. Inicie o servidor:
+
+```bash
+uv run uvicorn sejus_project.web.server:app --reload
+```
+
+Abra `http://localhost:8000`.
+
+- `POST /api/chat` — envia a mensagem e devolve a resposta (markdown), a
+  estrutura da ultima minuta gerada e o estado de confirmacao de campos.
+- `POST /api/upload` — salva um arquivo (`.txt`, `.md`, `.pdf`, `.docx`) em
+  `importacoes_usuario/` para a tool `analisar_arquivo_usuario`.
+- No chat, peca uma minuta; o agente pergunta se voce quer informar os campos
+  (numero, data, signatario, cargo, ementa) ou se prefere que ela seja
+  preenchida automaticamente com dados plausiveis para revisao.
+- A minuta gerada e renderizada como documento formatado na propria pagina
+  (CSS com impressao A4), com botoes de copiar texto e imprimir/exportar PDF
+  via `window.print()` — sem depender da formatacao de um arquivo DOCX/PDF.
+
+O texto da minuta e escrito pelo modelo de linguagem a partir do pedido e do
+contexto recuperado no RAG; o numero de artigos varia conforme a complexidade
+do tema. Sempre que a minuta for preenchida automaticamente, ela exige revisao.
+
+## Executar na CLI (opcional)
 
 ```bash
 uv run app/main.py
@@ -67,63 +90,25 @@ uv run app/fill_database.py
 O segundo comando apaga e recria a colecao `sejus_atos` em `qdrant_data/`.
 Execute-o novamente somente quando quiser atualizar o indice.
 
-## Interface web (chat localhost)
+## Gerar documentos DOCX (legado)
 
-O chat no navegador e o jeito principal de usar o agente. A minuta gerada e
-renderizada como documento formatado na propria pagina (sem depender da
-formatacao de um arquivo DOCX/PDF).
+A geracao de `.docx` em `outputs/` e um artefato secundario mantido pela tool
+`gerar_documento_normativo`; hoje o principal meio de entrega e a minuta
+renderizada na interface web.
 
-```bash
-uv run uvicorn sejus_project.web.server:app --reload
-```
+Como funciona: o tipo de ato e detectado no pedido e um modelo DOCX real da
+SEJUS e escolhido automaticamente como base de formatacao. O agente pergunta se
+voce quer informar os campos ou preencher automaticamente; apos a confirmacao,
+o LLM redige a estrutura (ementa, considerandos, preambulo, articulacao com
+incisos e paragrafos, fechamento) e o arquivo e gerado em `outputs/`.
 
-Abra `http://localhost:8000`.
+Premissas:
 
-- `POST /api/chat` — envia a mensagem e devolve a resposta (markdown), a
-  estrutura da ultima minuta gerada e o estado de confirmacao de campos.
-- `POST /api/upload` — salva um arquivo (`.txt`, `.md`, `.pdf`, `.docx`) em
-  `importacoes_usuario/` para a tool `analisar_arquivo_usuario`.
-- No chat, peca uma minuta; o agente pergunta se voce quer informar os campos
-  ou preencher automaticamente. A minuta aparece renderizada, com botoes de
-  copiar texto e imprimir/exportar PDF (via impressao do navegador).
-
-A CLI continua funcionando para uso local:
-
-```bash
-uv run app/main.py
-```
-
-## Gerar documentos DOCX
-
-A geracao usa modelos DOCX reais da SEJUS como base de formatacao:
-
-- `docs/templates-plus/` — modelos de referencia
-- `docs/templates/arruma-manualmente/` — atos reais capturados do Diario Oficial
-- `docs/templates/Template_Decreto.docx` — esqueleto de formatacao para Decreto
-
-Na CLI, solicite o documento ao agente. O fluxo e:
-
-1. O tipo de ato e detectado no pedido e o modelo correspondente e escolhido
-   automaticamente (instrucao normativa, portaria conjunta, retificacao,
-   decreto ou portaria).
-2. O RAG recupera atos relacionados ao pedido.
-3. O agente pergunta se voce quer informar os campos (numero, data,
-   signatario, cargo, ementa) ou se prefere que a minuta seja preenchida
-   automaticamente com dados plausiveis para revisao.
-4. Apos a confirmacao, o LLM redige a estrutura da minuta (ementa,
-   considerandos, preambulo, articulacao com incisos e paragrafos, fechamento)
-   e a tool monta a copia em `outputs/` preservando a formatacao do modelo.
-
-Para autorizar uma minuta com dados plausiveis, informe explicitamente que o
-agente pode usar o banco e que o documento sera revisado. O arquivo original do
-modelo nunca e sobrescrito. Se ja houver uma minuta pendente, comandos como
-`pode inventar`, `pode gerar`, `sim` ou `gere o arquivo` finalizam a geracao
-diretamente pela CLI.
-
-O texto da minuta e escrito pelo modelo de linguagem a partir do pedido do
-usuario e do contexto recuperado no RAG, e o numero de artigos varia conforme a
-complexidade do tema. Cabecalhos, rodapes, marca d'agua e estilos do modelo sao
-preservados.
+- O arquivo original do modelo nunca e sobrescrito.
+- Com uma minuta pendente, comandos como `pode inventar`, `sim` ou
+  `gere o arquivo` finalizam a geracao.
+- Modelos de referencia: `docs/templates-plus/`,
+  `docs/templates/arruma-manualmente/` e `docs/templates/Template_Decreto.docx`.
 
 ## Estrutura principal
 
@@ -146,20 +131,23 @@ outputs/                     DOCX gerados
 Para verificar sintaxe e estilo dos arquivos Python:
 
 ```bash
-uv run python -m compileall -q src app
-uv run ruff check src app
+uv run python -m compileall -q src app tests
+uv run ruff check src app tests
 ```
 
-O `ruff` pode apontar problemas preexistentes em scripts que nao foram
-alterados pela feature de geracao de documentos.
+O `ruff` pode apontar problemas preexistentes em alguns scripts de `app/` que
+nao fazem parte das features atuais.
 
-Para executar os testes da geracao de documentos:
+Para executar a suite completa de testes:
 
 ```bash
-uv run pytest tests/test_document_generation.py -q
+uv run pytest tests/ -q
 ```
 
-Os cenarios ficam em `tests/prompts/`. Cada prompt e associado a um tipo de
-ato e testa a selecao do template, a consulta ao RAG e a abertura do DOCX
-gerado sem placeholders pendentes. O RAG e simulado nos testes para evitar
-download de modelos e chamadas externas.
+- `tests/test_document_generation.py` — selecao de modelo por tipo de ato,
+  fluxo de confirmacao de campos, montagem da estrutura e preservacao de
+  formatacao (RAG simulado, sem chamadas externas).
+- `tests/test_web.py` — render da minuta em HTML (com escape), pagina de chat,
+  endpoint `/api/chat` e upload de arquivos.
+- `tests/prompts/` — cenarios de pedido por tipo de ato usados nos testes de
+  geracao de documentos.
