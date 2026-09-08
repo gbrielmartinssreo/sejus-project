@@ -68,31 +68,35 @@ Execute-o novamente somente quando quiser atualizar o indice.
 
 ## Gerar documentos DOCX
 
-Os templates ficam em `docs/templates/`:
+A geracao usa modelos DOCX reais da SEJUS como base de formatacao:
 
-- `Template_Decreto.docx`
-- `Template_Instrucao_Normativa.docx`
-- `Template_Portaria.docx`
-- `Template_Portaria_Conjunta.docx`
-- `Template_Retificacao_Portaria.docx`
+- `docs/templates-plus/` — modelos de referencia
+- `docs/templates/arruma-manualmente/` — atos reais capturados do Diario Oficial
+- `docs/templates/Template_Decreto.docx` — esqueleto de formatacao para Decreto
 
 Na CLI, solicite o documento ao agente. O fluxo e:
 
-1. O agente escolhe e inspeciona o template adequado.
+1. O tipo de ato e detectado no pedido e o modelo correspondente e escolhido
+   automaticamente (instrucao normativa, portaria conjunta, retificacao,
+   decreto ou portaria).
 2. O RAG recupera atos relacionados ao pedido.
-3. O agente solicita os campos que precisam de confirmacao.
-4. Depois da confirmacao, a tool gera uma copia em `outputs/`.
+3. O agente pergunta se voce quer informar os campos (numero, data,
+   signatario, cargo, ementa) ou se prefere que a minuta seja preenchida
+   automaticamente com dados plausiveis para revisao.
+4. Apos a confirmacao, o LLM redige a estrutura da minuta (ementa,
+   considerandos, preambulo, articulacao com incisos e paragrafos, fechamento)
+   e a tool monta a copia em `outputs/` preservando a formatacao do modelo.
 
 Para autorizar uma minuta com dados plausiveis, informe explicitamente que o
 agente pode usar o banco e que o documento sera revisado. O arquivo original do
-template nunca e sobrescrito. Se ja houver uma minuta pendente, comandos como
-`pode inventar`, `pode gerar` ou `gere o arquivo` finalizam a geracao diretamente
-pela CLI.
+modelo nunca e sobrescrito. Se ja houver uma minuta pendente, comandos como
+`pode inventar`, `pode gerar`, `sim` ou `gere o arquivo` finalizam a geracao
+diretamente pela CLI.
 
-Os templates atuais usam marcadores entre colchetes, por exemplo `[XX]`,
-`[ANO]` e `[NOME DO SIGNATARIO]`. A tool preenche texto em paragrafos e tabelas.
-Cabecalhos, rodapes, imagens e controles avancados do Word ainda nao sao
-alterados.
+O texto da minuta e escrito pelo modelo de linguagem a partir do pedido do
+usuario e do contexto recuperado no RAG, e o numero de artigos varia conforme a
+complexidade do tema. Cabecalhos, rodapes, marca d'agua e estilos do modelo sao
+preservados.
 
 ## Estrutura principal
 

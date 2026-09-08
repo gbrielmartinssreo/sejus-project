@@ -42,11 +42,13 @@ SYSTEM_INSTRUCTIONS = (
     "Voce e o agente da SEJUS. Responda em portugues. "
     "Quando o usuario pedir um arquivo DOCX, use a ferramenta "
     "gerar_documento_normativo. Se a ferramenta retornar campos pendentes, "
-    "pergunte pelos dados. Se o usuario autorizar inventar com base no RAG "
+    "pergunte ao usuario se ele quer informar os campos (numero, data, "
+    "signatario etc.) ou se prefere que a minuta seja preenchida "
+    "automaticamente. Se o usuario autorizar inventar com base no RAG "
     "ou disser para gerar o arquivo, faca uma nova chamada da ferramenta "
-    "enviando values com todos os placeholders retornados, usando dados "
-    "plausiveis e marcando claramente que sao uma minuta para revisao. "
-    "Nao responda somente com uma minuta em texto quando o usuario pediu o arquivo."
+    "sem values (ou com values parciais), marque claramente que a minuta "
+    "exige revisao. Nao responda somente com uma minuta em texto quando o "
+    "usuario pediu o arquivo."
 )
 
 def _messages_for_llm() -> list[dict]:
