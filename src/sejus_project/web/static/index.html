@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SEJUS · Agente</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topo">
+    <h1 class="topo-titulo">SEJUS · Agente</h1>
+    <span class="topo-sub">Chat com o acervo normativo</span>
+  </header>
+
+  <main id="mensagens" class="mensagens" aria-live="polite"></main>
+
+  <div id="overlay-campos" class="overlay" hidden>
+    <form id="form-campos" class="painel-campos">
+      <h2>Informar campos</h2>
+      <p class="dica">Preencha os que souber; o restante é preenchido automaticamente.</p>
+      <div id="campos-lista"></div>
+      <div class="painel-acoes">
+        <button type="submit" class="botao primario">Enviar campos</button>
+        <button type="button" id="cancelar-campos" class="botao">Cancelar</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <form id="formulario" class="formulario">
+    <div class="barra-acoes">
+      <label class="botao anexar" for="arquivo" title="Enviar arquivo (.txt, .md, .pdf, .docx)">&#128206;</label>
+      <input type="file" id="arquivo" accept=".txt,.md,.pdf,.docx" hidden>
+      <span id="arquivo-nome" class="arquivo-nome"></span>
+    </div>
+    <textarea id="entrada" class="entrada" rows="3"
+      placeholder="Ex.: Gere uma portaria sobre limpeza das unidades administrativas da SEJUS..." required></textarea>
+    <button type="submit" class="botao primario enviar">Enviar</button>
+  </form>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

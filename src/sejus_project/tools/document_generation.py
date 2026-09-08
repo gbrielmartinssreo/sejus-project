@@ -8,6 +8,7 @@ from sejus_project.tools.docx_templates import OUTPUTS_DIR
 from sejus_project.tools.retrieval import retrieve
 
 _pending_document: dict | None = None
+_ultima_minuta: dict | None = None
 
 # Campos que o usuario pode informar antes da geracao.
 CAMPOS_BASE = ["numero_ato", "data_ato", "local", "signatario", "cargo", "ementa"]
@@ -90,6 +91,11 @@ def has_pending_document() -> bool:
     return _pending_document is not None
 
 
+def ultima_minuta() -> dict | None:
+    """Devolve a estrutura da ultima minuta gerada (para renderizacao web)."""
+    return _ultima_minuta
+
+
 def _is_generation_confirmation(request: str) -> bool:
     normalized = request.casefold().strip()
     phrases = (
@@ -129,15 +135,22 @@ def _resolver_perfil(request: str, template_name: str | None) -> modelos.PerfilM
 
 
 def _gerar_e_relatar(request, perfil, contexto, values):
+    global _ultima_minuta
     tipo = modelos.detectar_tipo_ato(request)
     estrutura = minuta.gerar_estrutura_minuta(request, tipo, perfil, contexto, values)
     output_path = minuta.montar_docx(perfil, estrutura, OUTPUTS_DIR)
+    _ultima_minuta = {
+        "estructura": estrutura,
+        "modelo": perfil.name,
+        "output_path": str(output_path),
+    }
     return json.dumps(
         {
             "status": "generated",
             "request": request,
             "modelo": perfil.name,
             "output_path": str(output_path),
+            "estructura": estrutura,
             "sources": _source_summary(contexto),
             "review_required": True,
             "auto_filled": True,

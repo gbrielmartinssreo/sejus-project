@@ -1,7 +1,8 @@
 # SEJUS Project
 
 Agente para consulta de atos normativos da SEJUS usando RAG e para geracao de
-minutas em documentos DOCX a partir de templates.
+minutas. A interacao principal e via chat no navegador (localhost); a CLI
+continua disponivel opcionalmente.
 
 ## Requisitos
 
@@ -66,6 +67,32 @@ uv run app/fill_database.py
 O segundo comando apaga e recria a colecao `sejus_atos` em `qdrant_data/`.
 Execute-o novamente somente quando quiser atualizar o indice.
 
+## Interface web (chat localhost)
+
+O chat no navegador e o jeito principal de usar o agente. A minuta gerada e
+renderizada como documento formatado na propria pagina (sem depender da
+formatacao de um arquivo DOCX/PDF).
+
+```bash
+uv run uvicorn sejus_project.web.server:app --reload
+```
+
+Abra `http://localhost:8000`.
+
+- `POST /api/chat` — envia a mensagem e devolve a resposta (markdown), a
+  estrutura da ultima minuta gerada e o estado de confirmacao de campos.
+- `POST /api/upload` — salva um arquivo (`.txt`, `.md`, `.pdf`, `.docx`) em
+  `importacoes_usuario/` para a tool `analisar_arquivo_usuario`.
+- No chat, peca uma minuta; o agente pergunta se voce quer informar os campos
+  ou preencher automaticamente. A minuta aparece renderizada, com botoes de
+  copiar texto e imprimir/exportar PDF (via impressao do navegador).
+
+A CLI continua funcionando para uso local:
+
+```bash
+uv run app/main.py
+```
+
 ## Gerar documentos DOCX
 
 A geracao usa modelos DOCX reais da SEJUS como base de formatacao:
@@ -105,10 +132,12 @@ app/                         Scripts de execucao e indexacao
 docs/fontes-rag/pdf/        PDFs de origem
 docs/fontes-rag/markdown/   Corpus usado pelo RAG
 docs/templates/              Templates DOCX
+importacoes_usuario/        Arquivos enviados pelo usuario (upload do chat)
 qdrant_data/                 Indice local persistido
 src/sejus_project/agent/     Loop do agente e function calling
 src/sejus_project/rag/       Ingestao, chunking, embeddings e Qdrant
 src/sejus_project/tools/     Tools de consulta, arquivos e documentos
+src/sejus_project/web/       Servidor FastAPI, render de minuta e frontend
 outputs/                     DOCX gerados
 ```
 
