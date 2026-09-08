@@ -12,6 +12,7 @@ Fluxo:
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from pathlib import Path
@@ -164,7 +165,7 @@ def _resumir_contexto(contexto: list[dict]) -> str:
     for item in contexto or []:
         tipo = item.get("act_type") or "ATO"
         numero = item.get("act_number") or ""
-        texto = (item.get("text") or "").strip()[:1200]
+        texto = (item.get("text") or "").strip()[:3000]
         linhas.append(f"- {tipo} {numero}\n  {texto}")
     return "\n".join(linhas) if linhas else "(nenhum ato recuperado)"
 
@@ -173,13 +174,37 @@ def _sistema():
     return (
         "Voce e um redator experiente de atos normativos da Secretaria de "
         "Estado de Justiça de Mato Grosso (SEJUS/MT). Sua tarefa e redigir "
-        "minutas completas, fieis ao estilo juridico dos atos publicados "
-        "(Portarias, Instruções Normativas, Decretos, Portarias Conjuntas). "
-        "Use linguagem formal, coesa e tecnica. Baseie a articulacao no pedido "
-        "do usuario e nos atos recuperados como fundamento, mas nao copie "
-        "literalmente o texto recuperado quando ele pertencer a outro ato. "
-        "Estruture o numero de artigos conforme a complexidade do tema. "
-        "Retorne apenas o JSON da função apresentar_estrutura_minuta."
+        "minutas completas, robustas e fieis ao estilo juridico dos atos "
+        "publicados (Portarias, Instruções Normativas, Decretos, Portarias "
+        "Conjuntas), com o mesmo nivel de detalhamento e sofisticacao dos "
+        "documentos oficiais da SEJUS/MT.\n\n"
+        "ORIENTACOES DE DETALHAMENTO:\n"
+        "1. Artigos e subitens: produza uma articulacao rica e coerente. Para "
+        "tema simples use ao menos 3 a 4 artigos; para tema medio 5 a 7 "
+        "artigos; para tema complexo ou institucional 8 ou mais artigos. Sempre "
+        "que o tema envolver competencias, atribuicoes, prazos, comissoes, "
+        "fluxos, prazos de execucao ou objetos multiplos, desdobre os artigos "
+        "em incisos e paragrafos (§) para esmiucar cada ponto.\n"
+        "2. Considerandos: fundamente o ato com considerandos bem desenvolvidos "
+        "(a partir de 'CONSIDERANDO'), extraindo do contexto RAG os atos, "
+        "normas e fundamentos legais correlatos (referencias a Constituicao "
+        "Estadual, leis, decretos, instrucoes normativas ou portarias "
+        "anteriores quando disponiveis nos atos recuperados).\n"
+        "3. Preambulo: redija conforme o padrao do modelo, citando as "
+        "atribuicoes legais aplicaveis.\n"
+        "4. Uso do contexto RAG: aproveite ao maximo o conteudo dos atos "
+        "recuperados como fundamento. Incorpore prazos, procedimentos, "
+        "obrigacoes, prazos, comissoes e condicoes que estejam presentes nos "
+        "atos recuperados e que sejam pertinentes ao objeto pedido, adaptando "
+        "o texto ao novo ato (nao copie literalmente bloco de outro ato, mas "
+        "aproveite as regras e detalhes relevantes).\n"
+        "5. Fechamento: inclua artigos finais sobre vigencia, revogacao de "
+        "disposicoes em contrario e, quando cabivel, regulamentacao/execucao.\n"
+        "6. Extensao: prefira minutas mais longas e detalhadas quando o tema "
+        "for institucional (comissoes, grupos de trabalho, procedimentos, "
+        "estruturas), evitando respostas excessivamente curtas ou rascunhos "
+        "resumidos.\n"
+        "Retorne apenas o JSON da funcao apresentar_estrutura_minuta."
     )
 
 
@@ -191,7 +216,10 @@ def _usuario(pedido, tipo_ato, perfil, contexto, valores):
         f"Tipo de ato: {tipo_ato}",
         f"Modelo de referencia (formato): {perfil.name}",
         "",
-        "Atos recuperados como fundamento (RAG):",
+        (
+            "Atos recuperados como fundamento (RAG). Use esse conteudo como "
+            "base para prazos, procedimentos, fundamentos legais e detalhes:"
+        ),
         _resumir_contexto(contexto),
     ]
     if valores:
@@ -278,7 +306,11 @@ def gerar_estrutura_minuta(
         {"role": "user", "content": _usuario(pedido, tipo_ato, perfil, contexto, valores)},
     ]
 
-    resposta = perguntar(mensagens, [STRUTURA_DEFINITION])
+    resposta = perguntar(
+        mensagens,
+        [STRUTURA_DEFINITION],
+        max_tokens=max(4096, int(os.getenv("MINUTA_MAX_TOKENS", "4096"))),
+    )
     message = resposta.choices[0].message
     if not message.tool_calls:
         raise ValueError("O modelo nao devolveu uma estrutura de minuta valida.")

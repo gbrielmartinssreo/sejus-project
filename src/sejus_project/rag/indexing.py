@@ -47,7 +47,7 @@ except ImportError:
 @dataclass
 class QdrantIndexerConfig:
     collection_name: str = "sejus_atos"
-    vector_size: int = 1024  # deve bater com embedder.dimension
+    vector_size: int = 1536  # deve bater com embedder.dimension
     distance: qmodels.Distance = qmodels.Distance.COSINE
     batch_size: int = 64
 

@@ -29,7 +29,7 @@ def _context_for_request(request: str, perfil: modelos.PerfilModelo) -> list[dic
     act_type = modelos.ACT_TYPE_FILTER.get(tipo)
     return retrieve(
         f"{request}\nTipo de ato: {perfil.name}",
-        limit=8,
+        limit=16,
         act_type=act_type,
     )
 

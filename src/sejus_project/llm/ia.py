@@ -42,9 +42,10 @@ def _get_model() -> str:
     return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def perguntar(messages, tools):
+def perguntar(messages, tools, **kwargs):
     return _get_client().chat.completions.create(
         model=_get_model(),
         messages=messages,
         tools=tools,
+        **kwargs,
     )
