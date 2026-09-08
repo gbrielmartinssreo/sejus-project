@@ -15,17 +15,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from sejus_project.agent import agent
 from sejus_project.tools import document_generation as generation
-from sejus_project.tools.user_files import SUPPORTED_EXTENSIONS
-from sejus_project.web.render_html import minuta_para_html, minuta_para_texto
+from sejus_project.tools.pdf_preview import docx_para_pdf, soffice_disponivel
+from sejus_project.tools.user_files import IMPORTACOES_DIR, SUPPORTED_EXTENSIONS
+from sejus_project.web.render_html import minuta_para_texto
 
 STATIC_DIR = Path(__file__).parent / "static"
-IMPORTACOES_DIR = Path(__file__).resolve().parents[3] / "importacoes_usuario"
 
 # Teto para a mensagem vinda do navegador antes de chegar às tools.
 MAX_MESSAGE_CHARS = 80_000
@@ -56,20 +56,63 @@ def index() -> str:
 
 
 def _resposta_chat(reply: str) -> dict:
-    minuta_html = None
     minuta_texto = None
-    ultima = generation.ultima_minuta()
-    if ultima:
-        minuta_html = minuta_para_html(ultima["estructura"])
-        minuta_texto = minuta_para_texto(ultima["estructura"])
+    minuta_pdf = None
+    minuta_docx = None
+    minuta_nome = None
+    if generation.consumir_geracao_do_turno():
+        ultima = generation.ultima_minuta()
+        if ultima:
+            output = ultima.get("output_path")
+            if output and Path(output).is_file():
+                minuta_nome = Path(output).name
+                minuta_docx = "/api/minuta/docx"
+                if soffice_disponivel():
+                    minuta_pdf = "/api/minuta/pdf"
+                minuta_texto = minuta_para_texto(ultima["estructura"])
 
     return {
         "reply": reply,
-        "minuta_html": minuta_html,
+        "minuta_nome": minuta_nome,
         "minuta_texto": minuta_texto,
+        "minuta_pdf": minuta_pdf,
+        "minuta_docx": minuta_docx,
         "pendente": generation.has_pending_document(),
         "campos": generation.CAMPOS_BASE,
+        "modelo_usuario": generation.modelo_usuario_ativo(),
     }
+
+
+def _minuta_arquivo_atual() -> Path:
+    ultima = generation.ultima_minuta()
+    if not ultima or not ultima.get("output_path"):
+        raise HTTPException(status_code=404, detail="Nenhuma minuta gerada ainda.")
+    return Path(ultima["output_path"])
+
+
+@app.get("/api/minuta/pdf")
+def minuta_pdf() -> FileResponse:
+    """PDF a partir do DOCX de saída (renderizado pelo LibreOffice)."""
+    docx = _minuta_arquivo_atual()
+    if not docx.is_file():
+        raise HTTPException(status_code=404, detail="Minuta não encontrada.")
+    pdf = docx_para_pdf(docx)
+    if pdf is None or not pdf.is_file():
+        raise HTTPException(status_code=404, detail="Falha ao gerar o PDF da minuta.")
+    return FileResponse(str(pdf), media_type="application/pdf", filename=f"{pdf.stem}.pdf")
+
+
+@app.get("/api/minuta/docx")
+def minuta_docx() -> FileResponse:
+    """Baixa o próprio arquivo DOCX de saída."""
+    docx = _minuta_arquivo_atual()
+    if not docx.is_file():
+        raise HTTPException(status_code=404, detail="Minuta não encontrada.")
+    return FileResponse(
+        str(docx),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=docx.name,
+    )
 
 
 @app.post("/api/chat")
@@ -125,3 +168,32 @@ async def upload(arquivo: UploadFile) -> dict:
             saida.write(chunk)
 
     return {"filename": nome, "detail": f"Arquivo '{nome}' recebido com sucesso."}
+
+
+@app.post("/api/modelo")
+async def enviar_modelo(arquivo: UploadFile) -> dict:
+    """Define um DOCX enviado pelo usuário como modelo de formatação ativo."""
+    nome = Path(arquivo.filename or "arquivo").name
+    extensao = Path(nome).suffix.lower()
+
+    if extensao != ".docx":
+        raise HTTPException(
+            status_code=400,
+            detail="Somente arquivos .docx podem ser usados como modelo de "
+            "formatação (pdf, txt e md não preservam o layout).",
+        )
+
+    IMPORTACOES_DIR.mkdir(parents=True, exist_ok=True)
+    destino = IMPORTACOES_DIR / nome
+
+    with destino.open("wb") as saida:
+        while chunk := await arquivo.read(1024 * 256):
+            saida.write(chunk)
+
+    try:
+        resumo = generation.set_modelo_usuario(nome, IMPORTACOES_DIR)
+    except generation.UserFileError as erro:
+        destino.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(erro)) from erro
+
+    return {**resumo, "detail": f"'{nome}' definido como modelo de formatação."}

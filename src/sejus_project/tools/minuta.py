@@ -17,13 +17,15 @@ import re
 import uuid
 from pathlib import Path
 
+from docx.oxml.ns import qn
+
 from sejus_project.llm.ia import perguntar
 from sejus_project.tools.docx_engine import (
     all_paragraphs,
-    append_paragraph,
     build_paragraph,
     clear_body,
     find_reference,
+    paragraph_text,
 )
 from sejus_project.tools.modelos import PerfilModelo
 
@@ -208,7 +210,7 @@ def _sistema():
     )
 
 
-def _usuario(pedido, tipo_ato, perfil, contexto, valores):
+def _usuario(pedido, tipo_ato, perfil, contexto, valores, modelo_referencia=None):
     partes = [
         "Pedido do usuario:",
         pedido,
@@ -222,6 +224,19 @@ def _usuario(pedido, tipo_ato, perfil, contexto, valores):
         ),
         _resumir_contexto(contexto),
     ]
+    if modelo_referencia:
+        partes.extend(
+            [
+                "",
+                (
+                    "DOCUMENTO ENVIADO PELO USUARIO COMO MODELO: espelhe a "
+                    "estrutura, as secoes e o estilo formal deste documento ao "
+                    "redigir a nova minuta (artigos, considerandos, incisos, "
+                    "paragrafos e nivel de detalhamento). Conteudo:"
+                ),
+                str(modelo_referencia)[:8000],
+            ]
+        )
     if valores:
         partes.extend(
             [
@@ -299,11 +314,15 @@ def gerar_estrutura_minuta(
     perfil: PerfilModelo,
     contexto: list[dict],
     valores: dict | None = None,
+    modelo_referencia: str | None = None,
 ) -> dict:
     """Chama o LLM e devolve a estrutura estruturada da minuta."""
     mensagens = [
         {"role": "system", "content": _sistema()},
-        {"role": "user", "content": _usuario(pedido, tipo_ato, perfil, contexto, valores)},
+        {
+            "role": "user",
+            "content": _usuario(pedido, tipo_ato, perfil, contexto, valores, modelo_referencia),
+        },
     ]
 
     resposta = perguntar(
@@ -331,6 +350,69 @@ _QUEDA_REFERENCIA = (
 )
 
 _SIMPLIFICAR_ROTULO = re.compile(r"\s+")
+
+# Linhas típicas do rodapé de imprensa do Diário Oficial. Usado para saber onde
+# termina o corpo normativo e preservar o rodapé quando o modelo do usuário for
+# uma captura do Diário (cabeçalho e rodapé ficam no corpo, e não na seção).
+_RE_RODAPE_IMPRENSA = re.compile(
+    r"(govern[oa] do estado de mato grosso|seplag|imprensa oficial|iomat)",
+    re.IGNORECASE,
+)
+
+
+def _idx_rodape_imprensa(children: list) -> int | None:
+    """Índice do último parágrafo do corpo que parece rodapé de imprensa."""
+    idx = None
+    for i, ch in enumerate(children):
+        if ch.tag == qn("w:p") and _RE_RODAPE_IMPRENSA.search(paragraph_text(ch)):
+            idx = i
+    return idx
+
+
+def _preparar_corpo(doc, refs: dict, preservar_moldura: bool):
+    """Prepara o corpo para a reconstrução da minuta.
+
+    Devolve o elemento-âncora: os novos parágrafos são inseridos imediatamente
+    antes dele.
+
+    * ``preservar_moldura=True`` (modelo do usuário — captura do Diário):
+      mantém os parágrafos antes do título (cabeçalho do Diário Oficial) e o
+      rodapé de imprensa no final, removendo apenas o miolo normativo.
+    * Caso contrário (templates oficiais): limpa o corpo e insere antes do
+      sectPr (comportamento original — cabeçalho/rodapé vivem na seção).
+    """
+    body = doc.element.body
+
+    def _sect_pr_ancora():
+        sect_pr = body.find(qn("w:sectPr"))
+        return sect_pr if sect_pr is not None else body
+
+    if not preservar_moldura:
+        clear_body(doc)
+        return _sect_pr_ancora()
+
+    children = list(body)
+    titulo_wp = refs.get("titulo")
+    idx_titulo = next(
+        (i for i, ch in enumerate(children) if ch is titulo_wp),
+        None,
+    )
+    if titulo_wp is None or idx_titulo is None:
+        clear_body(doc)
+        return _sect_pr_ancora()
+
+    idx_rodape = _idx_rodape_imprensa(children)
+    if idx_rodape is not None and idx_rodape < idx_titulo:
+        idx_rodape = None
+    fim = idx_rodape if idx_rodape is not None else len(children)
+
+    for i, ch in enumerate(children):
+        if idx_titulo <= i < fim and ch.tag in (qn("w:p"), qn("w:tbl")):
+            body.remove(ch)
+
+    if idx_rodape is not None:
+        return children[idx_rodape]
+    return _sect_pr_ancora()
 
 
 def _referencias(doc, perfil: PerfilModelo) -> dict:
@@ -384,8 +466,7 @@ def montar_docx(
     refs = _referencias(doc, perfil)
     _adicionar_vigencia_faltante(estrutura, perfil.act_types[0])
 
-    clear_body(doc)
-    body = doc.element.body
+    ancora = _preparar_corpo(doc, refs, perfil.preservar_moldura)
 
     def adicionar(papel: str, rotulo: str, texto: str) -> None:
         if not texto.strip():
@@ -394,7 +475,7 @@ def montar_docx(
             return
         ref = _referencia_para(refs, papel)
         w_p = build_paragraph(ref, rotulo, texto)
-        append_paragraph(body, w_p)
+        ancora.addprevious(w_p)
 
     adicionar("titulo", "", estrutura.get("numero", ""))
     adicionar("ementa", "", estrutura.get("ementa", ""))

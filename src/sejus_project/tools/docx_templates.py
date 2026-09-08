@@ -1,8 +1,8 @@
 """Inspecao e preenchimento seguro dos templates DOCX da SEJUS."""
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 from uuid import uuid4
 
 from docx import Document

@@ -112,6 +112,8 @@ var $formulario = document.getElementById("formulario");
 var $entrada = document.getElementById("entrada");
 var $arquivo = document.getElementById("arquivo");
 var $arquivoNome = document.getElementById("arquivo-nome");
+var $arquivoModelo = document.getElementById("arquivo-modelo");
+var $modeloStatus = document.getElementById("modelo-status");
 var $overlayCampos = document.getElementById("overlay-campos");
 var $formCampos = document.getElementById("form-campos");
 var $camposLista = document.getElementById("campos-lista");
@@ -133,6 +135,17 @@ function toast(mensagem) {
   $toast.textContent = mensagem;
   $toast.hidden = false;
   setTimeout(function () { $toast.hidden = true; }, 3500);
+}
+
+function atualizarModeloStatus(modelo) {
+  if (modelo && modelo.filename) {
+    $modeloStatus.textContent =
+      "Modelo ativo: " + modelo.filename + (modelo.tipo_ato ? " (" + modelo.tipo_ato + ")" : "") +
+      " — as próximas minutas seguirão este formato.";
+    $modeloStatus.hidden = false;
+  } else {
+    $modeloStatus.hidden = true;
+  }
 }
 
 function criarBubble(role, htmlOuTexto) {
@@ -169,37 +182,65 @@ function botaoAcao(texto, aoClicar) {
   return b;
 }
 
-function anexarMinuta(bubble, minutaHtml, minutaTexto) {
+function anexarMinuta(bubble, dados) {
   var zona = document.createElement("div");
-  zona.innerHTML = minutaHtml;
+  zona.className = "zona-minuta";
+
+  var card = document.createElement("div");
+  card.className = "doc-card";
+
+  var icone = document.createElement("div");
+  icone.className = "doc-icone";
+  icone.textContent = "\u{1F4C4}";
+
+  var info = document.createElement("div");
+  info.className = "doc-info";
+  var nome = document.createElement("span");
+  nome.className = "doc-nome";
+  nome.textContent = dados.minuta_nome || "minuta.docx";
+  var meta = document.createElement("span");
+  meta.className = "doc-meta";
+  meta.textContent = "Documento gerado";
+  info.appendChild(nome);
+  info.appendChild(meta);
+
+  card.appendChild(icone);
+  card.appendChild(info);
+  zona.appendChild(card);
 
   var acoes = document.createElement("div");
   acoes.className = "acoes-minuta";
-  acoes.appendChild(botaoAcao("Copiar texto", function () {
-    if (navigator.clipboard && minutaTexto) {
-      navigator.clipboard.writeText(minutaTexto).then(function () { toast("Minuta copiada."); });
-    } else {
-      toast("Não foi possível copiar.");
-    }
-  }));
-  acoes.appendChild(botaoAcao("Imprimir / PDF", function () {
-    imprimirMinuta(zona);
-  }));
-
+  if (dados.minuta_docx) {
+    acoes.appendChild(botaoAcao("Baixar DOCX", function () {
+      baixarArquivo(dados.minuta_docx);
+    }));
+  }
+  if (dados.minuta_pdf) {
+    acoes.appendChild(botaoAcao("Baixar PDF", function () {
+      baixarArquivo(dados.minuta_pdf);
+    }));
+  }
+  if (dados.minuta_texto) {
+    acoes.appendChild(botaoAcao("Copiar texto", function () {
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(dados.minuta_texto).then(function () { toast("Minuta copiada."); });
+      } else {
+        toast("Não foi possível copiar.");
+      }
+    }));
+  }
   zona.appendChild(acoes);
+
   bubble.appendChild(zona);
 }
 
-function imprimirMinuta(zona) {
-  var impressao = document.createElement("div");
-  impressao.id = "impressao";
-  var pagina = document.createElement("div");
-  pagina.className = "minuta-pagina";
-  pagina.innerHTML = zona.querySelector(".minuta-documento").outerHTML;
-  impressao.appendChild(pagina);
-  document.body.appendChild(impressao);
-  window.print();
-  document.body.removeChild(impressao);
+function baixarArquivo(url) {
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 function anexarPendencia(bubble, campos) {
@@ -276,8 +317,12 @@ async function enviar(texto) {
 
     var bubble = criarBubble("agente", dados.reply || "Sem resposta.");
 
-    if (dados.minuta_html) {
-      anexarMinuta(bubble, dados.minuta_html, dados.minuta_texto);
+    if (dados.modelo_usuario) {
+      atualizarModeloStatus(dados.modelo_usuario);
+    }
+
+    if (dados.minuta_docx) {
+      anexarMinuta(bubble, dados);
     } else if (dados.pendente) {
       anexarPendencia(bubble, dados.campos || []);
     }
@@ -297,6 +342,7 @@ function limparConversa() {
     .catch(function () { return null; })
     .then(function () {
       $mensagens.innerHTML = "";
+      atualizarModeloStatus(null);
       criarBubble("agente",
         "Conversa reiniciada. Posso **gerar minutas** ou consultar o acervo " +
         "normativo da SEJUS. Ex.: *Gere uma portaria sobre limpeza das unidades*.");
@@ -311,7 +357,13 @@ $formulario.addEventListener("submit", function (evento) {
   evento.preventDefault();
   var texto = $entrada.value;
   $entrada.value = "";
+  $entrada.style.height = "auto";
   enviar(texto);
+});
+
+$entrada.addEventListener("input", function () {
+  this.style.height = "auto";
+  this.style.height = Math.min(this.scrollHeight, 160) + "px";
 });
 
 $entrada.addEventListener("keydown", function (evento) {
@@ -337,6 +389,23 @@ $arquivo.addEventListener("change", async function () {
   $arquivo.value = "";
 });
 
+$arquivoModelo.addEventListener("change", async function () {
+  var arquivo = $arquivoModelo.files[0];
+  if (!arquivo) return;
+  var form = new FormData();
+  form.append("arquivo", arquivo);
+  try {
+    var resposta = await fetch("/api/modelo", { method: "POST", body: form });
+    var dados = await resposta.json();
+    if (!resposta.ok) throw new Error(dados.detail || "falha no upload do modelo");
+    atualizarModeloStatus(dados);
+    toast("Modelo '" + dados.filename + "' definido.");
+  } catch (erro) {
+    toast("Modelo falhou: " + erro.message);
+  }
+  $arquivoModelo.value = "";
+});
+
 $formCampos.addEventListener("submit", function (evento) {
   evento.preventDefault();
   var partes = [];
@@ -355,5 +424,8 @@ $limpar.addEventListener("click", limparConversa);
 criarBubble("agente",
   "Olá! Sou o agente da SEJUS. Posso responder sobre os atos normativos " +
   "recuperados do acervo e **gerar minutas** (portarias, instruções normativas, " +
-  "decretos etc.) — a minuta aparece aqui na página, pronta para copiar ou " +
-  "imprimir em PDF.\n\nEx.: *Gere uma portaria sobre limpeza das unidades*.");
+  "decretos etc.) — o documento aparece aqui como anexo, pronto para baixar em " +
+  "DOCX ou PDF.\n\n" +
+  "Você também pode enviar um ato existente como **modelo** (botão 📄): " +
+  "a nova minuta seguirá exatamente o formato do documento enviado.\n\n" +
+  "Ex.: *Gere uma portaria sobre limpeza das unidades*.");

@@ -29,12 +29,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 import tiktoken
 
 from sejus_project.rag.ingestion import Document, load_documents
-
 
 # ---------------------------------------------------------------------------
 # 1. Separação em atos administrativos
@@ -631,14 +630,11 @@ def save_chunks_jsonl(
         encoding="utf-8",
     ) as out:
 
-        for chunk in chunks:
-            out.write(
-                json.dumps(
+        out.writelines(json.dumps(
                     chunk.to_dict(),
                     ensure_ascii=False,
                 )
-                + "\n"
-            )
+                + "\n" for chunk in chunks)
 
 
 # ---------------------------------------------------------------------------

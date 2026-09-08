@@ -1,12 +1,29 @@
+/* ================================================================
+   SEJUS AGENTE — Chat Interface (moderna)
+   As classes .minuta-* sao protegidas e NAO devem ser alteradas.
+   ================================================================ */
+
 :root {
-  --fundo: #f3f4f6;
-  --painel: #ffffff;
-  --texto: #1f2937;
-  --texto-suave: #6b7280;
-  --acento: #1d4ed8;
-  --borda: #e5e7eb;
-  --msg-usuario: #dbeafe;
-  --msg-assistente: #ffffff;
+  --fundo: #0f1117;
+  --fundo-grad1: #0f1117;
+  --fundo-grad2: #1a1d2e;
+  --painel: #1e2030;
+  --painel-claro: #262a3e;
+  --texto: #e4e6f0;
+  --texto-suave: #8b8fa8;
+  --acento: #6c8cff;
+  --acento-hover: #5a7aff;
+  --acento-glow: rgba(108, 140, 255, 0.25);
+  --borda: #2e3148;
+  --borda-suave: #383c54;
+  --msg-usuario: linear-gradient(135deg, #4a6cf7 0%, #6c8cff 100%);
+  --msg-usuario-texto: #ffffff;
+  --msg-assistente: #1e2030;
+  --sombra: 0 2px 16px rgba(0, 0, 0, 0.3);
+  --sombra-sutil: 0 1px 6px rgba(0, 0, 0, 0.2);
+  --radius: 18px;
+  --radius-sm: 12px;
+  --transicao: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * { box-sizing: border-box; }
@@ -14,89 +31,222 @@
 html, body {
   margin: 0;
   height: 100%;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  background: var(--fundo);
+  font-family: 'Inter', 'SF Pro Display', system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: linear-gradient(160deg, var(--fundo-grad1) 0%, var(--fundo-grad2) 100%);
   color: var(--texto);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
   display: flex;
   flex-direction: column;
-  max-width: 900px;
+  max-width: 860px;
   margin: 0 auto;
   height: 100vh;
-  padding: 0 12px;
+  height: 100dvh;
+  padding: 0 16px;
 }
 
+/* ---------- Header ---------- */
 .topo {
-  padding: 14px 4px 10px;
+  padding: 16px 8px 14px;
   border-bottom: 1px solid var(--borda);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
+  position: relative;
+  z-index: 10;
 }
-.topo-titulo { margin: 0; font-size: 1.25rem; color: var(--acento); }
-.topo-sub { color: var(--texto-suave); font-size: 0.85rem; }
-.topo-limpar { margin-left: auto; }
 
+.topo-titulo {
+  margin: 0;
+  font-size: 1.3rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #6c8cff, #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.02em;
+}
+
+.topo-sub {
+  color: var(--texto-suave);
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+.topo-limpar {
+  margin-left: auto;
+  background: var(--painel-claro);
+  color: var(--texto-suave);
+  border: 1px solid var(--borda);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transicao);
+}
+.topo-limpar:hover {
+  background: #2a2e45;
+  color: var(--texto);
+  border-color: var(--borda-suave);
+}
+
+/* ---------- Mensagens ---------- */
 .mensagens {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 0;
+  padding: 20px 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--borda-suave) transparent;
+}
+.mensagens::-webkit-scrollbar { width: 6px; }
+.mensagens::-webkit-scrollbar-track { background: transparent; }
+.mensagens::-webkit-scrollbar-thumb {
+  background: var(--borda-suave);
+  border-radius: 3px;
 }
 
+/* ---------- Bubbles ---------- */
 .mensagem {
-  max-width: 82%;
-  padding: 10px 14px;
-  border-radius: 14px;
-  line-height: 1.55;
+  max-width: 78%;
+  padding: 12px 18px;
+  border-radius: var(--radius);
+  line-height: 1.6;
   word-wrap: break-word;
   white-space: pre-wrap;
+  animation: msgIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
 }
+
+/* Bolha que carrega uma minuta: fica compacta, feita apenas de um cartão
+   com ícone de documento e botões de download. */
+.zona-minuta { max-width: 360px; }
+
+.doc-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--superficie);
+  border: 1px solid var(--borda-suave);
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+.doc-icone {
+  flex: none;
+  font-size: 28px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.4));
+}
+
+.doc-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.doc-nome {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--texto);
+  word-break: break-all;
+}
+
+.doc-meta {
+  font-size: 12px;
+  color: var(--texto-suave);
+}
+
+.acoes-minuta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 2px;
+}
+.acoes-minuta .botao {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .mensagem.usuario {
   align-self: flex-end;
   background: var(--msg-usuario);
-  border-bottom-right-radius: 4px;
+  color: var(--msg-usuario-texto);
+  border-bottom-right-radius: 6px;
+  box-shadow: 0 2px 12px rgba(74, 108, 247, 0.3);
 }
+
 .mensagem.agente {
   align-self: flex-start;
   background: var(--msg-assistente);
   border: 1px solid var(--borda);
-  border-bottom-left-radius: 4px;
+  border-bottom-left-radius: 6px;
+  box-shadow: var(--sombra-sutil);
 }
 
 .mensagem.agente .markdown { white-space: normal; }
 
-/* Markdown leve renderizado no cliente */
-.mensagem.agente h1, .mensagem.agente h2, .mensagem.agente h3 {
-  margin: 0.6em 0 0.3em;
+/* ---------- Markdown rendering inside agent bubbles ---------- */
+.mensagem.agente h1,
+.mensagem.agente h2,
+.mensagem.agente h3 {
+  margin: 0.7em 0 0.3em;
   font-size: 1.05em;
+  color: var(--texto);
 }
-.mensagem.agente ul, .mensagem.agente ol { padding-left: 1.4em; margin: 0.4em 0; }
+.mensagem.agente p { margin: 0.35em 0; }
+.mensagem.agente ul, .mensagem.agente ol { padding-left: 1.5em; margin: 0.4em 0; }
+.mensagem.agente li { margin: 0.15em 0; }
+
 .mensagem.agente pre {
-  background: #f8fafc;
+  background: var(--painel-claro);
   border: 1px solid var(--borda);
-  border-radius: 8px;
-  padding: 8px 10px;
+  border-radius: 10px;
+  padding: 10px 14px;
   overflow-x: auto;
-  font-size: 0.85em;
+  font-size: 0.84em;
+  margin: 0.5em 0;
 }
-.mensagem.agente code { background: #eef2ff; border-radius: 4px; padding: 0 4px; }
+.mensagem.agente code {
+  background: var(--painel-claro);
+  border: 1px solid var(--borda);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-size: 0.9em;
+}
+
 .mensagem.agente table {
   border-collapse: collapse;
   margin: 8px 0;
   font-size: 0.9em;
+  width: 100%;
 }
 .mensagem.agente th, .mensagem.agente td {
   border: 1px solid var(--borda);
-  padding: 4px 8px;
+  padding: 6px 10px;
   text-align: left;
 }
+.mensagem.agente th {
+  background: var(--painel-claro);
+  font-weight: 600;
+}
 
+/* ---------- Thinking indicator ---------- */
 .pensando::after {
   content: "";
   display: inline-block;
@@ -105,7 +255,7 @@ body {
 }
 @keyframes piscar { 0% { content: "…"; } 50% { content: "……"; } }
 
-/* ---------- Documento (minuta renderizada) ---------- */
+/* ---------- Documento (minuta renderizada) — NAO ALTERAR ---------- */
 .minuta-documento {
   margin-top: 12px;
   padding: 30px 36px;
@@ -198,8 +348,9 @@ body {
 }
 .minuta-cargo { display: block; }
 
+/* ---------- Acoes minuta ---------- */
 .acoes-minuta {
-  margin-top: 8px;
+  margin-top: 10px;
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
@@ -208,90 +359,204 @@ body {
 /* ---------- Formulario ---------- */
 .formulario {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: flex-end;
-  padding: 10px 0 14px;
+  padding: 14px 4px 18px;
   border-top: 1px solid var(--borda);
 }
-.barra-acoes { display: flex; align-items: center; gap: 6px; }
+.barra-acoes { display: flex; align-items: center; gap: 8px; }
+
 .entrada {
   flex: 1;
   resize: none;
   border: 1px solid var(--borda);
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-radius: 14px;
+  padding: 12px 16px;
   font: inherit;
+  font-size: 0.92rem;
+  background: var(--painel);
+  color: var(--texto);
+  transition: border-color var(--transicao), box-shadow var(--transicao);
+  line-height: 1.5;
 }
-.entrada:focus { outline: 2px solid var(--acento); outline-offset: 0; }
-.arquivo-nome { font-size: 0.8rem; color: var(--texto-suave); }
+.entrada::placeholder { color: var(--texto-suave); opacity: 0.6; }
+.entrada:focus {
+  outline: none;
+  border-color: var(--acento);
+  box-shadow: 0 0 0 3px var(--acento-glow);
+}
 
+.arquivo-nome {
+  font-size: 0.78rem;
+  color: var(--texto-suave);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Botoes ---------- */
 .botao {
   border: 1px solid var(--borda);
-  background: var(--painel);
-  border-radius: 10px;
-  padding: 8px 14px;
+  background: var(--painel-claro);
+  color: var(--texto);
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
   font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
   cursor: pointer;
+  transition: all var(--transicao);
 }
-.botao.primario { background: var(--acento); color: #fff; border-color: var(--acento); }
-.botao:hover { filter: brightness(0.96); }
-.botao.anexar { font-size: 1rem; line-height: 1; }
-.enviar { align-self: stretch; min-height: 42px; }
+.botao:hover {
+  background: #2e3250;
+  border-color: var(--borda-suave);
+}
+.botao.primario {
+  background: linear-gradient(135deg, #4a6cf7 0%, #6c8cff 100%);
+  color: #fff;
+  border: none;
+  box-shadow: 0 2px 10px rgba(74, 108, 247, 0.3);
+}
+.botao.primario:hover {
+  box-shadow: 0 4px 18px rgba(74, 108, 247, 0.45);
+  transform: translateY(-1px);
+}
+.botao.anexar {
+  font-size: 1.05rem;
+  line-height: 1;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  padding: 0;
+}
+.botao.anexar.modelo {
+  background: var(--painel-claro);
+  border-color: var(--acento);
+  color: var(--acento);
+}
+.botao.anexar.modelo:hover {
+  background: var(--acento-glow);
+  border-color: var(--acento);
+}
+.enviar {
+  align-self: stretch;
+  min-height: 44px;
+  border-radius: 14px;
+  padding: 0 22px;
+  font-weight: 600;
+}
+
+/* ---------- Chip de modelo ativo ---------- */
+.modelo-status {
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--acento);
+  background: var(--acento-glow);
+  border: 1px solid var(--acento);
+  border-radius: 10px;
+  padding: 6px 12px;
+  margin: 2px 4px 0;
+}
 
 /* ---------- Overlay de campos ---------- */
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(17, 24, 39, 0.55);
+  background: rgba(8, 10, 18, 0.7);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 20;
+  animation: fadeIn 0.2s ease;
 }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
 .overlay[hidden],
 .toast[hidden] {
   display: none !important;
 }
+
 .painel-campos {
   background: var(--painel);
-  border-radius: 14px;
-  padding: 18px 22px;
+  border: 1px solid var(--borda);
+  border-radius: 20px;
+  padding: 24px 28px;
   width: min(460px, 92vw);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  animation: panelIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(16px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.painel-campos h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--texto);
 }
 .painel-campos label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 0.85rem;
+  gap: 5px;
+  font-size: 0.82rem;
   color: var(--texto-suave);
+  font-weight: 500;
 }
 .painel-campos input {
   border: 1px solid var(--borda);
-  border-radius: 8px;
-  padding: 7px 9px;
+  border-radius: 10px;
+  padding: 9px 12px;
   font: inherit;
+  font-size: 0.88rem;
+  background: var(--painel-claro);
+  color: var(--texto);
+  transition: border-color var(--transicao), box-shadow var(--transicao);
 }
-.painel-acoes { display: flex; gap: 8px; justify-content: flex-end; }
-.dica { margin: 0; font-size: 0.82rem; color: var(--texto-suave); }
+.painel-campos input:focus {
+  outline: none;
+  border-color: var(--acento);
+  box-shadow: 0 0 0 3px var(--acento-glow);
+}
+.painel-acoes { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; }
+.dica { margin: 0; font-size: 0.8rem; color: var(--texto-suave); line-height: 1.4; }
 
 /* ---------- Toast ---------- */
 .toast {
   position: fixed;
-  bottom: 90px;
+  bottom: 96px;
   left: 50%;
   transform: translateX(-50%);
-  background: #111827;
-  color: #fff;
-  padding: 9px 16px;
-  border-radius: 20px;
+  background: var(--painel-claro);
+  color: var(--texto);
+  border: 1px solid var(--borda-suave);
+  padding: 10px 20px;
+  border-radius: 24px;
   font-size: 0.85rem;
+  font-weight: 500;
   z-index: 30;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  animation: toastIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
-/* ---------- Impressao (A4, moldura de pagina) ---------- */
+/* ---------- Impressao (A4, moldura de pagina) — NAO ALTERAR ---------- */
 @page {
   size: A4;
   margin: 0;

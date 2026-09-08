@@ -49,7 +49,11 @@ SYSTEM_INSTRUCTIONS = (
     "ou disser para gerar o arquivo, faca uma nova chamada da ferramenta "
     "sem values (ou com values parciais), marque claramente que a minuta "
     "exige revisao. Nao responda somente com uma minuta em texto quando o "
-    "usuario pediu o arquivo."
+    "usuario pediu o arquivo.\n"
+    "Se o usuario enviou um documento como modelo (botao 'Modelo', .docx), "
+    "a geracao usa automaticamente esse documento como base de formatacao e "
+    "estilo. Nesse caso, nao informe template_name na chamada da ferramenta "
+    "e avise o usuario que a minuta seguira o formato do documento enviado."
 )
 
 def _messages_for_llm() -> list[dict]:

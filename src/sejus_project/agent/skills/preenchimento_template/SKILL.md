@@ -20,6 +20,24 @@ Os templates atuais usam marcadores entre colchetes, como `[XX]`, `[ANO]`,
 `[NOME DO SIGNATÁRIO]` e `[TEXTO DO ARTIGO 1º ...]`. Não substitua esses
 marcadores por nomes inventados como `{numero}` sem antes verificar o DOCX.
 
+## Modelo enviado pelo usuário
+
+Se o usuário enviou um documento como modelo (botão "Modelo", somente `.docx`),
+esse arquivo **substitui o template fixo** como base de formatação e estilo:
+
+- O tipo do ato é detectado pelo próprio documento enviado (ex.: o título
+  "PORTARIA Nº 45/2026..." indica portaria), e os regex de formatação do
+  perfil correspondente são aplicados sobre o arquivo enviado.
+- A estrutura do documento enviado (artigos, considerandos, incisos, nível
+  de detalhamento, preâmbulo) é injetada no prompt como referência: a minuta
+  deve espelhar esse documento, não os templates de `docs/templates/`.
+- Se o tipo pedido no texto diferir do tipo do modelo enviado, o modelo do
+  usuário ainda vence: a minuta sai no formato do documento enviado.
+- **Não informe `template_name`** na chamada de `gerar_documento_normativo`
+  quando houver modelo do usuário ativo — a tool já resolve automaticamente.
+- O modelo fica ativo para a conversa até o usuário limpar. Avise o usuário
+  que a minuta seguiu o formato do documento enviado e marque para revisão.
+
 ## Regra anti-loop (leia antes de tudo)
 
 O erro mais comum desta skill é ficar perguntando a mesma coisa em vários

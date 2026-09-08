@@ -19,9 +19,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-# Pasta onde os arquivos enviados pelo usuário ficam. Ajuste se o caminho
-# real do projeto for diferente.
-IMPORTACOES_DIR = Path("importacoes_usuario")
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# Pasta onde os arquivos enviados pelo usuário ficam. Caminho ABSOLUTO a partir
+# da raiz do projeto — o mesmo usado pelo endpoint /api/upload — para upload e
+# análise sempre enxergarem a mesma pasta, independente do diretório onde o
+# servidor for iniciado.
+IMPORTACOES_DIR = PROJECT_ROOT / "importacoes_usuario"
 
 # Limite de caracteres devolvidos ao agente, para não estourar o contexto
 # em arquivos muito grandes. Ajuste conforme necessário.
@@ -104,6 +108,22 @@ _EXTRACTORS = {
 }
 
 
+def extract_file_text(path: Path) -> str:
+    """Extrai o texto de um arquivo pelo formato, sem resolver a pasta.
+
+    Diferente de ``read_user_file``, trabalha com um caminho absoluto já
+    validado e não trunca o conteúdo (usado por exemplo para carregar um
+    DOCX do usuário como modelo de formatação)."""
+    extension = path.suffix.lower()
+    extractor = _EXTRACTORS.get(extension)
+    if extractor is None:
+        raise UserFileError(
+            f"Formato '{extension}' não suportado. Formatos aceitos: "
+            f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
+    return extractor(path)
+
+
 def read_user_file(filename: str) -> dict:
     """Lê e extrai o conteúdo de um arquivo em importacoes_usuario/.
 
@@ -112,14 +132,7 @@ def read_user_file(filename: str) -> dict:
     path = _resolve_file(filename)
     extension = path.suffix.lower()
 
-    extractor = _EXTRACTORS.get(extension)
-    if extractor is None:
-        raise UserFileError(
-            f"Formato '{extension}' não suportado. Formatos aceitos: "
-            f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}"
-        )
-
-    text = extractor(path)
+    text = extract_file_text(path)
     truncated = len(text) > MAX_CHARS
     if truncated:
         text = text[:MAX_CHARS]

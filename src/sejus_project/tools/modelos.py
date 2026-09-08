@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from sejus_project.tools.docx_templates import PROJECT_ROOT, TEMPLATES_DIR
 
@@ -22,6 +23,7 @@ class PerfilModelo:
     file: str
     act_types: tuple[str, ...]
     patterns: dict[str, str]
+    preservar_moldura: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,34 @@ ACT_TYPE_FILTER = {
 
 _TIPO_PADRAO = "portaria"
 
+# Alternativas em ordem de especificidade (termos compostos antes dos
+# simples) para localizar o tipo de ato no TITULO de um documento.
+_RE_TITULO_TIPOS = re.compile(
+    r"^\s*(portaria\s+conjunta|instru[çc][aã]o\s+normativa|"
+    r"retifica[çc][aã]o|decreto|portaria)\b",
+    re.IGNORECASE,
+)
+
+
+def detectar_tipo_ato_por_titulo(texto: str) -> str:
+    """Detecta o tipo de ato a partir do titulo real do documento.
+
+    O titulo costuma ser uma linha curta como 'PORTARIA Nº 45/2026/...',
+    'DECRETO Nº 123/...' ou 'PORTARIA CONJUNTA Nº 07/...'. A busca ocorre
+    linha a linha (ignorando vazias) porque os cabeçalhos do Diário Oficial
+    ('Nº 29.013', 'Página 69') e o corpo (que cita decretos e leis no
+    preâmbulo e considerandos) poluem a detecção por palavra solta.
+
+    Se o título real não mencionar o tipo, usa o padrão (portaria).
+    """
+    for linha in (texto or "").splitlines():
+        if not linha.strip():
+            continue
+        m = _RE_TITULO_TIPOS.match(linha)
+        if m:
+            return m.group(1).casefold()
+    return _TIPO_PADRAO
+
 
 def detectar_tipo_ato(pedido: str) -> str:
     """Detecta o tipo de ato mencionado no pedido do usuario."""
@@ -181,6 +211,33 @@ def buscar_perfil(nome: str) -> PerfilModelo | None:
         if modelo.name.casefold() == nome_n or nome_n in modelo.file.casefold():
             return modelo
     return None
+
+
+def crear_perfil_de_arquivo(path: Path, texto: str, nome: str) -> PerfilModelo:
+    """Cria um PerfilModelo dinâmico a partir de um DOCX enviado pelo usuário.
+
+    Detecta o tipo de ato pelo conteúdo do documento (título real, ex.:
+    'PORTARIA Nº 45/2026...') e reutiliza o pattern de referência do perfil
+    embutido correspondente. Assim o motor de montagem (docx_engine) localiza
+    os parágrafos de formatação no arquivo enviado da mesma forma que faz nos
+    templates oficiais.
+
+    Se o tipo não for detectado, assume portaria (default do projeto).
+    """
+    path = Path(path)
+    # Detecta pelo título do documento (linha curta como 'PORTARIA Nº ...'),
+    # evitando que referências a outros atos no corpo (ex.: portaria que cita
+    # um decreto no preâmbulo) confundam a detecção.
+    tipo = detectar_tipo_ato_por_titulo(texto)
+    base = selecionar_modelo(tipo)
+    nome_limpo = re.sub(r"[^\w]+", "_", nome).strip("_") or "Modelo"
+    return PerfilModelo(
+        name=f"USUARIO_{nome_limpo}",
+        file=str(path.resolve()),
+        act_types=base.act_types,
+        patterns=base.patterns,
+        preservar_moldura=True,
+    )
 
 
 def _normalizar_pedido(pedido: str) -> str:

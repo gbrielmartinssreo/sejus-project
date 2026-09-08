@@ -32,7 +32,7 @@ Uso:
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -99,7 +99,7 @@ class QdrantIndexer:
                 field_schema=qmodels.PayloadSchemaType.KEYWORD,
             )
 
-    def index_chunks(self, chunks: list["Chunk"], embedder) -> None:
+    def index_chunks(self, chunks: list[Chunk], embedder) -> None:
         """Gera embeddings em lote e envia para o Qdrant em batches."""
         texts = [c.text for c in chunks]
         vectors = embedder.embed_passages(texts)
@@ -169,6 +169,7 @@ if __name__ == "__main__":
     # deste arquivo, já que não é responsabilidade do indexing.py.
     import argparse
     import json
+
     from sejus_project.rag.chunking import Chunk
     from sejus_project.rag.embedding import Embedder
 
