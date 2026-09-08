@@ -8,16 +8,15 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "dotenv>=0.9.9",
     "groq>=1.7.0",
     "markitdown[pdf]>=0.1.7",
     "openai>=2.0.0",
     "pypdf>=6.16.2",
     "python-docx>=1.2.0",
+    "python-dotenv>=1.2.3",
     "qdrant-client>=1.19.0",
     "rich>=15.0.0",
     "ruff>=0.16.5",
-    "sentence-transformers>=6.0.1",
     "tiktoken>=0.14.0",
 ]
 
