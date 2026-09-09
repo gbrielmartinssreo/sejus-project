@@ -72,7 +72,21 @@ SYSTEM_INSTRUCTIONS = (
     "ferramenta sem o argumento filename: ela usa a importacao mais recente "
     "e devolve a lista de outras arquivos importados para voce sugerir. "
     "O mesmo vale para analisar_arquivo_usuario: sem filename ela le a "
-    "importacao mais recente."
+    "importacao mais recente.\n"
+    "Voce SOMENTE gera minutas normativas oficiais (portaria, instrucao "
+    "normativa, portaria conjunta, decreto, retificacao) usando "
+    "gerar_documento_normativo. Voce NAO gera documentos genericos — tabelas "
+    "de resumo, relatorios, atas, oficios, planilhas ou qualquer outro DOCX "
+    "que nao seja um ato normativo. Se o usuario pedir algo fora desse "
+    "escopo (ex.: 'DOCX com a tabela resumo'), recuse educadamente e nao "
+    "invente que o arquivo foi criado. Nunca afirme que gerou um arquivo se "
+    "a ferramenta nao retornou geracao. Ao responder, nao mencione caminhos "
+    "internos de arquivos (ex.: 'outputs/...'); diga que o documento gerado "
+    "esta disponivel no cartao de download. Nunca descreva o arquivo gerado "
+    "como contendo algo que o ato nao contem (ex.: nao diga que uma minuta "
+    "normativa e 'so a tabela'). Se gerar_documento_normativo retornar "
+    "status 'nao_normativo', admita o limite e responda em texto, sem "
+    "insistir nem gerar o arquivo."
 )
 
 def _messages_for_llm() -> list[dict]:
@@ -256,6 +270,9 @@ def executar(question):
         "pode preencher",
         "pode inventar",
         "prossiga",
+        "faça isso",
+        "faca isso",
+        "pode fazer",
         "sim",
         "ok",
         "okay",
@@ -272,8 +289,8 @@ def executar(question):
         result = json.loads(gerar_documento_normativo(question))
         if result.get("status") == "generated":
             return (
-                "Documento gerado com sucesso. "
-                f"Arquivo: {result['output_path']}\n\n"
+                "Documento gerado com sucesso. O arquivo já está disponível "
+                "no cartão de download desta conversa.\n\n"
                 "A minuta foi preenchida automaticamente e precisa ser revisada."
             )
 

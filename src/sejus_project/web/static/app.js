@@ -132,6 +132,15 @@ var DICIONARIO_CAMPOS = {
 
 var aguardando = false;
 
+var ICONE_ARQUIVO =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>';
+var ICONE_CHECK =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>';
+var ICONE_DOWNLOAD =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>';
+var ICONE_COPIAR =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V4a2 2 0 012-2h10"/></svg>';
+
 function toast(mensagem) {
   $toast.textContent = mensagem;
   $toast.hidden = false;
@@ -174,9 +183,9 @@ function bubblePensando() {
   return div;
 }
 
-function botaoAcao(texto, aoClicar) {
+function botaoAcao(texto, aoClicar, classe) {
   var b = document.createElement("button");
-  b.className = "botao";
+  b.className = "botao" + (classe ? " " + classe : "");
   b.type = "button";
   b.textContent = texto;
   b.addEventListener("click", aoClicar);
@@ -192,18 +201,21 @@ function anexarMinuta(bubble, dados) {
 
   var icone = document.createElement("div");
   icone.className = "doc-icone";
-  icone.textContent = "\u{1F4C4}";
+  icone.innerHTML = ICONE_ARQUIVO;
 
   var info = document.createElement("div");
   info.className = "doc-info";
+
+  var status = document.createElement("div");
+  status.className = "doc-status";
+  status.innerHTML = ICONE_CHECK + "<span>" + escapeHtml("Documento gerado") + "</span>";
+
   var nome = document.createElement("span");
   nome.className = "doc-nome";
   nome.textContent = dados.minuta_nome || "minuta.docx";
-  var meta = document.createElement("span");
-  meta.className = "doc-meta";
-  meta.textContent = "Documento gerado";
+
+  info.appendChild(status);
   info.appendChild(nome);
-  info.appendChild(meta);
 
   card.appendChild(icone);
   card.appendChild(info);
@@ -212,27 +224,36 @@ function anexarMinuta(bubble, dados) {
   var acoes = document.createElement("div");
   acoes.className = "acoes-minuta";
   if (dados.minuta_docx) {
-    acoes.appendChild(botaoAcao("Baixar DOCX", function () {
+    acoes.appendChild(botaoAcaoChild(ICONE_DOWNLOAD, "Baixar DOCX", function () {
       baixarArquivo(dados.minuta_docx);
-    }));
+    }, "primary"));
   }
   if (dados.minuta_pdf) {
-    acoes.appendChild(botaoAcao("Baixar PDF", function () {
+    acoes.appendChild(botaoAcaoChild(ICONE_DOWNLOAD, "Baixar PDF", function () {
       baixarArquivo(dados.minuta_pdf);
-    }));
+    }, "secondary"));
   }
   if (dados.minuta_texto) {
-    acoes.appendChild(botaoAcao("Copiar texto", function () {
+    acoes.appendChild(botaoAcaoChild(ICONE_COPIAR, "Copiar texto", function () {
       if (navigator.clipboard) {
         navigator.clipboard.writeText(dados.minuta_texto).then(function () { toast("Minuta copiada."); });
       } else {
         toast("Não foi possível copiar.");
       }
-    }));
+    }, "secondary"));
   }
-  zona.appendChild(acoes);
+  info.appendChild(acoes);
 
   bubble.appendChild(zona);
+}
+
+function botaoAcaoChild(svg, texto, aoClicar, classe) {
+  var b = botaoAcao("", aoClicar, classe);
+  var el = document.createElement("span");
+  el.textContent = texto;
+  b.insertAdjacentHTML("afterbegin", svg);
+  b.appendChild(el);
+  return b;
 }
 
 function baixarArquivo(url) {
@@ -256,14 +277,24 @@ function anexarPendencia(bubble, campos) {
   bubble.appendChild(acoes);
 }
 
+function criarBubbleArquivo(label, nome) {
+  var div = document.createElement("div");
+  div.className = "mensagem usuario upload";
+  var lbl = document.createElement("span");
+  lbl.className = "label";
+  lbl.textContent = label;
+  var fn = document.createElement("span");
+  fn.className = "filename";
+  fn.textContent = nome;
+  div.appendChild(lbl);
+  div.appendChild(fn);
+  $mensagens.appendChild(div);
+  $mensagens.scrollTop = $mensagens.scrollHeight;
+  return div;
+}
+
 function anexarArquivoEnviado(nome) {
-  var bubble = criarBubble("usuario", "Arquivo enviado: " + nome);
-  var acoes = document.createElement("div");
-  acoes.className = "acoes-minuta";
-  acoes.appendChild(botaoAcao("Analisar", function () {
-    enviar("Analise o arquivo '" + nome + "'.");
-  }));
-  bubble.appendChild(acoes);
+  criarBubbleArquivo("Arquivo enviado", nome);
 }
 
 function anexarComparacao(bubble, dados) {
@@ -272,7 +303,11 @@ function anexarComparacao(bubble, dados) {
 
   var titulo = document.createElement("div");
   titulo.className = "comparacao-titulo";
-  titulo.textContent = "Comparação antes/depois";
+  titulo.textContent = "Comparação antes / depois";
+  var contagem = document.createElement("span");
+  contagem.className = "count";
+  contagem.textContent = (dados.alteracoes ? dados.alteracoes.length : 0) + " alterações";
+  titulo.appendChild(contagem);
   painel.appendChild(titulo);
 
   if (dados.alteracoes && dados.alteracoes.length) {
@@ -280,19 +315,25 @@ function anexarComparacao(bubble, dados) {
     lista.className = "lista-alteracoes";
     dados.alteracoes.forEach(function (alteracao) {
       var li = document.createElement("li");
+      li.className = "alteracao-item";
       var tipo = document.createElement("span");
       tipo.className = "alteracao-tipo " + (alteracao.tipo || "alterado");
       tipo.textContent = alteracao.tipo || "alterado";
       li.appendChild(tipo);
+      var corpo = document.createElement("div");
+      corpo.className = "item-body";
       if (alteracao.o_que) {
-        li.appendChild(document.createTextNode(" " + alteracao.o_que));
+        var h = document.createElement("h4");
+        h.textContent = alteracao.o_que;
+        corpo.appendChild(h);
       }
       if (alteracao.detalhe) {
-        var det = document.createElement("div");
+        var det = document.createElement("p");
         det.className = "alteracao-detalhe";
         det.textContent = alteracao.detalhe;
-        li.appendChild(det);
+        corpo.appendChild(det);
       }
+      li.appendChild(corpo);
       lista.appendChild(li);
     });
     painel.appendChild(lista);
@@ -301,9 +342,9 @@ function anexarComparacao(bubble, dados) {
   if (dados.url_original) {
     var acoes = document.createElement("div");
     acoes.className = "acoes-minuta";
-    acoes.appendChild(botaoAcao("Baixar original", function () {
+    acoes.appendChild(botaoAcao("Baixar versão original", function () {
       baixarArquivo(dados.url_original);
-    }));
+    }, "ghost"));
     painel.appendChild(acoes);
   }
 
@@ -457,7 +498,7 @@ $arquivoMelhorar.addEventListener("change", async function () {
     var resposta = await fetch("/api/upload", { method: "POST", body: form });
     var dados = await resposta.json();
     if (!resposta.ok) throw new Error(dados.detail || "falha no upload");
-    criarBubble("usuario", "Arquivo enviado para melhoria: " + dados.filename);
+    criarBubbleArquivo("Arquivo enviado para melhoria", dados.filename);
     enviar("Melhore e compare o arquivo '" + dados.filename + "'");
   } catch (erro) {
     toast("Upload falhou: " + erro.message);
@@ -497,14 +538,31 @@ $formCampos.addEventListener("submit", function (evento) {
 document.getElementById("cancelar-campos").addEventListener("click", fecharOverlayCampos);
 $limpar.addEventListener("click", limparConversa);
 
+/* ---------- Tema ---------- */
+
+var $btnEscuro = document.getElementById("btn-escuro");
+var $btnClaro = document.getElementById("btn-claro");
+
+function aplicarTema(tema) {
+  document.body.setAttribute("data-theme", tema);
+  $btnEscuro.classList.toggle("is-active", tema === "dark");
+  $btnClaro.classList.toggle("is-active", tema === "light");
+  try { localStorage.setItem("sejus_tema", tema); } catch (e) { /* ignore */ }
+}
+
+var temaSalvo = "dark";
+try { temaSalvo = localStorage.getItem("sejus_tema") || "dark"; } catch (e) { /* ignore */ }
+aplicarTema(temaSalvo);
+
+$btnEscuro.addEventListener("click", function () { aplicarTema("dark"); });
+$btnClaro.addEventListener("click", function () { aplicarTema("light"); });
+
 criarBubble("agente",
   "Olá! Sou o agente da SEJUS. Posso responder sobre os atos normativos " +
   "recuperados do acervo e **gerar minutas** (portarias, instruções normativas, " +
   "decretos etc.) — o documento aparece aqui como anexo, pronto para baixar em " +
-  "DOCX ou PDF.\n\n" +
-  "Você também pode enviar um ato para **análise** (📎) ou para **melhorar e " +
-  "comparar** (botão ✨): o agente reescreve o mesmo documento com melhorias " +
-  "e adequações, e mostra a comparação antes/depois.\n\n" +
-  "O botão 📄 define um ato existente como **modelo** de formatação: a nova " +
-  "minuta seguirá exatamente o formato do documento enviado.\n\n" +
-  "Ex.: *Gere uma portaria sobre limpeza das unidades*.");
+  "DOCX ou PDF. Você também pode enviar um ato para **análise** ou para " +
+  "**melhorar e comparar**: eu reescrevo o mesmo documento com melhorias e " +
+  "adequações, e mostro a comparação antes/depois. Definir um ato existente " +
+  "como **modelo** faz a nova minuta seguir exatamente o formato enviado.\n\n" +
+  "Ex.: *Gere uma portaria sobre limpeza das unidades.*");

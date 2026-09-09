@@ -708,3 +708,55 @@ def test_montagem_com_docx_de_usuario_preserva_formatacao(tmp_path):
     assert titulo.runs[0].bold is True
     assert titulo.runs[0].font.size == Pt(13)
     generation._modelo_usuario = None
+
+
+def test_gerar_recusa_documento_generico_tabela(fake_retrieval, fake_minuta):
+    """Agente nao pode gerar DOCX generico (tabela de resumo): a tool recusa."""
+    generation._pending_document = None
+    resultado = json.loads(
+        generation.gerar_documento_normativo(
+            "Crie um DOCX com a tabela resumo das portarias 45 e 46."
+        )
+    )
+    assert resultado["status"] == "nao_normativo"
+    assert generation.has_pending_document() is False
+    generation._pending_document = None
+
+
+def test_gerar_recusa_tabela_mesmo_mencionando_portaria(fake_retrieval, fake_minuta):
+    """Mesmo citando 'portaria', um pedido de tabela/resumo nao e normativo."""
+    generation._pending_document = None
+    resultado = json.loads(
+        generation.gerar_documento_normativo(
+            "Gere um DOCX com a tabela resumo de uma portaria sobre limpeza."
+        )
+    )
+    assert resultado["status"] == "nao_normativo"
+    assert generation.has_pending_document() is False
+    generation._pending_document = None
+
+
+def test_guarda_nao_bloqueia_pedido_normativo(fake_retrieval, fake_minuta):
+    generation._pending_document = None
+    resultado = json.loads(
+        generation.gerar_documento_normativo(
+            "Gere uma portaria sobre limpeza das unidades administrativas."
+        )
+    )
+    assert resultado["status"] == "awaiting_confirmation"
+    assert generation.has_pending_document() is True
+    generation._pending_document = None
+
+
+def test_confirmacao_faca_isso_gera_pendente(fake_retrieval, fake_minuta):
+    """'faca isso' confirma uma minuta pendente (e nao uma geracao nova)."""
+    generation._pending_document = None
+    first = json.loads(
+        generation.gerar_documento_normativo("Gere uma portaria sobre limpeza.")
+    )
+    assert first["status"] == "awaiting_confirmation"
+
+    resultado = json.loads(generation.gerar_documento_normativo("faça isso"))
+
+    assert resultado["status"] == "generated"
+    generation._pending_document = None

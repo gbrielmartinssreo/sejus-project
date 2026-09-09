@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from sejus_project.tools import minuta, modelos
@@ -110,9 +111,18 @@ definition = {
     "function": {
         "name": "gerar_documento_normativo",
         "description": (
-            "Seleciona automaticamente um modelo DOCX real da SEJUS conforme o "
+            "Gera um ATO NORMATIVO (minuta oficial): seleciona "
+            "automaticamente um modelo DOCX real da SEJUS conforme o "
             "tipo de ato pedido, consulta atos normativos relacionados no RAG e "
-            "gera uma copia preenchida em outputs/. Se o usuario tiver enviado "
+            "gera uma copia preenchida em outputs/. Use SOMENTE quando o "
+            "usuario pedir explicitamente um ato normativo (portaria, "
+            "instrucao normativa, portaria conjunta, decreto, retificacao). "
+            "NAO use para documentos genericos: tabelas de resumo, "
+            "relatorios, atas, oficios, planilhas ou qualquer outro DOCX que "
+            "nao seja um ato normativo — a ferramenta nao sabe montar esses "
+            "documentos e retorna status 'nao_normativo'. Um pedido vago como "
+            "'faca isso' so faz sentido quando ja existe uma minuta pendente "
+            "esperando confirmacao. Se o usuario tiver enviado "
             "um documento como modelo (botao 'Modelo' com .docx), este modelo "
             "do usuario e usado como base de formatacao e estilo no lugar do "
             "template interno. Na primeira chamada, informe "
@@ -130,7 +140,7 @@ definition = {
             "properties": {
                 "request": {
                     "type": "string",
-                    "description": "Pedido do usuario e objeto pretendido para o ato.",
+                    "description": "Pedido do usuario e objeto pretendido do ATO normativo (ex.: 'Gere uma portaria sobre limpeza das unidades').",
                 },
                 "template_name": {
                     "type": "string",
@@ -233,6 +243,9 @@ def _is_generation_confirmation(request: str) -> bool:
         "pode preencher",
         "pode inventar",
         "prossiga",
+        "faça isso",
+        "faca isso",
+        "pode fazer",
         "sim",
         "ok",
         "okay",
@@ -250,6 +263,34 @@ def _is_generation_confirmation(request: str) -> bool:
         or f" {phrase} " in f" {normalized} "
         for phrase in phrases
     )
+
+
+# Palavras que indicam intencao de gerar um ATO normativo (minuta oficial).
+_RE_INTENCAO_NORMATIVA = re.compile(
+    r"(portaria|instru[çc][aã]o\s+normativa|decreto|retifica[çc][aã]o|"
+    r"ato\s+normativo|minuta)",
+    re.IGNORECASE,
+)
+
+# Conteudo que NAO e um ato normativo (a tool so monta minutas oficiais).
+_RE_CONTEUDO_NAO_NORMATIVO = re.compile(
+    r"(tabela|resumo|relat[óo]rio|planilha|lista|s[íi]ntese|ata|of[íi]cio|"
+    r"convite|gr[áa]fico|certid[aã]o|memorando)",
+    re.IGNORECASE,
+)
+
+
+def _intencao_normativa(request: str) -> bool:
+    """Diz se o pedido aponta para gerar um ato normativo (e nao falar de um
+    documento generico como tabela de resumo, relatorio ou ata).
+
+    A tool so gera minutas oficiais a partir dos templates DOCX da SEJUS;
+    pedidos de DOCX/PDF genericos sao recusados com status ``nao_normativo``
+    para que o agente nao invente documentos que nao sabe montar."""
+    texto = request.casefold()
+    if not _RE_INTENCAO_NORMATIVA.search(texto):
+        return False
+    return not _RE_CONTEUDO_NAO_NORMATIVO.search(texto)
 
 
 def _resolver_perfil(request: str, template_name: str | None) -> modelos.PerfilModelo:
@@ -337,6 +378,21 @@ def gerar_documento_normativo(
                 pendente["perfil"],
                 pendente["contexto"],
                 values,
+            )
+
+        if not _intencao_normativa(request):
+            return json.dumps(
+                {
+                    "status": "nao_normativo",
+                    "error": (
+                        "O pedido não é de um ato normativo. Esta ferramenta "
+                        "só gera minutas oficiais (portaria, instrução "
+                        "normativa, portaria conjunta, decreto, retificação) — "
+                        "não documentos genéricos como tabelas de resumo, "
+                        "relatórios ou atas."
+                    ),
+                },
+                ensure_ascii=False,
             )
 
         perfil = _resolver_perfil(request, template_name)
