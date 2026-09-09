@@ -47,6 +47,20 @@ def _list_available_files() -> list[str]:
     )
 
 
+def _ultimo_arquivo_importado() -> str | None:
+    """Nome do arquivo importado mais recentemente (por modificação)."""
+    if not IMPORTACOES_DIR.exists():
+        return None
+    arquivos = [
+        f
+        for f in IMPORTACOES_DIR.iterdir()
+        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
+    if not arquivos:
+        return None
+    return max(arquivos, key=lambda f: f.stat().st_mtime).name
+
+
 def _resolve_file(filename: str) -> Path:
     """Resolve o nome do arquivo dentro de importacoes_usuario/, protegendo
     contra path traversal (ex: '../../etc/passwd')."""
@@ -170,13 +184,13 @@ definition = {
                     "type": "string",
                     "description": (
                         "Nome do arquivo dentro da pasta importacoes_usuario/ "
-                        "(ex: 'minuta_contrato.pdf'). Se não souber o nome "
-                        "exato, chame sem preencher para listar os arquivos "
-                        "disponíveis."
+                        "(ex: 'minuta_contrato.pdf'). OPCIONAL: se o usuario "
+                        "acabou de importar/enviar e nao informou o nome, "
+                        "NAO preencha — a tool usa a importacao mais recente "
+                        "e lista as alternativas."
                     ),
                 },
             },
-            "required": ["filename"],
         },
     },
 }
@@ -185,13 +199,17 @@ definition = {
 def analisar_arquivo_usuario(filename: str | None = None) -> str:
     """Função exposta ao agente. Sempre devolve uma string (JSON) --
     nunca lança exceção para o chamador, para o agente conseguir reagir
-    ao erro (ex: pedir o nome certo do arquivo) em vez de quebrar."""
+    ao erro (ex: pedir o nome certo do arquivo) em vez de quebrar.
+
+    Sem ``filename``, usa a importação mais recente da pasta (útil quando
+    o usuário acabou de enviar o arquivo e não sabe o nome)."""
     if not filename:
-        available = _list_available_files()
-        return json.dumps({
-            "error": "Nenhum nome de arquivo informado.",
-            "available_files": available,
-        }, ensure_ascii=False)
+        filename = _ultimo_arquivo_importado()
+        if not filename:
+            return json.dumps({
+                "error": "Nenhum arquivo importado ainda.",
+                "available_files": [],
+            }, ensure_ascii=False)
 
     try:
         result = read_user_file(filename)

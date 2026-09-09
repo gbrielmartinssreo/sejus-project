@@ -58,6 +58,32 @@ def test_executar_captura_falha_do_llm(monkeypatch):
     assert "API fora do ar" in resp
 
 
+def test_short_circuit_melhoria_sem_nome_usa_mais_recente(monkeypatch):
+    """Sem nomear o arquivo, o agente chama a tool de melhoria sem filename
+    (que usa a importação mais recente) e lista as alternativas na resposta."""
+    monkeypatch.setattr(agent, "messages", [])
+
+    def fake_melhorar(filename=None, diretrizes=None):
+        assert filename is None
+        return json.dumps({
+            "status": "improved",
+            "filename": "recente.txt",
+            "alteracoes": [
+                {"tipo": "corrigido", "o_que": "Fundamento legal", "detalhe": "Atualizado."}
+            ],
+            "outros": ["antigo.txt", "outro.pdf"],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(agent, "melhorar_documento_usuario", fake_melhorar)
+
+    resposta = agent.executar("Melhore o arquivo que mandei")
+
+    assert "recente.txt" in resposta
+    assert "corrigido" in resposta
+    assert "antigo.txt" in resposta
+    assert "outro.pdf" in resposta
+
+
 def test_gerar_documento_rejeita_pedido_gigante():
     resultado = json.loads(
         generation.gerar_documento_normativo("a" * (generation.MAX_REQUEST_CHARS + 1))

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,40 @@ def fake_minuta(monkeypatch, tmp_path):
     return tmp_path
 
 
+@pytest.fixture
+def fake_melhoria(monkeypatch, tmp_path, fake_minuta):
+    """Igual ao fake_minuta, mas com gerar_estrutura_melhoria fake que devolve
+    estrutura + lista de alteracoes."""
+    capturados = {}
+
+    def gerar_estrutura_melhoria(conteudo, tipo, perfil, contexto, valores=None):
+        capturados.update(
+            {
+                "conteudo": conteudo,
+                "tipo": tipo,
+                "perfil": perfil,
+                "valores": valores,
+            }
+        )
+        return ESTRUTURA.copy(), [
+            {
+                "tipo": "corrigido",
+                "o_que": "Fundamento legal no preâmbulo",
+                "detalhe": "Atualizado para o art. vigente recuperado no RAG.",
+            },
+            {
+                "tipo": "adicionado",
+                "o_que": "Artigo de vigência",
+                "detalhe": "Incluída cláusula de vigência na data de publicação.",
+            },
+        ]
+
+    monkeypatch.setattr(
+        generation.minuta, "gerar_estrutura_melhoria", gerar_estrutura_melhoria
+    )
+    return capturados
+
+
 def test_first_call_returns_fields_and_context(fake_retrieval, fake_minuta):
     generation._pending_document = None
     request = "Gere uma portaria sobre limpeza da cadeia em Cuiaba."
@@ -102,6 +137,34 @@ def test_first_call_returns_fields_and_context(fake_retrieval, fake_minuta):
     assert fake_retrieval
     assert "limit" in fake_retrieval[0][1]
     assert fake_retrieval[0][1]["act_type"] == "PORTARIA"
+
+
+def test_pendencia_sinalizada_no_turno_da_primeira_chamada(fake_retrieval, fake_minuta):
+    generation._pending_document = None
+    generation._pendencia_mudou_no_turno = False
+    request = "Gere uma portaria sobre limpeza da cadeia em Cuiaba."
+
+    inspection = json.loads(generation.gerar_documento_normativo(request))
+
+    assert inspection["status"] == "awaiting_confirmation"
+    assert generation.has_pending_document() is True
+    assert generation.consumir_pendencia_do_turno() is True
+    assert generation.consumir_pendencia_do_turno() is False
+    assert generation.has_pending_document() is True
+
+
+def test_cancelar_pendencia_descarta_estado(fake_retrieval, fake_minuta):
+    generation._pending_document = None
+    generation._pendencia_mudou_no_turno = False
+    request = "Gere uma portaria sobre limpeza da cadeia em Cuiaba."
+
+    json.loads(generation.gerar_documento_normativo(request))
+    assert generation.has_pending_document() is True
+
+    generation.cancelar_pendencia()
+
+    assert generation.has_pending_document() is False
+    assert generation.consumir_pendencia_do_turno() is False
 
 
 def test_inform_campos_produces_generated(fake_retrieval, fake_minuta):
@@ -149,6 +212,105 @@ def test_short_confirmation_generates_pending_document(fake_retrieval, fake_minu
     assert result["status"] == "generated"
     assert result["review_required"] is True
     assert Path(result["output_path"]).is_file()
+
+
+def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """Melhorar um .docx usa o próprio arquivo como modelo de formatação e
+    guarda os dados da comparação antes/depois."""
+    from sejus_project.tools import user_files
+
+    generation._ultima_minuta = None
+    generation._ultima_comparacao = None
+    generation._melhoria_no_turno = False
+
+    arquivo = tmp_path / "portaria_limpeza.docx"
+    document = Document()
+    document.add_paragraph("PORTARIA Nº 45/2026/GAB-SEJUS/MT")
+    document.save(str(arquivo))
+
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    result = json.loads(
+        generation.melhorar_documento_usuario(
+            "portaria_limpeza.docx",
+            diretrizes="mantenha o mesmo número",
+        )
+    )
+
+    assert result["status"] == "improved"
+    assert Path(result["output_path"]).is_file()
+    assert result["alteracoes"]
+    assert generation._melhoria_no_turno is True
+    assert generation.consumir_melhoria_do_turno() is True
+
+    comparacao = generation.ultima_comparacao()
+    assert comparacao["arquivo_original"] == "portaria_limpeza.docx"
+    assert "PORTARIA Nº 45/2026/GAB-SEJUS/MT" in comparacao["antes"]
+    assert comparacao["alteracoes"][0]["tipo"] == "corrigido"
+
+    capturado = fake_melhoria
+    assert capturado["perfil"].preservar_moldura is True
+    assert capturado["valores"] == {"diretrizes": "mantenha o mesmo número"}
+    assert capturado["tipo"] in ("portaria", "instrução normativa", "decreto", "retificação")
+
+
+def test_melhoria_txt_usa_template_padrao(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """Arquivos sem formatação (txt/pdf/md) caem no template oficial do tipo."""
+    from sejus_project.tools import user_files
+
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato_decreto.txt").write_text(
+        "DECRETO Nº 1/2026/GAB-SEJUS/MT\nDispõe sobre limpeza das unidades.\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(generation.melhorar_documento_usuario("ato_decreto.txt"))
+
+    assert result["status"] == "improved"
+    assert fake_melhoria["tipo"] == "decreto"
+    assert fake_melhoria["perfil"].name.startswith("DECRETO")
+    assert fake_melhoria["perfil"].preservar_moldura is False
+
+
+def test_melhoria_arquivo_inexistente_retorna_erro(fake_retrieval, fake_melhoria):
+    result = json.loads(generation.melhorar_documento_usuario("nao_existe.pdf"))
+
+    assert result["status"] == "error"
+    assert "não encontrado" in result["error"].casefold()
+
+
+def test_melhoria_sem_nome_usa_importacao_mais_recente(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """Sem informar o arquivo, a tool usa a importação mais recente e devolve
+    as alternativas na lista 'outros'."""
+    from sejus_project.tools import user_files
+
+    generation._ultima_comparacao = None
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "antigo.txt").write_text(
+        "DECRETO Nº 1/2025/GAB-SEJUS/MT\nTexto antigo.\n", encoding="utf-8"
+    )
+    (tmp_path / "recente.txt").write_text(
+        "INSTRUÇÃO NORMATIVA Nº 10/2026/GAB-SEJUS/MT\nTexto novo.\n",
+        encoding="utf-8",
+    )
+    os.utime(tmp_path / "antigo.txt", (1_700_000_000, 1_700_000_000))
+    os.utime(tmp_path / "recente.txt", (1_700_000_001, 1_700_000_001))
+
+    result = json.loads(generation.melhorar_documento_usuario())
+
+    assert result["status"] == "improved"
+    assert result["filename"] == "recente.txt"
+    assert result["outros"] == ["antigo.txt"]
+    assert generation.ultima_comparacao()["arquivo_original"] == "recente.txt"
+
+
+def test_melhoria_sem_arquivos_retorna_erro(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    from sejus_project.tools import user_files
+
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    result = json.loads(generation.melhorar_documento_usuario())
+
+    assert result["status"] == "error"
+    assert "Nenhum arquivo importado" in result["error"]
 
 
 def test_template_name_overrides_auto_selection(fake_retrieval, fake_minuta):

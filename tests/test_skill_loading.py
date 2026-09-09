@@ -62,4 +62,4 @@ def test_document_skills_are_selected_by_request(monkeypatch):
 def test_skill_loader_is_outside_agent_module():
     assert not hasattr(agent, "SKILL_RULES")
     assert not hasattr(agent, "_load_skill")
-    assert len(loader.SKILL_RULES) == 6
+    assert len(loader.SKILL_RULES) == 7

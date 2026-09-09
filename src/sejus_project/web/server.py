@@ -3,9 +3,9 @@
 Endpoint principal: ``POST /api/chat`` chama ``agent.executar`` e devolve a
 resposta em markdown junto com a ultima minuta gerada (renderizada em HTML),
 quando houver. O upload de arquivos alimenta a pasta ``importacoes_usuario/``
-usada pela tool ``analisar_arquivo_usuario``. Qualquer exceção não tratada
-vira uma ``JSONResponse`` (nunca um 500 em HTML) para a interface conseguir
-interpretar o erro.
+usada pela tool ``analisar_arquivo_usuario`` e pelo fluxo de melhoria
+antes/depois. Qualquer exceção não tratada vira uma ``JSONResponse`` (nunca um
+500 em HTML) para a interface conseguir interpretar o erro.
 
 Rodar local:
     uv run uvicorn sejus_project.web.server:app --reload
@@ -13,6 +13,7 @@ Rodar local:
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -22,7 +23,12 @@ from pydantic import BaseModel
 from sejus_project.agent import agent
 from sejus_project.tools import document_generation as generation
 from sejus_project.tools.pdf_preview import docx_para_pdf, soffice_disponivel
-from sejus_project.tools.user_files import IMPORTACOES_DIR, SUPPORTED_EXTENSIONS
+from sejus_project.tools.user_files import (
+    IMPORTACOES_DIR,
+    SUPPORTED_EXTENSIONS,
+    UserFileError,
+    _resolve_file,
+)
 from sejus_project.web.render_html import minuta_para_texto
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -60,7 +66,11 @@ def _resposta_chat(reply: str) -> dict:
     minuta_pdf = None
     minuta_docx = None
     minuta_nome = None
-    if generation.consumir_geracao_do_turno():
+    comparacao = None
+    ultima = None
+
+    melhoria = generation.consumir_melhoria_do_turno()
+    if generation.consumir_geracao_do_turno() or melhoria:
         ultima = generation.ultima_minuta()
         if ultima:
             output = ultima.get("output_path")
@@ -71,13 +81,26 @@ def _resposta_chat(reply: str) -> dict:
                     minuta_pdf = "/api/minuta/pdf"
                 minuta_texto = minuta_para_texto(ultima["estructura"])
 
+    if melhoria:
+        dados = generation.ultima_comparacao()
+        if dados and ultima and minuta_docx:
+            original = dados.get("arquivo_original") or ""
+            comparacao = {
+                "arquivo_original": original,
+                "alteracoes": dados.get("alteracoes") or [],
+                "url_original": (
+                    f"/api/arquivo/{quote(original)}" if original else None
+                ),
+            }
+
     return {
         "reply": reply,
         "minuta_nome": minuta_nome,
         "minuta_texto": minuta_texto,
         "minuta_pdf": minuta_pdf,
         "minuta_docx": minuta_docx,
-        "pendente": generation.has_pending_document(),
+        "comparacao": comparacao,
+        "pendente": generation.consumir_pendencia_do_turno(),
         "campos": generation.CAMPOS_BASE,
         "modelo_usuario": generation.modelo_usuario_ativo(),
     }
@@ -138,6 +161,17 @@ def chat(payload: ChatMessage) -> dict:
 
     reply = agent.executar(payload.message)
     return _resposta_chat(reply)
+
+
+@app.get("/api/arquivo/{nome}")
+def baixar_arquivo_usuario(nome: str) -> FileResponse:
+    """Baixa um arquivo enviado pelo usuario (usado na comparacao
+    antes/depois), validado contra path traversal."""
+    try:
+        caminho = _resolve_file(nome)
+    except UserFileError as erro:
+        raise HTTPException(status_code=404, detail=str(erro)) from erro
+    return FileResponse(str(caminho), media_type="application/octet-stream", filename=caminho.name)
 
 
 @app.post("/api/conversa/limpar")

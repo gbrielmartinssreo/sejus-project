@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
   <header class="topo">
@@ -39,6 +39,8 @@
     <div class="barra-acoes">
       <label class="botao anexar" for="arquivo" title="Enviar arquivo para análise (.txt, .md, .pdf, .docx)">&#128206;</label>
       <input type="file" id="arquivo" accept=".txt,.md,.pdf,.docx" hidden>
+      <label class="botao anexar melhorar" for="arquivo-melhorar" title="Enviar arquivo para reescrever e comparar antes/depois (.txt, .md, .pdf, .docx)">&#10024;</label>
+      <input type="file" id="arquivo-melhorar" accept=".txt,.md,.pdf,.docx" hidden>
       <label class="botao anexar modelo" for="arquivo-modelo" title="Enviar um ato existente como MODELO de formatação (.docx)">&#128196;</label>
       <input type="file" id="arquivo-modelo" accept=".docx" hidden>
       <span id="arquivo-nome" class="arquivo-nome"></span>
@@ -48,6 +50,6 @@
     <button type="submit" class="botao primario enviar">Enviar</button>
   </form>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=2"></script>
 </body>
 </html>

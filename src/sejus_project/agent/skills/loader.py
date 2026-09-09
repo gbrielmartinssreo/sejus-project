@@ -52,6 +52,14 @@ SKILL_RULES = {
             "antes da publicacao", "minuta",
         ),
     },
+    "melhorar_documento": {
+        "path": SKILLS_DIR / "melhorar_documento" / "SKILL.md",
+        "keywords": (
+            "melhore", "melhorar", "melhoria", "adeque", "adequa", "atualiza",
+            "atualizar", "reescreve", "reescrever", "compare", "comparar",
+            "mesmo arquivo", "antes/depois", "antes e depois",
+        ),
+    },
 }
 
 _loaded_skills: dict[str, str] = {}

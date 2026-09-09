@@ -178,6 +178,62 @@ body {
   font-size: 12px;
 }
 
+/* Painel de comparação antes/depois (fluxo "melhorar e comparar"). */
+.painel-comparacao {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--painel);
+  border: 1px solid var(--borda-suave);
+  border-radius: 10px;
+  max-width: 680px;
+}
+
+.comparacao-titulo {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--texto-suave);
+  margin-bottom: 8px;
+}
+
+.lista-alteracoes {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lista-alteracoes li {
+  border-left: 2px solid var(--borda);
+  padding-left: 8px;
+}
+
+.alteracao-tipo {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: var(--borda);
+  color: var(--texto);
+}
+
+.alteracao-tipo.adicionado { background: #123f2a; color: #6ee7a0; }
+.alteracao-tipo.corrigido  { background: #332e12; color: #f5d67a; }
+.alteracao-tipo.alterado   { background: #1e3a5f; color: #8bc5ff; }
+.alteracao-tipo.removido   { background: #4a1218; color: #ff9bab; }
+
+.alteracao-detalhe {
+  font-size: 12px;
+  color: var(--texto-suave);
+  margin-top: 2px;
+}
+
 @keyframes msgIn {
   from { opacity: 0; transform: translateY(8px) scale(0.97); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
@@ -441,6 +497,15 @@ body {
 .botao.anexar.modelo:hover {
   background: var(--acento-glow);
   border-color: var(--acento);
+}
+.botao.anexar.melhorar {
+  background: var(--painel-claro);
+  border-color: rgba(245, 214, 122, 0.4);
+  color: #f5d67a;
+}
+.botao.anexar.melhorar:hover {
+  background: rgba(245, 214, 122, 0.12);
+  border-color: #f5d67a;
 }
 .enviar {
   align-self: stretch;

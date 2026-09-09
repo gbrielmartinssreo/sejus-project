@@ -1,9 +1,19 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from sejus_project.agent import agent
 from sejus_project.tools import document_generation as generation
 from sejus_project.web.render_html import minuta_para_html, minuta_para_texto
 from sejus_project.web.server import app
+
+
+@pytest.fixture(autouse=True)
+def _resetar_estado_geracao():
+    """Isola o estado global de geração entre os testes (evita que sinais de
+    turno/pendências de um teste vazem para o próximo)."""
+    generation.limpar_estado()
+    yield
+    generation.limpar_estado()
 
 ESTRUTURA = {
     "numero": "PORTARIA Nº 001/2026/GAB-SEJUS/MT",
@@ -120,7 +130,7 @@ def test_chat_repassa_modelo_usuario_ativo(monkeypatch):
 def test_chat_sem_minuta_fica_pendente(monkeypatch):
     monkeypatch.setattr(agent, "executar", lambda msg: "Deseja informar os campos?")
     monkeypatch.setattr(generation, "ultima_minuta", lambda: None)
-    monkeypatch.setattr(generation, "has_pending_document", lambda: True)
+    monkeypatch.setattr(generation, "consumir_pendencia_do_turno", lambda: True)
 
     client = TestClient(app)
     dados = client.post("/api/chat", json={"message": "gere uma portaria"}).json()
@@ -128,6 +138,193 @@ def test_chat_sem_minuta_fica_pendente(monkeypatch):
     assert dados["minuta_docx"] is None
     assert dados["pendente"] is True
     assert generation.CAMPOS_BASE
+
+
+def test_pendencia_so_aparece_no_turno_em_que_foi_pedida(monkeypatch, tmp_path):
+    """Os botões de 'Preencher automaticamente'/'Informar campos' só aparecem
+    na mensagem em que a confirmação é pedida; respostas seguintes não repetem.
+    Cancelar também zera a pendência para sempre."""
+    from sejus_project.agent import agent as agent_mod
+
+    sinal = {"mudou": True}
+
+    def consumir():
+        valor = sinal["mudou"]
+        sinal["mudou"] = False
+        return valor
+
+    monkeypatch.setattr(agent, "executar", lambda msg: "Resposta.")
+    monkeypatch.setattr(generation, "consumir_pendencia_do_turno", consumir)
+    monkeypatch.setattr(generation, "ultima_minuta", lambda: None)
+    monkeypatch.setattr(generation, "modelo_usuario_ativo", lambda: None)
+    monkeypatch.setattr(agent_mod, "has_pending_document", lambda: True)
+
+    client = TestClient(app)
+
+    primeira = client.post("/api/chat", json={"message": "gere uma portaria"}).json()
+    assert primeira["pendente"] is True
+
+    segunda = client.post("/api/chat", json={"message": "e depois?"}).json()
+    assert segunda["pendente"] is False
+
+
+def test_cancelar_desiste_da_pendencia(monkeypatch):
+    """Quando o usuario desiste, o pedido pendente é descartado e a próxima
+    resposta volta ao normal (sem pedir campos de novo)."""
+    import sejus_project.agent.agent as agent_mod
+
+    monkeypatch.setattr(
+        agent,
+        "executar",
+        lambda msg: "Entendido, cancelei a geração da portaria.",
+    )
+    monkeypatch.setattr(generation, "consumir_pendencia_do_turno", lambda: False)
+    monkeypatch.setattr(agent_mod, "has_pending_document", lambda: True)
+
+    client = TestClient(app)
+    resp = client.post("/api/chat", json={"message": "mas vc vai me gerar uma portaria q ja existe?"})
+    assert resp.status_code == 200
+
+    resp_cancel = client.post("/api/chat", json={"message": "cancele"})
+    assert resp_cancel.status_code == 200
+    assert resp_cancel.json()["pendente"] is False
+
+
+def test_executar_cancela_pendencia_sem_reprompt(monkeypatch):
+    """agent.executar descarta a pendência quando o usuário desiste e deixa o
+    LLM responder em texto normal."""
+    import sejus_project.agent.agent as agent_mod
+
+    class FakeMessage:
+        def __init__(self):
+            self.content = "Ok, cancelei a geração da portaria."
+            self.tool_calls = None
+
+    class FakeChoice:
+        def __init__(self, message):
+            self.message = message
+
+    class FakeResponse:
+        def __init__(self, message):
+            self.choices = [FakeChoice(message)]
+
+    monkeypatch.setattr(agent_mod, "perguntar", lambda *_: FakeResponse(FakeMessage()))
+    generation._pending_document = {"request": "x", "perfil": None, "contexto": []}
+    try:
+        resposta = agent_mod.executar("cancele")
+        assert resposta == "Ok, cancelei a geração da portaria."
+        assert generation.has_pending_document() is False
+    finally:
+        generation._pending_document = None
+        agent.messages.clear()
+
+
+def test_baixar_arquivo_usuario(monkeypatch, tmp_path):
+    """O original enviado pode ser baixado; path traversal é bloqueado."""
+    from sejus_project.tools import user_files
+    from sejus_project.web import server
+
+    monkeypatch.setattr(server, "IMPORTACOES_DIR", tmp_path)
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    client = TestClient(app)
+
+    upload = client.post(
+        "/api/upload",
+        files={"arquivo": ("minuta_original.txt", b"conteudo original", "text/plain")},
+    )
+    assert upload.status_code == 200
+
+    resp = client.get("/api/arquivo/minuta_original.txt")
+    assert resp.status_code == 200
+    assert resp.content == b"conteudo original"
+
+    bloqueado = client.get("/api/arquivo/..%2Fserver.py")
+    assert bloqueado.status_code == 404
+
+
+def test_chat_devolve_comparacao_antes_depois(monkeypatch, tmp_path):
+    from docx import Document
+
+
+    output = tmp_path / "melhorada.docx"
+    documento = Document()
+    documento.add_paragraph("PORTARIA Nº 45/2026/GAB-SEJUS/MT - versão melhorada")
+    documento.save(str(output))
+
+    monkeypatch.setattr(agent, "executar", lambda msg: "Documento melhorado e comparado!")
+    monkeypatch.setattr(generation, "consumir_geracao_do_turno", lambda: True)
+    monkeypatch.setattr(generation, "consumir_melhoria_do_turno", lambda: True)
+    monkeypatch.setattr(
+        generation,
+        "ultima_minuta",
+        lambda: {"estructura": ESTRUTURA, "modelo": "PORTARIA", "output_path": str(output)},
+    )
+    monkeypatch.setattr(
+        generation,
+        "ultima_comparacao",
+        lambda: {
+            "arquivo_original": "minuta_original.txt",
+            "antes": "linha um\nlinha dois antiga",
+            "alteracoes": [
+                {"tipo": "corrigido", "o_que": "Fundamento legal", "detalhe": "Atualizado."}
+            ],
+        },
+    )
+
+    client = TestClient(app)
+    dados = client.post("/api/chat", json={"message": "melhore e compare"}).json()
+
+    comparacao = dados["comparacao"]
+    assert comparacao is not None
+    assert comparacao["arquivo_original"] == "minuta_original.txt"
+    assert comparacao["url_original"] == "/api/arquivo/minuta_original.txt"
+    assert comparacao["alteracoes"][0]["tipo"] == "corrigido"
+    assert "depois" not in comparacao
+    assert "diff" not in comparacao
+    assert dados["minuta_nome"] == "melhorada.docx"
+
+
+def test_comparacao_so_no_turno_da_melhoria(monkeypatch, tmp_path):
+    """A comparação (como o cartão) só é enviada no turno em que a melhoria
+    aconteceu — não nas respostas seguintes."""
+    from docx import Document
+
+    sinal = {"melhoria": True}
+
+    def consumir_melhoria():
+        valor = sinal["melhoria"]
+        sinal["melhoria"] = False
+        return valor
+
+    output = tmp_path / "melhorada.docx"
+    documento = Document()
+    documento.add_paragraph("PORTARIA Nº 45/2026")
+    documento.save(str(output))
+
+    monkeypatch.setattr(agent, "executar", lambda msg: "Resposta.")
+    monkeypatch.setattr(generation, "consumir_melhoria_do_turno", consumir_melhoria)
+    monkeypatch.setattr(generation, "consumir_geracao_do_turno", lambda: True)
+    monkeypatch.setattr(
+        generation,
+        "ultima_minuta",
+        lambda: {"estructura": ESTRUTURA, "modelo": "PORTARIA", "output_path": str(output)},
+    )
+    monkeypatch.setattr(
+        generation,
+        "ultima_comparacao",
+        lambda: {
+            "arquivo_original": "minuta_original.txt",
+            "antes": "texto antes",
+            "alteracoes": [{"tipo": "corrigido", "o_que": "x", "detalhe": "y"}],
+        },
+    )
+
+    client = TestClient(app)
+    primeira = client.post("/api/chat", json={"message": "melhore e compare"}).json()
+    assert primeira["comparacao"] is not None
+
+    segunda = client.post("/api/chat", json={"message": "obrigado"}).json()
+    assert segunda["comparacao"] is None
 
 
 def test_documento_so_aparece_no_turno_em_que_foi_gerado(monkeypatch, tmp_path):

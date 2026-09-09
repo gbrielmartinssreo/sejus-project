@@ -340,6 +340,152 @@ def gerar_estrutura_minuta(
 
 
 # ---------------------------------------------------------------------------
+# Melhoria e adequacao de um documento enviado pelo usuario
+# ---------------------------------------------------------------------------
+
+# Mesmo schema da minuta, acrescido da lista 'alteracoes' (comparacao
+# antes/depois que a interface exibe ao lado do documento melhorado).
+MELHORIA_DEFINITION = json.loads(json.dumps(STRUTURA_DEFINITION))
+MELHORIA_DEFINITION["function"]["name"] = "apresentar_documento_melhorado"
+MELHORIA_DEFINITION["function"]["description"] = (
+    "Apresenta o documento normativo enviado pelo usuario reescrito com "
+    "melhorias e adequacoes juridicas, mais a lista 'alteracoes' explicando "
+    "o que mudou em relacao ao original e por que. O ato deve permanecer o "
+    "mesmo (numero, ementa, objeto e assinaturas preservados)."
+)
+MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
+    "type": "array",
+    "description": (
+        "Lista objetiva das alteracoes aplicadas ao documento original, para a "
+        "comparacao antes/depois. Registre CADA mudanca com tipo e motivo."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "tipo": {
+                "type": "string",
+                "description": "'adicionado', 'alterado', 'removido' ou 'corrigido'.",
+            },
+            "o_que": {
+                "type": "string",
+                "description": (
+                    "Item alterado, ex.: 'Fundamento legal no preambulo', "
+                    "'Numeracao dos incisos do art. 2º'."
+                ),
+            },
+            "detalhe": {
+                "type": "string",
+                "description": "Explicacao curta da mudanca e do motivo.",
+            },
+        },
+        "required": ["tipo", "o_que", "detalhe"],
+    },
+}
+MELHORIA_DEFINITION["function"]["parameters"]["required"] = [
+    "numero",
+    "ementa",
+    "corpo",
+    "alteracoes",
+]
+
+
+def _sistema_melhoria():
+    return (
+        "Voce e um consultor juridico experiente da Secretaria de Estado de "
+        "Justiça de Mato Grosso (SEJUS/MT). Sua tarefa e REESCREVER um "
+        "documento normativo enviado pelo usuario com melhorias e adequacoes, "
+        "mantendo o mesmo ato: mesmo numero, mesma ementa, mesmo objeto e "
+        "mesmas assinaturas. Nao crie um ato novo nem mude o sentido do texto "
+        "original.\n\n"
+        "ORIENTACOES DE MELHORIA E ADEQUACAO:\n"
+        "1. Preserve o esqueleto do documento: numero, ementa, estrutura de "
+        "artigos e assinaturas. Aprimore o texto onde ele estiver fragil.\n"
+        "2. Fundamentacao legal: confira e ajuste o preambulo e os considerandos "
+        "usando as normas e fundamentos presentes nos atos recuperados no RAG "
+        "(nao invente referencias que nao possa sustentar nos atos recuperados).\n"
+        "3. Rio de articulacao: corrija numeracao de artigos, incisos (romano "
+        "maiusculo) e paragrafos (§ / Paragrafo unico), sem pular numeros.\n"
+        "4. Redacao juridica: padronize siglas e termos, elimine ambiguidades, "
+        "mantendo o tom impessoal e tecnico dos atos oficiais.\n"
+        "5. Fechamento: garanta vigencia e, quando o original revoga algo, "
+        "preserve a revogacao nos termos corretos.\n"
+        "6. Mude apenas o necessario: toda alteracao deve constar em "
+        "'alteracoes' com tipo, item e motivo. Se nada precisar mudar em um "
+        "trecho, mantenha-o e nao o liste.\n"
+        "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
+    )
+
+
+def _usuario_melhoria(
+    conteudo: str,
+    tipo_ato: str,
+    perfil: PerfilModelo,
+    contexto: list[dict],
+    valores: dict | None = None,
+) -> str:
+    partes = [
+        (
+            "DOCUMENTO ORIGINAL ENVIADO PELO USUARIO (reescreva ESTE documento "
+            "com melhorias, preservando numero, ementa, objeto e assinaturas):"
+        ),
+        str(conteudo)[:20_000],
+        "",
+        f"Tipo de ato: {tipo_ato}",
+        f"Formato/modelo de referencia: {perfil.name}",
+        "",
+        (
+            "Atos recuperados como fundamento (RAG). Use esse conteudo para "
+            "adequar fundamentos, prazos, procedimentos e detalhes:"
+        ),
+        _resumir_contexto(contexto),
+    ]
+    if valores:
+        partes.extend(
+            [
+                "",
+                "Diretrizes/pedido do usuario para esta melhoria (siga-as):",
+                json.dumps(valores, ensure_ascii=False, indent=2),
+            ]
+        )
+    return "\n".join(partes)
+
+
+def gerar_estrutura_melhoria(
+    conteudo: str,
+    tipo_ato: str,
+    perfil: PerfilModelo,
+    contexto: list[dict],
+    valores: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    """Chama o LLM e devolve (estrutura melhorada, lista de alteracoes)."""
+    mensagens = [
+        {"role": "system", "content": _sistema_melhoria()},
+        {
+            "role": "user",
+            "content": _usuario_melhoria(conteudo, tipo_ato, perfil, contexto, valores),
+        },
+    ]
+
+    resposta = perguntar(
+        mensagens,
+        [MELHORIA_DEFINITION],
+        max_tokens=max(4096, int(os.getenv("MINUTA_MAX_TOKENS", "4096"))),
+    )
+    message = resposta.choices[0].message
+    if not message.tool_calls:
+        raise ValueError("O modelo nao devolveu uma estrutura de documento valida.")
+
+    argumentos = message.tool_calls[0].function.arguments or "{}"
+    dados = json.loads(argumentos)
+    estrutura = _padronizar(
+        {chave: valor for chave, valor in dados.items() if chave != "alteracoes"},
+        tipo_ato,
+    )
+    alteracoes = [a for a in (dados.get("alteracoes") or []) if isinstance(a, dict)]
+    return estrutura, alteracoes
+
+
+# ---------------------------------------------------------------------------
 # Montagem do DOCX
 # ---------------------------------------------------------------------------
 

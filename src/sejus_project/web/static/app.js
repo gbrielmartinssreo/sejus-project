@@ -113,6 +113,7 @@ var $entrada = document.getElementById("entrada");
 var $arquivo = document.getElementById("arquivo");
 var $arquivoNome = document.getElementById("arquivo-nome");
 var $arquivoModelo = document.getElementById("arquivo-modelo");
+var $arquivoMelhorar = document.getElementById("arquivo-melhorar");
 var $modeloStatus = document.getElementById("modelo-status");
 var $overlayCampos = document.getElementById("overlay-campos");
 var $formCampos = document.getElementById("form-campos");
@@ -255,6 +256,60 @@ function anexarPendencia(bubble, campos) {
   bubble.appendChild(acoes);
 }
 
+function anexarArquivoEnviado(nome) {
+  var bubble = criarBubble("usuario", "Arquivo enviado: " + nome);
+  var acoes = document.createElement("div");
+  acoes.className = "acoes-minuta";
+  acoes.appendChild(botaoAcao("Analisar", function () {
+    enviar("Analise o arquivo '" + nome + "'.");
+  }));
+  bubble.appendChild(acoes);
+}
+
+function anexarComparacao(bubble, dados) {
+  var painel = document.createElement("div");
+  painel.className = "painel-comparacao";
+
+  var titulo = document.createElement("div");
+  titulo.className = "comparacao-titulo";
+  titulo.textContent = "Comparação antes/depois";
+  painel.appendChild(titulo);
+
+  if (dados.alteracoes && dados.alteracoes.length) {
+    var lista = document.createElement("ul");
+    lista.className = "lista-alteracoes";
+    dados.alteracoes.forEach(function (alteracao) {
+      var li = document.createElement("li");
+      var tipo = document.createElement("span");
+      tipo.className = "alteracao-tipo " + (alteracao.tipo || "alterado");
+      tipo.textContent = alteracao.tipo || "alterado";
+      li.appendChild(tipo);
+      if (alteracao.o_que) {
+        li.appendChild(document.createTextNode(" " + alteracao.o_que));
+      }
+      if (alteracao.detalhe) {
+        var det = document.createElement("div");
+        det.className = "alteracao-detalhe";
+        det.textContent = alteracao.detalhe;
+        li.appendChild(det);
+      }
+      lista.appendChild(li);
+    });
+    painel.appendChild(lista);
+  }
+
+  if (dados.url_original) {
+    var acoes = document.createElement("div");
+    acoes.className = "acoes-minuta";
+    acoes.appendChild(botaoAcao("Baixar original", function () {
+      baixarArquivo(dados.url_original);
+    }));
+    painel.appendChild(acoes);
+  }
+
+  bubble.appendChild(painel);
+}
+
 function abrirOverlayCampos(campos) {
   $camposLista.innerHTML = "";
   campos.forEach(function (chave) {
@@ -321,6 +376,9 @@ async function enviar(texto) {
       atualizarModeloStatus(dados.modelo_usuario);
     }
 
+    if (dados.comparacao) {
+      anexarComparacao(bubble, dados.comparacao);
+    }
     if (dados.minuta_docx) {
       anexarMinuta(bubble, dados);
     } else if (dados.pendente) {
@@ -382,11 +440,29 @@ $arquivo.addEventListener("change", async function () {
     var resposta = await fetch("/api/upload", { method: "POST", body: form });
     var dados = await resposta.json();
     if (!resposta.ok) throw new Error(dados.detail || "falha no upload");
-    toast("Arquivo '" + dados.filename + "' recebido. Mencione-o na conversa.");
+    anexarArquivoEnviado(dados.filename);
+    toast("Arquivo '" + dados.filename + "' recebido.");
   } catch (erro) {
     toast("Upload falhou: " + erro.message);
   }
   $arquivo.value = "";
+});
+
+$arquivoMelhorar.addEventListener("change", async function () {
+  var arquivo = $arquivoMelhorar.files[0];
+  if (!arquivo) return;
+  var form = new FormData();
+  form.append("arquivo", arquivo);
+  try {
+    var resposta = await fetch("/api/upload", { method: "POST", body: form });
+    var dados = await resposta.json();
+    if (!resposta.ok) throw new Error(dados.detail || "falha no upload");
+    criarBubble("usuario", "Arquivo enviado para melhoria: " + dados.filename);
+    enviar("Melhore e compare o arquivo '" + dados.filename + "'");
+  } catch (erro) {
+    toast("Upload falhou: " + erro.message);
+  }
+  $arquivoMelhorar.value = "";
 });
 
 $arquivoModelo.addEventListener("change", async function () {
@@ -426,6 +502,9 @@ criarBubble("agente",
   "recuperados do acervo e **gerar minutas** (portarias, instruções normativas, " +
   "decretos etc.) — o documento aparece aqui como anexo, pronto para baixar em " +
   "DOCX ou PDF.\n\n" +
-  "Você também pode enviar um ato existente como **modelo** (botão 📄): " +
-  "a nova minuta seguirá exatamente o formato do documento enviado.\n\n" +
+  "Você também pode enviar um ato para **análise** (📎) ou para **melhorar e " +
+  "comparar** (botão ✨): o agente reescreve o mesmo documento com melhorias " +
+  "e adequações, e mostra a comparação antes/depois.\n\n" +
+  "O botão 📄 define um ato existente como **modelo** de formatação: a nova " +
+  "minuta seguirá exatamente o formato do documento enviado.\n\n" +
   "Ex.: *Gere uma portaria sobre limpeza das unidades*.");
