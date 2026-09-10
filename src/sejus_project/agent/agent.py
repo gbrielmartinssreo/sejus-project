@@ -8,11 +8,13 @@ from sejus_project.agent.skills.loader import (
 from sejus_project.llm.ia import perguntar
 from sejus_project.tools.document_generation import (
     cancelar_pendencia,
+    comparacao_definition,
     gerar_documento_normativo,
     has_pending_document,
     limpar_estado,
     melhorar_documento_usuario,
     melhoria_definition,
+    obter_textos_comparacao,
 )
 from sejus_project.tools.document_generation import (
     definition as document_generation_definition,
@@ -30,6 +32,7 @@ TOOLS = [
     user_files_definition,
     document_generation_definition,
     melhoria_definition,
+    comparacao_definition,
 ]
 
 
@@ -39,6 +42,7 @@ FUNCTIONS = {
     "analisar_arquivo_usuario": analisar_arquivo_usuario,
     "gerar_documento_normativo": gerar_documento_normativo,
     "melhorar_documento_usuario": melhorar_documento_usuario,
+    "obter_textos_comparacao": obter_textos_comparacao,
 }
 
 
@@ -86,7 +90,17 @@ SYSTEM_INSTRUCTIONS = (
     "como contendo algo que o ato nao contem (ex.: nao diga que uma minuta "
     "normativa e 'so a tabela'). Se gerar_documento_normativo retornar "
     "status 'nao_normativo', admita o limite e responda em texto, sem "
-    "insistir nem gerar o arquivo."
+    "insistir nem gerar o arquivo.\n"
+    "Em perguntas de acompanhamento sobre uma melhoria JA feita (por ex.: "
+    "'o que exatamente foi alterado', 'mostre antes e depois', 'mostre os "
+    "textos alterados', 'monte uma tabela do antes/depois', 'quais trechos "
+    "mudaram'), use a ferramenta obter_textos_comparacao para recuperar os "
+    "TEXTOS REAIS da ultima comparacao. Copie fielmente os trechos dos campos "
+    "'antes' e 'depois' e NAO invente textos, resumos ou cotejamentos. Nessas "
+    "perguntas NAO chame melhorar_documento_usuario nem gere ou reescreva o "
+    "arquivo novamente — se ela retornar status 'already_improved' ou "
+    "'sem_comparacao', apenas responda em texto com base no que houver e "
+    "informe que arquivos novos nao serao criados para evitar duplicacoes."
 )
 
 def _messages_for_llm() -> list[dict]:
@@ -222,6 +236,28 @@ def _executar_tool(tool_call):
 
 def _resposta_melhoria(result: dict) -> str:
     """Transforma o JSON da tool de melhoria na resposta final do agente."""
+    if result.get("status") == "already_improved":
+        alteracoes = result.get("alteracoes") or []
+        linhas = [
+            f"- ({a.get('tipo', 'alterado')}) {a.get('o_que', '')}: "
+            f"{a.get('detalhe', '')}"
+            for a in alteracoes[:15]
+        ]
+        resumo = "\n".join(linhas) if linhas else "Nenhuma alteração significativa."
+        resposta = (
+            f"A comparação para **{result.get('arquivo_original', '')}** já "
+            "está disponível nesta conversa — não gerei um arquivo novo para "
+            "não duplicar.\n\n"
+            "O que mudou:\n"
+            f"{resumo}"
+        )
+        if result.get("textos"):
+            resposta += (
+                "\n\nSe quiser, posso detalhar os trechos alterados "
+                "(antes/depois) com os textos reais."
+            )
+        return resposta
+
     if result.get("status") != "improved":
         return result.get("error", "Não foi possível melhorar o documento.")
 
@@ -288,11 +324,13 @@ def executar(question):
     ):
         result = json.loads(gerar_documento_normativo(question))
         if result.get("status") == "generated":
-            return (
+            resposta = (
                 "Documento gerado com sucesso. O arquivo já está disponível "
                 "no cartão de download desta conversa.\n\n"
                 "A minuta foi preenchida automaticamente e precisa ser revisada."
             )
+            messages.append({"role": "assistant", "content": resposta})
+            return resposta
 
     # Usuario desistiu de gerar o documento: descarta o pedido pendente e
     # deixa o LLM responder em texto normal, sem novo pedido de campos.
@@ -309,9 +347,11 @@ def executar(question):
         normalized_question,
     )
     if match_melhoria:
-        return _resposta_melhoria(
+        resposta = _resposta_melhoria(
             json.loads(melhorar_documento_usuario(match_melhoria.group(1)))
         )
+        messages.append({"role": "assistant", "content": resposta})
+        return resposta
 
     # Mesmo fluxo quando o usuario pede melhoria sem nomear o arquivo
     # ("melhore o arquivo que mandei", "melhore esse documento"...): a tool
@@ -324,7 +364,9 @@ def executar(question):
         normalized_question,
     )
     if match_melhoria_sem_nome:
-        return _resposta_melhoria(json.loads(melhorar_documento_usuario()))
+        resposta = _resposta_melhoria(json.loads(melhorar_documento_usuario()))
+        messages.append({"role": "assistant", "content": resposta})
+        return resposta
 
     # Loop para permitir chamadas de ferramentas
     ultimo_resultado_tool = None

@@ -313,6 +313,128 @@ def test_melhoria_sem_arquivos_retorna_erro(fake_retrieval, fake_melhoria, monke
     assert "Nenhum arquivo importado" in result["error"]
 
 
+def test_melhoria_guarda_textos_reais_para_acompanhamento(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """A melhoria guarda os textos reais antes/depois (não só resumos) para o
+    agente responder 'o que mudou' e montar tabelas com fidelidade depois."""
+    from sejus_project.tools import user_files
+
+    generation._ultima_comparacao = None
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato_ante.txt").write_text(
+        "PORTARIA Nº 45/2026/GAB-SEJUS/MT\nDispõe sobre limpeza das unidades.\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(generation.melhorar_documento_usuario("ato_ante.txt"))
+
+    assert result["status"] == "improved"
+    assert result["textos"] and result["textos"][0]["antes"]
+
+    dados = generation.ultima_comparacao()
+    assert dados["arquivo_original"] == "ato_ante.txt"
+    assert dados["depois"]
+    assert dados["textos"] and dados["textos"][0]["antes"]
+    assert dados["textos"][0]["depois"]
+    assert len(dados["sha1"]) == 40
+
+
+def test_melhoria_repetida_nao_regenera_arquivo(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """Repetir o pedido de melhoria do mesmo arquivo (sem diretrizes novas)
+    reaproveita a comparação e não cria outro arquivo — evita duplicar o
+    retrabalho em perguntas de acompanhamento."""
+    from sejus_project.tools import user_files
+
+    generation._ultima_comparacao = None
+    generation._melhoria_no_turno = False
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato_repetido.txt").write_text(
+        "DECRETO Nº 1/2026/GAB-SEJUS/MT\nDispõe sobre limpeza das unidades.\n",
+        encoding="utf-8",
+    )
+
+    chamadas = {"montar_docx": 0}
+    original = generation.minuta.montar_docx
+
+    def contar_montar_docx(perfil, estrutura, output_dir):
+        chamadas["montar_docx"] += 1
+        return original(perfil, estrutura, output_dir)
+
+    monkeypatch.setattr(generation.minuta, "montar_docx", contar_montar_docx)
+
+    first = json.loads(generation.melhorar_documento_usuario("ato_repetido.txt"))
+    second = json.loads(generation.melhorar_documento_usuario("ato_repetido.txt"))
+
+    assert first["status"] == "improved"
+    assert second["status"] == "already_improved"
+    assert second["arquivo_original"] == "ato_repetido.txt"
+    assert second["textos"]
+    assert chamadas["montar_docx"] == 1
+    assert generation._melhoria_no_turno is True
+    generation.consumir_melhoria_do_turno()
+    assert generation._melhoria_no_turno is False
+
+
+def test_melhoria_com_diretrizes_novas_regenera(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """Diretrizes novas para o mesmo arquivo não caem no guarda
+    'already_improved' — o retrabalho acontece de verdade."""
+    from sejus_project.tools import user_files
+
+    generation._ultima_comparacao = None
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato_diretriz.txt").write_text(
+        "PORTARIA Nº 4/2026/GAB-SEJUS/MT\nDispõe sobre limpeza.\n",
+        encoding="utf-8",
+    )
+
+    chamadas = {"montar_docx": 0}
+    original = generation.minuta.montar_docx
+
+    def contar_montar_docx(perfil, estrutura, output_dir):
+        chamadas["montar_docx"] += 1
+        return original(perfil, estrutura, output_dir)
+
+    monkeypatch.setattr(generation.minuta, "montar_docx", contar_montar_docx)
+
+    first = json.loads(generation.melhorar_documento_usuario("ato_diretriz.txt"))
+    second = json.loads(
+        generation.melhorar_documento_usuario(
+            "ato_diretriz.txt", diretrizes="mantenha o mesmo organograma"
+        )
+    )
+
+    assert first["status"] == "improved"
+    assert second["status"] == "improved"
+    assert chamadas["montar_docx"] == 2
+
+
+def test_obter_textos_comparacao_devolve_dados_da_ultima_melhoria(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """A tool de acompanhamento devolve textos reais sem gerar arquivo novo."""
+    from sejus_project.tools import user_files
+
+    generation._ultima_comparacao = None
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato_followup.txt").write_text(
+        "PORTARIA Nº 8/2026/GAB-SEJUS/MT\nDispõe sobre limpeza.\n",
+        encoding="utf-8",
+    )
+
+    generation.melhorar_documento_usuario("ato_followup.txt")
+    dados = json.loads(generation.obter_textos_comparacao())
+
+    assert dados["status"] == "ok"
+    assert dados["arquivo_original"] == "ato_followup.txt"
+    assert dados["textos"] and dados["textos"][0]["antes"]
+    assert dados["antes"]
+    assert dados["depois"]
+
+
+def test_obter_textos_comparacao_sem_melhoria(fake_retrieval):
+    generation._ultima_comparacao = None
+    dados = json.loads(generation.obter_textos_comparacao())
+
+    assert dados["status"] == "sem_comparacao"
+
+
 def test_template_name_overrides_auto_selection(fake_retrieval, fake_minuta):
     generation._pending_document = None
     request = "Gere uma portaria sobre limpeza da cadeia em Cuiaba."

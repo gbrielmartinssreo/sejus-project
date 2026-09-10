@@ -1,6 +1,8 @@
 """Tool de function calling para gerar atos a partir de modelos DOCX reais."""
 from __future__ import annotations
 
+import difflib
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -15,6 +17,7 @@ from sejus_project.tools.user_files import (
     _ultimo_arquivo_importado,
     extract_file_text,
 )
+from sejus_project.web.render_html import minuta_para_texto
 
 _pending_document: dict | None = None
 _ultima_minuta: dict | None = None
@@ -179,6 +182,58 @@ def _source_summary(results: list[dict]) -> list[dict]:
         }
         for result in results
     ]
+
+
+_RE_ROTULO_TRECHO = re.compile(
+    r"^(?:art\.?\s*\d+(?:º|°)?(?:\s*[-–—].*)?$|"
+    r"§\s*\d+|cap[íi]tulo\s+[ivxl]+.*$|anexo\s+\w+.*$)",
+    re.IGNORECASE,
+)
+
+
+def _rotulo_do_trecho(linhas: list[str], inicio: int) -> str:
+    """Busca o rótulo (artigo/§/capítulo/anexo) mais próximo acima do trecho."""
+    for i in range(max(inicio, 0), -1, -1):
+        texto = linhas[i].strip()
+        if texto and _RE_ROTULO_TRECHO.match(texto):
+            return texto[:120]
+    return "Trecho alterado"
+
+
+# Respeita o limite de contexto: no máximo alguns trechos reais, cada um curto.
+MAX_TRECHOS_COMPARACAO = 12
+MAX_TRECHO_CHARS = 500
+
+
+def _textos_antes_depois(antes: str, depois: str) -> list[dict]:
+    """Extrai trechos reais alterados (antes/depois) via diff linha a linha."""
+    linhas_antes = antes.splitlines()
+    linhas_depois = depois.splitlines()
+    matcher = difflib.SequenceMatcher(
+        None, linhas_antes, linhas_depois, autojunk=False
+    )
+    textos: list[dict] = []
+    for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
+        if opcode == "equal":
+            continue
+        trecho_antes = "\n".join(linhas_antes[i1:i2]).strip()
+        trecho_depois = "\n".join(linhas_depois[j1:j2]).strip()
+        if not trecho_antes and not trecho_depois:
+            continue
+        if len(textos) >= MAX_TRECHOS_COMPARACAO:
+            break
+        if trecho_antes:
+            rotulo = _rotulo_do_trecho(linhas_antes, i1 - 1)
+        else:
+            rotulo = _rotulo_do_trecho(linhas_depois, j1 - 1)
+        textos.append(
+            {
+                "parte": rotulo,
+                "antes": trecho_antes[:MAX_TRECHO_CHARS],
+                "depois": trecho_depois[:MAX_TRECHO_CHARS],
+            }
+        )
+    return textos
 
 
 def has_pending_document() -> bool:
@@ -490,6 +545,56 @@ melhoria_definition = {
 }
 
 
+comparacao_definition = {
+    "type": "function",
+    "function": {
+        "name": "obter_textos_comparacao",
+        "description": (
+            "Recupera os dados da ultima melhoria antes/depois ja feita na "
+            "conversa: textos REAIS alterados (campos 'antes' e 'depois'), a "
+            "lista de alteracoes e o nome do arquivo original. Use somente em "
+            "perguntas de acompanhamento sobre uma melhoria ja feita (ex.: "
+            "'o que exatamente foi alterado', 'mostre antes e depois', 'mostre "
+            "os textos alterados', 'monte uma tabela do antes/depois'). NAO gere "
+            "nem reescreva o arquivo nessas situacoes — apenas copie os textos "
+            "reais devolvidos por esta ferramenta."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def obter_textos_comparacao() -> str:
+    """Devolve os textos reais (antes/depois) da ultima melhoria da conversa.
+
+    Permite ao agente responder perguntas de acompanhamento ('o que mudou',
+    'mostre os textos alterados', tabelas antes/depois) com fidelidade, sem
+    precisar re-executar a melhoria nem inventar trechos."""
+    dados = _ultima_comparacao
+    if not dados:
+        return json.dumps(
+            {
+                "status": "sem_comparacao",
+                "detail": (
+                    "Nenhuma melhoria antes/depois foi feita ainda nesta "
+                    "conversa. Envie um arquivo pelo botão ✨ para eu comparar."
+                ),
+            },
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        {
+            "status": "ok",
+            "arquivo_original": dados.get("arquivo_original"),
+            "alteracoes": dados.get("alteracoes") or [],
+            "textos": dados.get("textos") or [],
+            "antes": (dados.get("antes") or "")[:12_000],
+            "depois": (dados.get("depois") or "")[:12_000],
+        },
+        ensure_ascii=False,
+    )
+
+
 def _melhorar_e_relatar(
     filename: str,
     destino,
@@ -510,6 +615,8 @@ def _melhorar_e_relatar(
         valores,
     )
     output_path = minuta.montar_docx(perfil, estrutura, OUTPUTS_DIR)
+    depois = minuta_para_texto(estrutura)
+    textos = _textos_antes_depois(conteudo, depois)
     _ultima_minuta = {
         "estructura": estrutura,
         "modelo": perfil.name,
@@ -521,7 +628,10 @@ def _melhorar_e_relatar(
     _ultima_comparacao = {
         "arquivo_original": filename,
         "antes": conteudo[:40_000],
+        "depois": depois[:40_000],
         "alteracoes": alteracoes,
+        "textos": textos,
+        "sha1": hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest(),
     }
     return json.dumps(
         {
@@ -530,6 +640,7 @@ def _melhorar_e_relatar(
             "modelo": perfil.name,
             "output_path": str(output_path),
             "alteracoes": alteracoes,
+            "textos": textos,
             "outros": outros or [],
             "sources": _source_summary(contexto),
         },
@@ -564,6 +675,27 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
     try:
         destino = _resolve_file(filename)
         conteudo = extract_file_text(destino)
+
+        # Perguntas de acompanhamento sobre a melhoria já feita não devem gerar
+        # um arquivo novo: se o mesmo arquivo, com o mesmo conteúdo, for
+        # pedido de novo sem novas diretrizes, reaproveita a comparação.
+        if (
+            not diretrizes
+            and _ultima_comparacao
+            and _ultima_comparacao.get("arquivo_original") == filename
+            and _ultima_comparacao.get("sha1")
+            == hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest()
+        ):
+            return json.dumps(
+                {
+                    "status": "already_improved",
+                    "arquivo_original": filename,
+                    "alteracoes": _ultima_comparacao.get("alteracoes") or [],
+                    "textos": _ultima_comparacao.get("textos") or [],
+                    "outros": [f for f in disponiveis if f != filename],
+                },
+                ensure_ascii=False,
+            )
 
         tipo_ato = modelos.detectar_tipo_ato(conteudo)
         if destino.suffix.lower() == ".docx":
