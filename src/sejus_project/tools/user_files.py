@@ -71,6 +71,15 @@ def _resolve_file(filename: str) -> Path:
         raise UserFileError(f"Caminho inválido: {filename}")
 
     if not candidate.exists():
+        wanted = Path(filename).name.casefold()
+        for real_file in IMPORTACOES_DIR.iterdir():
+            if (
+                real_file.is_file()
+                and real_file.name.casefold() == wanted
+                and real_file.suffix.lower() in SUPPORTED_EXTENSIONS
+            ):
+                return real_file.resolve()
+
         available = _list_available_files()
         hint = f" Arquivos disponíveis: {', '.join(available)}" if available else " Nenhum arquivo encontrado na pasta."
         raise UserFileError(f"Arquivo '{filename}' não encontrado em {IMPORTACOES_DIR}/.{hint}")

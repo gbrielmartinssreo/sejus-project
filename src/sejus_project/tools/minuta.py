@@ -308,6 +308,65 @@ def _padronizar(estrutura: dict, tipo_ato: str) -> dict:
     return estrutura
 
 
+def _extrair_json_com_retry(mensagens, definition, max_tokens):
+    """Chama o LLM (function calling) e devolve o argumento JSON já parseado.
+
+    Se a resposta vier truncada (JSON incompleto por estouro do limite de
+    tokens), reenvia a conversa com o dobro de ``max_tokens`` e instrução para
+    o modelo reduzir o campo ``corpo`` e devolver um JSON válido. Falha com
+    mensagem clara se a repetição também vier truncada.
+    """
+    for tentativa in range(2):
+        resposta = perguntar(mensagens, [definition], max_tokens=max_tokens)
+        message = resposta.choices[0].message
+        if not message.tool_calls:
+            raise ValueError("O modelo nao devolveu uma estrutura de documento valida.")
+
+        tool_call = message.tool_calls[0]
+        argumentos = tool_call.function.arguments or "{}"
+        try:
+            return json.loads(argumentos)
+        except json.JSONDecodeError:
+            if tentativa == 1:
+                raise ValueError(
+                    "O modelo gerou uma resposta incompleta mesmo após a repetição. "
+                    "O documento pode ser grande demais para gerar de uma vez; "
+                    "tente novamente ou envie um arquivo mais curto."
+                )
+            max_tokens *= 2
+            tool_call_id = getattr(tool_call, "id", "call_retry")
+            mensagens.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": definition["function"]["name"],
+                                    "arguments": argumentos,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": (
+                            "JSON invalido ou truncado (resposta cortada no limite "
+                            "de tokens). Refaça a estrutura completa, reduzindo o "
+                            "tamanho do campo 'corpo' se precisar, e devolva um "
+                            "JSON valido e encerrado."
+                        ),
+                    },
+                ]
+            )
+
+    raise ValueError("Nao foi possivel gerar a estrutura do documento.")
+
+
 def gerar_estrutura_minuta(
     pedido: str,
     tipo_ato: str,
@@ -325,17 +384,11 @@ def gerar_estrutura_minuta(
         },
     ]
 
-    resposta = perguntar(
+    estrutura = _extrair_json_com_retry(
         mensagens,
-        [STRUTURA_DEFINITION],
-        max_tokens=max(4096, int(os.getenv("MINUTA_MAX_TOKENS", "4096"))),
+        STRUTURA_DEFINITION,
+        max(4096, int(os.getenv("MINUTA_MAX_TOKENS", "4096"))),
     )
-    message = resposta.choices[0].message
-    if not message.tool_calls:
-        raise ValueError("O modelo nao devolveu uma estrutura de minuta valida.")
-
-    argumentos = message.tool_calls[0].function.arguments or "{}"
-    estrutura = json.loads(argumentos)
     return _padronizar(estrutura, tipo_ato)
 
 
@@ -466,17 +519,11 @@ def gerar_estrutura_melhoria(
         },
     ]
 
-    resposta = perguntar(
+    dados = _extrair_json_com_retry(
         mensagens,
-        [MELHORIA_DEFINITION],
-        max_tokens=max(4096, int(os.getenv("MINUTA_MAX_TOKENS", "4096"))),
+        MELHORIA_DEFINITION,
+        max(4096, int(os.getenv("MINUTA_MAX_TOKENS", "4096"))),
     )
-    message = resposta.choices[0].message
-    if not message.tool_calls:
-        raise ValueError("O modelo nao devolveu uma estrutura de documento valida.")
-
-    argumentos = message.tool_calls[0].function.arguments or "{}"
-    dados = json.loads(argumentos)
     estrutura = _padronizar(
         {chave: valor for chave, valor in dados.items() if chave != "alteracoes"},
         tipo_ato,
