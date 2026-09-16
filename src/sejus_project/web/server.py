@@ -88,6 +88,8 @@ def _resposta_chat(reply: str) -> dict:
             comparacao = {
                 "arquivo_original": original,
                 "alteracoes": dados.get("alteracoes") or [],
+                "adicoes_estruturais": dados.get("adicoes_estruturais") or [],
+                "lacunas": dados.get("lacunas") or [],
                 "url_original": (
                     f"/api/arquivo/{quote(original)}" if original else None
                 ),

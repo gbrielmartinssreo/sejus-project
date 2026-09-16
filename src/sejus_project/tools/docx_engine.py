@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import re
+from datetime import UTC
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -111,3 +112,25 @@ def append_paragraph(body, w_p) -> None:
         sect_pr.addprevious(w_p)
     else:
         body.append(w_p)
+
+
+def assinalar_insercao(w_p, ins_id: int, author: str, date: str | None = None) -> None:
+    """Envolve os runs de um ``w:p`` num ``<w:ins>`` (track changes do Word).
+
+    A insercao passa a depender de aceitacao do revisor antes de publicar.
+    ``ins_id`` deve ser unico em todo o documento. ``date`` segue ISO 8601
+    (padrao do OOXML, ex.: ``2026-09-16T16:00:00Z``)."""
+    from datetime import datetime
+
+    runs = [r for r in w_p.findall(qn("w:r"))]
+    if not runs:
+        return
+    if not date:
+        date = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for run in runs:
+        ins = w_p.makeelement(
+            qn("w:ins"),
+            {qn("w:id"): str(ins_id), qn("w:author"): author, qn("w:date"): date},
+        )
+        w_p.replace(run, ins)
+        ins.append(run)

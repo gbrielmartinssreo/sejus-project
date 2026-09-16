@@ -22,12 +22,14 @@ from docx.oxml.ns import qn
 from sejus_project.llm.ia import perguntar
 from sejus_project.tools.docx_engine import (
     all_paragraphs,
+    assinalar_insercao,
     build_paragraph,
     clear_body,
     find_reference,
     paragraph_text,
 )
 from sejus_project.tools.modelos import PerfilModelo
+from sejus_project.web.render_html import minuta_para_texto
 
 _SIMPLES = re.compile(r"\s+")
 
@@ -168,7 +170,8 @@ def _resumir_contexto(contexto: list[dict]) -> str:
         tipo = item.get("act_type") or "ATO"
         numero = item.get("act_number") or ""
         texto = (item.get("text") or "").strip()[:3000]
-        linhas.append(f"- {tipo} {numero}\n  {texto}")
+        prefixo = f"[tema: {item.get('tema')}] " if item.get("tema") else ""
+        linhas.append(f"- {tipo} {numero}\n  {prefixo}{texto}")
     return "\n".join(linhas) if linhas else "(nenhum ato recuperado)"
 
 
@@ -268,10 +271,15 @@ def _padronizar(estrutura: dict, tipo_ato: str) -> dict:
     for item in estrutura.get("corpo") or []:
         if not isinstance(item, dict) or not _limpar(item.get("texto") or ""):
             continue
+        tipo = _limpar(item.get("tipo") or "artigo").casefold()
         novo = {
+            "tipo": tipo if tipo in ("artigo", "capitulo") else "artigo",
             "rotulo": _limpar(item.get("rotulo") or ""),
             "texto": _limpar(item["texto"]),
         }
+        if novo["tipo"] == "capitulo":
+            corpo.append(novo)
+            continue
         subitens = []
         for sub in item.get("subitens") or []:
             if isinstance(sub, dict) and _limpar(sub.get("texto") or ""):
@@ -308,14 +316,37 @@ def _padronizar(estrutura: dict, tipo_ato: str) -> dict:
     return estrutura
 
 
-def _extrair_json_com_retry(mensagens, definition, max_tokens):
+def _extrair_json_com_retry(
+    mensagens,
+    definition,
+    max_tokens,
+    preservar_completo: bool = False,
+):
     """Chama o LLM (function calling) e devolve o argumento JSON já parseado.
 
     Se a resposta vier truncada (JSON incompleto por estouro do limite de
     tokens), reenvia a conversa com o dobro de ``max_tokens`` e instrução para
-    o modelo reduzir o campo ``corpo`` e devolver um JSON válido. Falha com
-    mensagem clara se a repetição também vier truncada.
+    o modelo devolver um JSON válido. Quando ``preservar_completo=True`` (fluxo
+    de melhoria), o retry instrui o modelo a reproduzir TODO o conteúdo do
+    original sem omitir nem resumir; caso contrário mantém o comportamento de
+    permitir reduzir o campo ``corpo``. Falha com mensagem clara se a repetição
+    também vier truncada.
     """
+    if preservar_completo:
+        instrucao_retry = (
+            "JSON invalido ou truncado (resposta cortada no limite de tokens). "
+            "Reproduza o documento COMPLETO, preservando TODOS os artigos, "
+            "considerandos, titulos e trechos do original, sem omitir nem "
+            "resumir. Apenas devolva um JSON valido, completo e encerrado."
+        )
+    else:
+        instrucao_retry = (
+            "JSON invalido ou truncado (resposta cortada no limite "
+            "de tokens). Refaça a estrutura completa, reduzindo o "
+            "tamanho do campo 'corpo' se precisar, e devolva um "
+            "JSON valido e encerrado."
+        )
+
     for tentativa in range(2):
         resposta = perguntar(mensagens, [definition], max_tokens=max_tokens)
         message = resposta.choices[0].message
@@ -354,12 +385,7 @@ def _extrair_json_com_retry(mensagens, definition, max_tokens):
                     {
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "content": (
-                            "JSON invalido ou truncado (resposta cortada no limite "
-                            "de tokens). Refaça a estrutura completa, reduzindo o "
-                            "tamanho do campo 'corpo' se precisar, e devolva um "
-                            "JSON valido e encerrado."
-                        ),
+                        "content": instrucao_retry,
                     },
                 ]
             )
@@ -402,22 +428,30 @@ MELHORIA_DEFINITION = json.loads(json.dumps(STRUTURA_DEFINITION))
 MELHORIA_DEFINITION["function"]["name"] = "apresentar_documento_melhorado"
 MELHORIA_DEFINITION["function"]["description"] = (
     "Apresenta o documento normativo enviado pelo usuario reescrito com "
-    "melhorias e adequacoes juridicas, mais a lista 'alteracoes' explicando "
-    "o que mudou em relacao ao original e por que. O ato deve permanecer o "
+    "melhorias e adequacoes juridicas. Deve devolver: 'alteracoes' com as "
+    "CORRECOES aplicadas ao texto existente; 'adicoes_estruturais' com os "
+    "artigos NOVOS propostos para fechar lacunas de aplicabilidade (somente "
+    "quando houver precedente no RAG); e 'lacunas_identificadas' com as "
+    "lacunas pertinentes sem precedente no acervo. O ato deve permanecer o "
     "mesmo (numero, ementa, objeto e assinaturas preservados)."
 )
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
     "type": "array",
     "description": (
-        "Lista objetiva das alteracoes aplicadas ao documento original, para a "
-        "comparacao antes/depois. Registre CADA mudanca com tipo e motivo."
+        "CORRECOES aplicadas ao texto EXISTENTE do documento, para a "
+        "comparacao antes/depois. Use apenas 'alterado', 'corrigido' ou "
+        "'removido'. Artigos novos NAO entram aqui -- vao em "
+        "'adicoes_estruturais' com tipo 'adicionado'."
     ),
     "items": {
         "type": "object",
         "properties": {
             "tipo": {
                 "type": "string",
-                "description": "'adicionado', 'alterado', 'removido' ou 'corrigido'.",
+                "description": (
+                    "'alterado', 'removido' ou 'corrigido' (correcoes de texto "
+                    "existente)."
+                ),
             },
             "o_que": {
                 "type": "string",
@@ -434,12 +468,102 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
         "required": ["tipo", "o_que", "detalhe"],
     },
 }
+MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais"] = {
+    "type": "array",
+    "description": (
+        "ADICOES ESTRUTURAIS PROPOSTAS: artigos NOVOS acrescentados ao "
+        "documento para fechar lacunas de aplicabilidade, somente quando a "
+        "lacuna tiver precedente nos atos recuperados no RAG. Cada item e um "
+        "artigo simples, com numero por sufixo quando inserido no MEIO da "
+        "sequencia (LC 95/1998, art. 12, §§ 2o-3o): inserido apos o art. 6o, "
+        "vira 'Art. 6o-A'; so continue a numeracao ('Art. 34') ao final do "
+        "ato. O texto do artigo deve ser AUTONOMO (nao citar ato SEJUS "
+        "lateral, de outro assunto, no corpo do dispositivo)."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "tipo": {
+                "type": "string",
+                "description": "'adicionado'.",
+            },
+            "o_que": {
+                "type": "string",
+                "description": (
+                    "Identificacao do artigo novo, ex.: 'Art. 6o-A'. Igual ao "
+                    "rotulo usado no 'corpo'."
+                ),
+            },
+            "posicao": {
+                "type": "string",
+                "description": (
+                    "Onde entra, ex.: 'apos o art. 6o, no Capitulo III' ou "
+                    "'ao final do ato, apos o art. 33'."
+                ),
+            },
+            "detalhe": {
+                "type": "string",
+                "description": "Motivo da adicao (qual lacuna fechada).",
+            },
+            "lastro": {
+                "type": "string",
+                "description": (
+                    "Opcional. Atos do RAG usados como modelo de redacao, ex.: "
+                    "'IN 07/2026, art. 13 (validade de 02 anos)'. Transparencia "
+                    "de processo para o relatorio -- nao e citacao normativa no "
+                    "texto do artigo."
+                ),
+            },
+        },
+        "required": ["o_que", "posicao", "detalhe"],
+    },
+}
+MELHORIA_DEFINITION["function"]["parameters"]["properties"]["lacunas_identificadas"] = {
+    "type": "array",
+    "description": (
+        "Lacunas de aplicabilidade que VOCE avaliou como pertinentes mas que "
+        "NAO geraram artigo novo (nao havia precedente no RAG). Use os temas: "
+        "'recurso_administrativo', 'prazo_validade', 'prestacao_contas', "
+        "'revogacao', 'seguranca_epi', 'publicacao_vigencia'. A versao final "
+        "lista no relatorio apenas as sem precedente no acervo."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "tema": {"type": "string"},
+            "detalhe": {
+                "type": "string",
+                "description": "Descricao curta da omissao observada no ato.",
+            },
+        },
+        "required": ["tema"],
+    },
+}
 MELHORIA_DEFINITION["function"]["parameters"]["required"] = [
     "numero",
     "ementa",
     "corpo",
     "alteracoes",
 ]
+
+# Títulos de capítulo (ex.: 'CAPÍTULO I' e o subtítulo 'DAS DISPOSIÇÕES
+# GERAIS') entram como itens do próprio 'corpo', em ordem de aparecimento,
+# cada linha como um item com tipo 'capitulo'. Documentos sem capítulos não
+# usam esse campo — basta omitir.
+_corpo_items = MELHORIA_DEFINITION["function"]["parameters"]["properties"]["corpo"]["items"]
+_corpo_items["properties"]["tipo"] = {
+    "type": "string",
+    "description": (
+        "'capitulo' para a linha de titulo de capitulo (ex.: 'CAPÍTULO I' ou o "
+        "subtitulo 'DAS DISPOSIÇÕES GERAIS', cada um como item separado e em "
+        "ordem no corpo). Omita para artigos comuns ('artigo', padrao)."
+    ),
+    "enum": ["artigo", "capitulo"],
+}
+_corpo_items["description"] = (
+    "Articulacao do ato em ordem: artigos, incisos/paragrafos e, quando o "
+    "original tiver, itens 'capitulo' (titulos de capitulo) na posicao correta."
+)
 
 
 def _sistema_melhoria():
@@ -452,19 +576,54 @@ def _sistema_melhoria():
         "original.\n\n"
         "ORIENTACOES DE MELHORIA E ADEQUACAO:\n"
         "1. Preserve o esqueleto do documento: numero, ementa, estrutura de "
-        "artigos e assinaturas. Aprimore o texto onde ele estiver fragil.\n"
-        "2. Fundamentacao legal: confira e ajuste o preambulo e os considerandos "
+        "artigos, titulos de capitulo e assinaturas. Aprimore o texto onde ele "
+        "estiver fragil.\n"
+        "2. Capitulos: se o original tiver titulos de capitulo (ex.: 'CAPÍTULO "
+        "I' seguido de 'DAS DISPOSIÇÕES GERAIS'), reproduza TODOS eles como "
+        "itens 'capitulo' do 'corpo', na mesma posicao do original. Nao crie "
+        "capitulos que o original nao tinha.\n"
+        "3. Fundamentacao legal: confira e ajuste o preambulo e os considerandos "
         "usando as normas e fundamentos presentes nos atos recuperados no RAG "
         "(nao invente referencias que nao possa sustentar nos atos recuperados).\n"
-        "3. Rio de articulacao: corrija numeracao de artigos, incisos (romano "
-        "maiusculo) e paragrafos (§ / Paragrafo unico), sem pular numeros.\n"
-        "4. Redacao juridica: padronize siglas e termos, elimine ambiguidades, "
-        "mantendo o tom impessoal e tecnico dos atos oficiais.\n"
-        "5. Fechamento: garanta vigencia e, quando o original revoga algo, "
-        "preserve a revogacao nos termos corretos.\n"
-        "6. Mude apenas o necessario: toda alteracao deve constar em "
-        "'alteracoes' com tipo, item e motivo. Se nada precisar mudar em um "
-        "trecho, mantenha-o e nao o liste.\n"
+        "5. NUMERACAO DE ARTIGOS NOVOS (LC 95/1998, art. 12, §§ 2o-3o): ao "
+        "inserir um artigo no MEIO da sequencia, NUNCA renumerar os "
+        "existentes. Use o numero do artigo que o precede acrescido de sufixo "
+        "de letra: inserido apos o 'Art. 6o', vira 'Art. 6o-A'; depois "
+        "'Art. 6o-B', e assim por diante. So usa numeracao continua "
+        "('Art. 34', 'Art. 35') para artigos acrescentados apos o ULTIMO "
+        "artigo do ato.\n"
+        "6. Fechamento: garanta artigo de vigencia e, quando o original revoga "
+        "algo, preserve a revogacao nos termos corretos.\n"
+        "7. ANALISE DE APLICABILIDADE (LACUNAS): revise o ato como quem vai "
+        "aplica-lo no dia a dia e avalie cada lacuna: "
+        "(a) 'recurso_administrativo' -- recurso ou pedido de reconsideracao "
+        "quando a norma der a uma autoridade poder de vedar/negar mediante "
+        "decisao fundamentada; "
+        "(b) 'prazo_validade' -- prazo de validade e renovacao de "
+        "autorizacoes/suspensoes; "
+        "(c) 'prestacao_contas' -- prestacao de contas e fiscalizacao, "
+        "sobretudo quando houver insumo fornecido pelo Estado; "
+        "(d) 'revogacao' -- revogacao de norma anterior sobre o mesmo objeto; "
+        "(e) 'seguranca_epi' -- seguranca do trabalho/EPI quando a atividade "
+        "envolver risco; "
+        "(f) 'publicacao_vigencia' -- veiculo de publicacao e regime de "
+        "vigencia. Se a lacuna existir E houver precedente no RAG rotulado "
+        "com o MESMO tema, acrescente UM artigo simples (nao uma serie), no "
+        "capitulo adequado, com numero por sufixo, e registre-o em "
+        "'adicoes_estruturais' com posicao, motivo e lastro. Se a lacuna "
+        "existir MAS nao houver precedente rotulado, NAO proponha artigo -- "
+        "apenas registre o tema em 'lacunas_identificadas'. Nao encha o "
+        "documento de artigos novos: so adicione o que fechar omissao real de "
+        "aplicacao.\n"
+        "8. TEXTOS NOVOS SAO AUTONOMOS: nao cite ato SEJUS lateral (de outro "
+        "assunto) no corpo do artigo -- a base de estilo vai apenas no campo "
+        "'lastro' do relatorio. Citacoes VERTICAIS ja embasadas no preambulo "
+        "(ex.: LEP, Decreto 548/2016) e citacoes SUBSTANTIVAS (ex.: o ato "
+        "concreto a ser revogado) podem entrar no texto.\n"
+        "9. Separacao: toda mudanca em texto EXISTENTE vai em 'alteracoes' "
+        "(alterado/corrigido/removido); todo artigo NOVO vai em "
+        "'adicoes_estruturais' (adicionado). Mude apenas o necessario: se um "
+        "trecho ja esta adequado, mantenha-o sem lista-lo.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -481,14 +640,18 @@ def _usuario_melhoria(
             "DOCUMENTO ORIGINAL ENVIADO PELO USUARIO (reescreva ESTE documento "
             "com melhorias, preservando numero, ementa, objeto e assinaturas):"
         ),
-        str(conteudo)[:20_000],
+        str(conteudo)[:60_000],
         "",
         f"Tipo de ato: {tipo_ato}",
         f"Formato/modelo de referencia: {perfil.name}",
         "",
         (
             "Atos recuperados como fundamento (RAG). Use esse conteudo para "
-            "adequar fundamentos, prazos, procedimentos e detalhes:"
+            "adequar fundamentos, prazos, procedimentos e detalhes. Trechos "
+            "rotulados com '[tema: ...]' indicam precedentes de lacuna "
+            "(recurso_administrativo, prazo_validade, prestacao_contas, "
+            "revogacao, seguranca_epi, publicacao_vigencia) e podem embasar "
+            "artigos novos em 'adicoes_estruturais':"
         ),
         _resumir_contexto(contexto),
     ]
@@ -503,14 +666,61 @@ def _usuario_melhoria(
     return "\n".join(partes)
 
 
+# Completude mínima para aceitar uma melhoria sem re-tentar/errar: a melhoria
+# deve reproduzir o ato (mesmo número, ementa, objeto) — encolher demais ou
+# omitir artigos descaracteriza o documento.
+_MELHORIA_MAX_TOKENS_DEFAULT = 16384
+_COMPLETUDE_MIN_ARTIGOS = 0.8
+_COMPLETUDE_MIN_RATIO = 0.55
+
+_RE_ARTIGO_ORIGEM = re.compile(r"^\s*art\.?\s*\d", re.IGNORECASE)
+
+_MENSAGEM_PRESERVAR = (
+    "A versão gerada ficou INCOMPLETA: artigos, títulos de capítulo e trechos "
+    "do documento original foram omitidos e o texto encolheu. Refaça "
+    "preservando TODOS os artigos, capítulos, considerandos, títulos e o nível "
+    "de detalhamento do original — não omita, não resuma e não renumere de "
+    "forma que descaracterize o ato. Devolva o JSON completo e encerrado."
+)
+
+
+def _melhoria_incompleta(conteudo: str, estrutura: dict) -> bool:
+    """Diz se a estrutura gerada omitiu conteúdo relevante do original.
+
+    Confere (a) a proporção de artigos do original que foi reproduzida e (b) a
+    razão entre o tamanho do texto gerado e o do original. Um ato deve usar os
+    mesmos argumentos descritivos — encolher para uma fração indica conteúdo
+    cortado."""
+    linhas_origem = [linha.strip() for linha in (conteudo or "").splitlines()]
+    artigos_origem = sum(1 for linha in linhas_origem if _RE_ARTIGO_ORIGEM.match(linha))
+    artigos_gerados = len(estrutura.get("corpo") or []) + len(
+        estrutura.get("fechamento") or []
+    )
+    if artigos_origem and artigos_gerados < artigos_origem * _COMPLETUDE_MIN_ARTIGOS:
+        return True
+
+    tamanho_depois = len(minuta_para_texto(estrutura))
+    return tamanho_depois < max(1, len(conteudo or "")) * _COMPLETUDE_MIN_RATIO
+
+
 def gerar_estrutura_melhoria(
     conteudo: str,
     tipo_ato: str,
     perfil: PerfilModelo,
     contexto: list[dict],
     valores: dict | None = None,
-) -> tuple[dict, list[dict]]:
-    """Chama o LLM e devolve (estrutura melhorada, lista de alteracoes)."""
+) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    """Chama o LLM e devolve (estrutura, correções, adições, lacunas).
+
+    Além da estrutura melhorada e das ``alteracoes`` (correções em texto
+    existente), devolve as ``adicoes_estruturais`` (artigos novos propostos
+    para fechar lacunas) e as ``lacunas_identificadas`` pelo modelo.
+
+    Ao contrário da minuta livre, a melhoria deve reproduzir o documento
+    completo: usa um orçamento de tokens maior (``MELHORIA_MAX_TOKENS``) e uma
+    guarda de completude que re-tenta (e depois erra com mensagem clara) caso o
+    modelo omita artigos ou encolha o texto, em vez de entregar um ato cortado.
+    """
     mensagens = [
         {"role": "system", "content": _sistema_melhoria()},
         {
@@ -519,17 +729,48 @@ def gerar_estrutura_melhoria(
         },
     ]
 
-    dados = _extrair_json_com_retry(
-        mensagens,
-        MELHORIA_DEFINITION,
-        max(4096, int(os.getenv("MINUTA_MAX_TOKENS", "4096"))),
+    max_tokens = max(
+        _MELHORIA_MAX_TOKENS_DEFAULT,
+        int(os.getenv("MELHORIA_MAX_TOKENS") or _MELHORIA_MAX_TOKENS_DEFAULT),
     )
-    estrutura = _padronizar(
-        {chave: valor for chave, valor in dados.items() if chave != "alteracoes"},
-        tipo_ato,
+
+    for tentativa in range(2):
+        dados = _extrair_json_com_retry(
+            mensagens,
+            MELHORIA_DEFINITION,
+            max_tokens,
+            preservar_completo=True,
+        )
+        estrutura = _padronizar(
+            {
+                chave: valor
+                for chave, valor in dados.items()
+                if chave
+                not in ("alteracoes", "adicoes_estruturais", "lacunas_identificadas")
+            },
+            tipo_ato,
+        )
+        alteracoes = [a for a in (dados.get("alteracoes") or []) if isinstance(a, dict)]
+        adicoes = [
+            a for a in (dados.get("adicoes_estruturais") or []) if isinstance(a, dict)
+        ]
+        lacunas = [
+            l for l in (dados.get("lacunas_identificadas") or []) if isinstance(l, dict)
+        ]
+
+        if not _melhoria_incompleta(conteudo, estrutura):
+            return estrutura, alteracoes, adicoes, lacunas
+
+        if tentativa == 0:
+            mensagens.append({"role": "user", "content": _MENSAGEM_PRESERVAR})
+            max_tokens *= 2
+
+    raise ValueError(
+        "A melhoria ficou incompleta: artigos e trechos do documento foram "
+        "omitidos e o texto encolheu mesmo após a repetição. O documento pode "
+        "ser grande demais para melhorar de uma vez; peça ajustes pontuais ou "
+        "envie uma versão mais curta."
     )
-    alteracoes = [a for a in (dados.get("alteracoes") or []) if isinstance(a, dict)]
-    return estrutura, alteracoes
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +782,9 @@ _QUEDA_REFERENCIA = (
     "resolutivo",
     "paragrafo",
 )
+
+# Autor das revisões de inserção (track changes) gravadas no DOCX melhorado.
+_AUTOR_REVISAO = "editor"
 
 _SIMPLIFICAR_ROTULO = re.compile(r"\s+")
 
@@ -649,25 +893,41 @@ def _adicionar_vigencia_faltante(estrutura: dict, tipo_ato: str) -> None:
     estrutura["fechamento"] = fechamento
 
 
+def _chave_rotulo(rotulo: str) -> str:
+    """Normaliza um rotulo ('Art. 6º-A', 'art. 6°a' ...) para comparacao."""
+    chave = _SIMPLES.sub(" ", (rotulo or "").strip().casefold())
+    return chave.rstrip(".")
+
+
 def montar_docx(
     perfil: PerfilModelo,
     estrutura: dict,
     output_dir: Path,
+    insercoes_rastreadas: set[str] | None = None,
 ) -> Path:
-    """Duplica o modelo e monta a minuta preservando a formatacao."""
+    """Duplica o modelo e monta a minuta preservando a formatacao.
+
+    Artigos cujo rotulo esteja em ``insercoes_rastreadas`` (formato
+    normalizado) sao gravados como revisao de insercao do Word (``<w:ins>``):
+    o revisor precisa aceitar/rejeitar essas adicoes antes de publicar."""
     doc = _abrir_ou_criar(perfil.file)
     refs = _referencias(doc, perfil)
     _adicionar_vigencia_faltante(estrutura, perfil.act_types[0])
 
     ancora = _preparar_corpo(doc, refs, perfil.preservar_moldura)
+    visados = {_chave_rotulo(r) for r in (insercoes_rastreadas or set())}
+    n_insercoes = {"n": 0}
 
-    def adicionar(papel: str, rotulo: str, texto: str) -> None:
+    def adicionar(papel: str, rotulo: str, texto: str, rastrear: bool = False) -> None:
         if not texto.strip():
             return
         if not _pedir_paragrafo(refs, papel):
             return
         ref = _referencia_para(refs, papel)
         w_p = build_paragraph(ref, rotulo, texto)
+        if rastrear:
+            n_insercoes["n"] += 1
+            assinalar_insercao(w_p, n_insercoes["n"], _AUTOR_REVISAO)
         ancora.addprevious(w_p)
 
     adicionar("titulo", "", estrutura.get("numero", ""))
@@ -680,7 +940,11 @@ def montar_docx(
     adicionar("resolutivo", "", estrutura.get("resolutivo", ""))
 
     for artigo in estrutura.get("corpo", []):
-        adicionar("artigo", artigo.get("rotulo", ""), artigo["texto"])
+        if artigo.get("tipo") == "capitulo":
+            adicionar("capitulo", "", artigo.get("texto", ""))
+            continue
+        rastrear = _chave_rotulo(artigo.get("rotulo", "")) in visados
+        adicionar("artigo", artigo.get("rotulo", ""), artigo["texto"], rastrear=rastrear)
         for sub in artigo.get("subitens", []):
             papel = "paragrafo" if sub.get("tipo") == "paragrafo" else "inciso"
             adicionar(papel, sub.get("rotulo", ""), sub["texto"])

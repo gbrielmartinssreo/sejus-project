@@ -64,6 +64,60 @@ def test_retry_parse_succeeds_after_initial_truncation(monkeypatch):
     assert chamadas[1] == 8192
 
 
+def test_retry_preservar_completo_nao_manda_reduzir(monkeypatch):
+    """No modo preservar_completo, o retry manda reproduzir tudo sem reduzir."""
+    capturado = {"tool": None}
+    calls = [0]
+
+    def fake_perguntar(mensagens, tools, **kwargs):
+        calls[0] += 1
+        for m in mensagens:
+            if m.get("role") == "tool":
+                capturado["tool"] = m["content"]
+        if calls[0] == 1:
+            return _FakeResponse(_FakeMessage([_FakeToolCall("c1", "x", _TRUNCATED_ARGS)]))
+        return _FakeResponse(_FakeMessage([_FakeToolCall("c2", "x", _VALID_ARGS)]))
+
+    monkeypatch.setattr(minuta, "perguntar", fake_perguntar)
+
+    minuta._extrair_json_com_retry(
+        [{"role": "user", "content": "pedido"}],
+        _TOOL_DEF,
+        max_tokens=4096,
+        preservar_completo=True,
+    )
+
+    mensagem = capturado["tool"]
+    assert "COMPLETO" in mensagem
+    assert "sem omitir" in mensagem
+    assert "reduzindo" not in mensagem
+
+
+def test_retry_padrao_ainda_manda_reduzir_corpo(monkeypatch):
+    """Sem preservar_completo, o comportamento atual (reduzir corpo) é mantido."""
+    capturado = {"tool": None}
+    calls = [0]
+
+    def fake_perguntar(mensagens, tools, **kwargs):
+        calls[0] += 1
+        for m in mensagens:
+            if m.get("role") == "tool":
+                capturado["tool"] = m["content"]
+        if calls[0] == 1:
+            return _FakeResponse(_FakeMessage([_FakeToolCall("c1", "x", _TRUNCATED_ARGS)]))
+        return _FakeResponse(_FakeMessage([_FakeToolCall("c2", "x", _VALID_ARGS)]))
+
+    monkeypatch.setattr(minuta, "perguntar", fake_perguntar)
+
+    minuta._extrair_json_com_retry(
+        [{"role": "user", "content": "pedido"}],
+        _TOOL_DEF,
+        max_tokens=4096,
+    )
+
+    assert "reduzindo" in capturado["tool"]
+
+
 def test_retry_injects_tool_feedback_into_messages(monkeypatch):
     """A mensagem de feedback com o erro de JSON é injetada entre as duas chamadas."""
     mensagens_terceira = {"capturado": []}

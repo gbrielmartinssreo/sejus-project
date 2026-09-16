@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from markitdown import MarkItDown
 
 # Usar caminho relativo baseado no arquivo atual
@@ -24,7 +25,7 @@ for pdf in arquivos:
 
         print(f"[OK] Convertido: {pdf.name}")
     except Exception as e:
-        print(f"[ERRO] Falha ao converter {pdf.name}: {type(e).__name__}: {str(e)}")
+        print(f"[ERRO] Falha ao converter {pdf.name}: {type(e).__name__}: {e!s}")
         continue
 
-print(f"\nConversao concluida!")
+print("\nConversao concluida!")

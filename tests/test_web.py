@@ -268,6 +268,15 @@ def test_chat_devolve_comparacao_antes_depois(monkeypatch, tmp_path):
             "alteracoes": [
                 {"tipo": "corrigido", "o_que": "Fundamento legal", "detalhe": "Atualizado."}
             ],
+            "adicoes_estruturais": [
+                {
+                    "o_que": "Art. 6º-A",
+                    "posicao": "após o art. 6º",
+                    "detalhe": "Recurso em caso de negativa.",
+                    "lastro": "IN 07/2026.",
+                }
+            ],
+            "lacunas": [{"tema": "seguranca_epi", "detalhe": "Sem EPI."}],
         },
     )
 
@@ -279,6 +288,8 @@ def test_chat_devolve_comparacao_antes_depois(monkeypatch, tmp_path):
     assert comparacao["arquivo_original"] == "minuta_original.txt"
     assert comparacao["url_original"] == "/api/arquivo/minuta_original.txt"
     assert comparacao["alteracoes"][0]["tipo"] == "corrigido"
+    assert comparacao["adicoes_estruturais"][0]["o_que"] == "Art. 6º-A"
+    assert comparacao["lacunas"][0]["tema"] == "seguranca_epi"
     assert "depois" not in comparacao
     assert "diff" not in comparacao
     assert dados["minuta_nome"] == "melhorada.docx"

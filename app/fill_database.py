@@ -1,13 +1,12 @@
 from pathlib import Path
 
-from sejus_project.rag.ingestion import load_documents
 from sejus_project.rag.chunking import chunk_documents
 from sejus_project.rag.embedding import Embedder
 from sejus_project.rag.indexing import (
     QdrantIndexer,
     QdrantIndexerConfig,
 )
-
+from sejus_project.rag.ingestion import load_documents
 
 # Definir o diretório raiz do projeto
 script_dir = Path(__file__).parent

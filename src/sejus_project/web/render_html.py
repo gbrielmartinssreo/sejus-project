@@ -97,6 +97,9 @@ def _corpo_html(estructura: dict) -> list[str]:
     _par("resolutivo", estructura.get("resolutivo"))
 
     for artigo in estructura.get("corpo") or []:
+        if artigo.get("tipo") == "capitulo":
+            p(f'<p class="minuta-capitulo">{_e(artigo.get("texto"))}</p>')
+            continue
         corpo_artigo: list[str] = []
         corpo_artigo.append(
             '<div class="minuta-artigo">'

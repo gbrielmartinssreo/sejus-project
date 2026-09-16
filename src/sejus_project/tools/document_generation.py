@@ -552,7 +552,9 @@ comparacao_definition = {
         "description": (
             "Recupera os dados da ultima melhoria antes/depois ja feita na "
             "conversa: textos REAIS alterados (campos 'antes' e 'depois'), a "
-            "lista de alteracoes e o nome do arquivo original. Use somente em "
+            "lista de correcoes, as adicoes estruturais propostas (artigos "
+            "novos, com posicao e lastro), as lacunas sem precedente e o nome "
+            "do arquivo original. Use somente em "
             "perguntas de acompanhamento sobre uma melhoria ja feita (ex.: "
             "'o que exatamente foi alterado', 'mostre antes e depois', 'mostre "
             "os textos alterados', 'monte uma tabela do antes/depois'). NAO gere "
@@ -562,6 +564,191 @@ comparacao_definition = {
         "parameters": {"type": "object", "properties": {}},
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Trava de precedente: lacuna so vira artigo novo se houver ato analogo no
+# acervo. o 'chaves' ancora o tema num trecho recuperado -- sem a palavra-
+# chave no texto, o score da busca nao basta para gerar artigo.
+# ---------------------------------------------------------------------------
+
+PRECEDENTE_MIN_SCORE = 0.45
+PRECEDENTE_TOP = 6
+CONTEXTO_MELHORIA_MAX = 24
+
+LACUNAS_ESTRUTURAIS = [
+    {
+        "tema": "recurso_administrativo",
+        "rotulo": "Recurso administrativo / reconsideração",
+        "query": (
+            "recurso administrativo pedido de reconsideração contra decisão "
+            "fundamentada de autoridade que vedar negar técnica material"
+        ),
+        "chaves": re.compile(r"recurso|reconsidera", re.IGNORECASE),
+    },
+    {
+        "tema": "prazo_validade",
+        "rotulo": "Prazo de validade e renovação",
+        "query": (
+            "prazo de validade da autorização registro suspensão renovação cadastro"
+        ),
+        "chaves": re.compile(r"validade|renova|revalid", re.IGNORECASE),
+    },
+    {
+        "tema": "prestacao_contas",
+        "rotulo": "Prestação de contas e fiscalização",
+        "query": (
+            "prestação de contas fiscalização obrigações do fiscal insumo "
+            "fornecido recurso público"
+        ),
+        "chaves": re.compile(r"presta[çc][aã]o|fiscaliz", re.IGNORECASE),
+    },
+    {
+        "tema": "revogacao",
+        "rotulo": "Revogação de norma anterior",
+        "query": (
+            "revogação de disposições em contrário normas anteriores sobre o mesmo objeto"
+        ),
+        "chaves": re.compile(r"revog", re.IGNORECASE),
+    },
+    {
+        "tema": "seguranca_epi",
+        "rotulo": "Segurança do trabalho / EPI",
+        "query": (
+            "equipamento de proteção individual segurança do trabalho atividade de risco"
+        ),
+        "chaves": re.compile(
+            r"prote[çc][aã]o individual|\bepi\b|equipamento de prote",
+            re.IGNORECASE,
+        ),
+    },
+    {
+        "tema": "publicacao_vigencia",
+        "rotulo": "Publicação e vigência",
+        "query": "entrada em vigor publicação diário oficial regime de vigência",
+        "chaves": re.compile(
+            r"entra em vigor|publique|di[áa]rio oficial|vig[êe]ncia", re.IGNORECASE
+        ),
+    },
+]
+
+_SIMPLES_TEXTO = re.compile(r"\s+")
+
+_STOP = {"de", "da", "do", "das", "dos", "em", "no", "na", "a", "o", "e"}
+
+
+def _tema_por_nome(nome: str) -> str | None:
+    """Mapeia o nome de tema escrito pelo modelo para a chave canônica."""
+    texto = _SIMPLES_TEXTO.sub(
+        " ", (nome or "").strip().casefold().replace("_", " ").replace("-", " ")
+    )
+    if not texto:
+        return None
+    palavras = set(texto.split())
+    for lacuna in LACUNAS_ESTRUTURAIS:
+        chave = lacuna["tema"].replace("_", " ")
+        if texto == chave:
+            return lacuna["tema"]
+        nucleo = {p for p in chave.split() if p not in _STOP}
+        if nucleo and nucleo <= palavras:
+            return lacuna["tema"]
+        if chave in texto or texto in chave:
+            return lacuna["tema"]
+    return None
+
+
+def _precedente_das_lacunas(conteudo: str, tipo_ato: str) -> dict:
+    """Avalia, por lacuna, se o acervo tem precedente analogo.
+
+    Devolve por tema um dict com ``rotulo``, ``tem_precedente`` e ``chunks``
+    (trechos de suporte com a palavra-chave e score acima do limiar). Usa
+    somente a leitura do indice Qdrant (nao chama LLM)."""
+    resultado = {}
+    for lacuna in LACUNAS_ESTRUTURAIS:
+        chunks = retrieve(lacuna["query"], limit=PRECEDENTE_TOP)
+        suporte = [
+            {**c, "tema": lacuna["tema"]}
+            for c in chunks
+            if c.get("score", 0) >= PRECEDENTE_MIN_SCORE
+            and lacuna["chaves"].search(c.get("text") or "")
+        ]
+        resultado[lacuna["tema"]] = {
+            "rotulo": lacuna["rotulo"],
+            "tem_precedente": bool(suporte),
+            "chunks": suporte,
+        }
+    return resultado
+
+
+def _assunto_do_documento(conteudo: str) -> str:
+    """Pequena base textual do documento (ementa) para a query de assunto."""
+    for linha in (conteudo or "").splitlines():
+        linha = linha.strip()
+        if not linha:
+            continue
+        if linha.casefold().startswith("disp"):
+            return linha[:300]
+        return linha[:300]
+    return ""
+
+
+def _contexto_para_melhoria(
+    conteudo: str,
+    tipo_ato: str,
+    filename: str,
+    precedente: dict,
+) -> list[dict]:
+    """Monta o contexto RAG da melhoria: temas com precedente + assunto.
+
+    Consulta o acervo pelo assunto do documento e reaproveita os chunks de
+    suporte dos temas aprovados pela trava (ja rotulados por tema), sem
+    duplicar fontes (dedupe por ``source_file``). Os chunks rotulados entram
+    primeiro: quando a mesma fonte aparece no assunto, a etiqueta de tema
+    precisa prevalecer para embasar a adicao."""
+    chunks: list[dict] = []
+    vistos: set[str] = set()
+
+    for info in precedente.values():
+        if not info.get("tem_precedente"):
+            continue
+        for chunk in info.get("chunks", []):
+            fonte = chunk.get("source_file")
+            if fonte in vistos:
+                continue
+            vistos.add(fonte)
+            chunks.append(chunk)
+            if len(chunks) >= CONTEXTO_MELHORIA_MAX:
+                return chunks
+
+    assunto = _assunto_do_documento(conteudo)
+    if assunto:
+        for chunk in retrieve(
+            f"{assunto}\nTipo de ato: {tipo_ato}", limit=8
+        ):
+            fonte = chunk.get("source_file")
+            if fonte in vistos:
+                continue
+            vistos.add(fonte)
+            chunks.append(chunk)
+            if len(chunks) >= CONTEXTO_MELHORIA_MAX:
+                return chunks
+    return chunks
+
+
+def _filtrar_lacunas_sem_precedente(lacunas_do_modelo: list[dict], precedente: dict) -> list[dict]:
+    """Mantem apenas as lacunas que o modelo viu como pertinentes e que nao
+    passaram na trava de precedente (mostradas no relatorio como informacao)."""
+    sem = []
+    for lacuna in lacunas_do_modelo:
+        tema = _tema_por_nome(lacuna.get("tema"))
+        if tema and not precedente.get(tema, {}).get("tem_precedente"):
+            sem.append(
+                {
+                    "tema": tema,
+                    "detalhe": (lacuna.get("detalhe") or "").strip()[:400],
+                }
+            )
+    return sem
 
 
 def obter_textos_comparacao() -> str:
@@ -587,6 +774,8 @@ def obter_textos_comparacao() -> str:
             "status": "ok",
             "arquivo_original": dados.get("arquivo_original"),
             "alteracoes": dados.get("alteracoes") or [],
+            "adicoes_estruturais": dados.get("adicoes_estruturais") or [],
+            "lacunas": dados.get("lacunas") or [],
             "textos": dados.get("textos") or [],
             "antes": (dados.get("antes") or "")[:12_000],
             "depois": (dados.get("depois") or "")[:12_000],
@@ -604,19 +793,28 @@ def _melhorar_e_relatar(
     contexto: list[dict],
     diretrizes: str | None,
     outros: list[str] | None = None,
+    precedente: dict | None = None,
 ) -> str:
     global _ultima_minuta, _melhoria_no_turno, _ultima_comparacao, _gerada_no_turno
     valores = {"diretrizes": diretrizes} if diretrizes else None
-    estrutura, alteracoes = minuta.gerar_estrutura_melhoria(
+    estrutura, alteracoes, adicoes, lacunas = minuta.gerar_estrutura_melhoria(
         conteudo,
         tipo_ato,
         perfil,
         contexto,
         valores,
     )
-    output_path = minuta.montar_docx(perfil, estrutura, OUTPUTS_DIR)
+    insercoes = {
+        minuta._chave_rotulo(a.get("o_que") or "")
+        for a in adicoes
+        if a.get("o_que")
+    }
+    output_path = minuta.montar_docx(
+        perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
+    )
     depois = minuta_para_texto(estrutura)
     textos = _textos_antes_depois(conteudo, depois)
+    lacunas_sem = _filtrar_lacunas_sem_precedente(lacunas, precedente or {})
     _ultima_minuta = {
         "estructura": estrutura,
         "modelo": perfil.name,
@@ -630,6 +828,8 @@ def _melhorar_e_relatar(
         "antes": conteudo[:40_000],
         "depois": depois[:40_000],
         "alteracoes": alteracoes,
+        "adicoes_estruturais": adicoes,
+        "lacunas": lacunas_sem,
         "textos": textos,
         "sha1": hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest(),
     }
@@ -640,6 +840,8 @@ def _melhorar_e_relatar(
             "modelo": perfil.name,
             "output_path": str(output_path),
             "alteracoes": alteracoes,
+            "adicoes_estruturais": adicoes,
+            "lacunas": lacunas_sem,
             "textos": textos,
             "outros": outros or [],
             "sources": _source_summary(contexto),
@@ -691,6 +893,11 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
                     "status": "already_improved",
                     "arquivo_original": filename,
                     "alteracoes": _ultima_comparacao.get("alteracoes") or [],
+                    "adicoes_estruturais": _ultima_comparacao.get(
+                        "adicoes_estruturais"
+                    )
+                    or [],
+                    "lacunas": _ultima_comparacao.get("lacunas") or [],
                     "textos": _ultima_comparacao.get("textos") or [],
                     "outros": [f for f in disponiveis if f != filename],
                 },
@@ -705,11 +912,8 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
         else:
             perfil = modelos.selecionar_modelo(tipo_ato)
 
-        contexto = retrieve(
-            f"Melhoria e adequacao do documento: {filename}\nTipo de ato: {tipo_ato}",
-            limit=16,
-            act_type=modelos.ACT_TYPE_FILTER.get(tipo_ato),
-        )
+        precedente = _precedente_das_lacunas(conteudo, tipo_ato)
+        contexto = _contexto_para_melhoria(conteudo, tipo_ato, filename, precedente)
         return _melhorar_e_relatar(
             filename,
             destino,
@@ -719,6 +923,7 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
             contexto,
             diretrizes,
             outros=[f for f in disponiveis if f != filename],
+            precedente=precedente,
         )
     except UserFileError as error:
         return json.dumps({"status": "error", "error": str(error)}, ensure_ascii=False)

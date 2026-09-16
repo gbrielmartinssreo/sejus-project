@@ -446,6 +446,33 @@ body {
   color: var(--text-low);
 }
 
+.comparacao-bloco {
+  padding: 12px 18px 4px;
+}
+.comparacao-bloco-titulo {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-mid);
+}
+.comparacao-bloco-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-low);
+}
+.adicao-posicao { margin-bottom: 4px; }
+.lastro {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-low);
+}
+.alteracao-tipo.sem-precedente {
+  background: rgba(180, 160, 255, 0.12);
+  color: #b39bff;
+}
+
 /* ---------- Acoes / botoes ---------- */
 .acoes-minuta {
   display: flex;
@@ -581,6 +608,11 @@ body {
   margin: 0 0 12px;
 }
 .minuta-considerando { text-indent: 0; margin: 4px 0; }
+.minuta-capitulo {
+  text-align: center;
+  font-weight: 700;
+  margin: 14px 0 2px;
+}
 .minuta-preambulo { margin: 12px 0 4px; }
 .minuta-resolutivo {
   margin: 8px 0;

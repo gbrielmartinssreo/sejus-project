@@ -297,6 +297,82 @@ function anexarArquivoEnviado(nome) {
   criarBubbleArquivo("Arquivo enviado", nome);
 }
 
+function _liAlteracao(alteracao) {
+  var li = document.createElement("li");
+  li.className = "alteracao-item";
+  var tipo = document.createElement("span");
+  tipo.className = "alteracao-tipo " + (alteracao.tipo || "alterado");
+  tipo.textContent = alteracao.tipo || "alterado";
+  li.appendChild(tipo);
+  var corpo = document.createElement("div");
+  corpo.className = "item-body";
+  if (alteracao.o_que) {
+    var h = document.createElement("h4");
+    h.textContent = alteracao.o_que;
+    corpo.appendChild(h);
+  }
+  if (alteracao.detalhe) {
+    var det = document.createElement("p");
+    det.className = "alteracao-detalhe";
+    det.textContent = alteracao.detalhe;
+    corpo.appendChild(det);
+  }
+  li.appendChild(corpo);
+  return li;
+}
+
+function _liAdicao(adicao) {
+  var li = document.createElement("li");
+  li.className = "alteracao-item";
+  var tipo = document.createElement("span");
+  tipo.className = "alteracao-tipo adicionado";
+  tipo.textContent = "adicionado";
+  li.appendChild(tipo);
+  var corpo = document.createElement("div");
+  corpo.className = "item-body";
+  if (adicao.o_que) {
+    var h = document.createElement("h4");
+    h.textContent = adicao.o_que;
+    corpo.appendChild(h);
+  }
+  if (adicao.posicao) {
+    var pos = document.createElement("p");
+    pos.className = "alteracao-detalhe adicao-posicao";
+    pos.textContent = "Posição: " + adicao.posicao;
+    corpo.appendChild(pos);
+  }
+  if (adicao.detalhe) {
+    var det = document.createElement("p");
+    det.className = "alteracao-detalhe";
+    det.textContent = adicao.detalhe;
+    corpo.appendChild(det);
+  }
+  if (adicao.lastro) {
+    var lst = document.createElement("p");
+    lst.className = "alteracao-detalhe lastro";
+    lst.textContent = "Lastro: " + adicao.lastro;
+    corpo.appendChild(lst);
+  }
+  li.appendChild(corpo);
+  return li;
+}
+
+function _blocoComparacao(titulo, subtitulo) {
+  var enc = document.createElement("div");
+  enc.className = "comparacao-bloco";
+  var t = document.createElement("div");
+  t.className = "comparacao-bloco-titulo";
+  t.textContent = titulo;
+  enc.appendChild(t);
+  if (subtitulo) {
+    var s = document.createElement("p");
+    s.className = "comparacao-bloco-sub";
+    s.textContent = subtitulo;
+    enc.appendChild(s);
+  }
+  return enc;
+}
+
 function anexarComparacao(bubble, dados) {
   var painel = document.createElement("div");
   painel.className = "painel-comparacao";
@@ -306,37 +382,66 @@ function anexarComparacao(bubble, dados) {
   titulo.textContent = "Comparação antes / depois";
   var contagem = document.createElement("span");
   contagem.className = "count";
-  contagem.textContent = (dados.alteracoes ? dados.alteracoes.length : 0) + " alterações";
+  var n =
+    (dados.alteracoes ? dados.alteracoes.length : 0) +
+    (dados.adicoes_estruturais ? dados.adicoes_estruturais.length : 0);
+  contagem.textContent = n + " alterações";
   titulo.appendChild(contagem);
   painel.appendChild(titulo);
 
-  if (dados.alteracoes && dados.alteracoes.length) {
+  var correcoes = dados.alteracoes || [];
+  if (correcoes.length) {
+    painel.appendChild(_blocoComparacao("Correções"));
     var lista = document.createElement("ul");
     lista.className = "lista-alteracoes";
-    dados.alteracoes.forEach(function (alteracao) {
+    correcoes.forEach(function (alteracao) {
+      lista.appendChild(_liAlteracao(alteracao));
+    });
+    painel.appendChild(lista);
+  }
+
+  var adicoes = dados.adicoes_estruturais || [];
+  if (adicoes.length) {
+    painel.appendChild(
+      _blocoComparacao(
+        "Adições estruturais propostas",
+        "Requer decisão da equipe jurídica antes de incluir."
+      )
+    );
+    var listaAdicoes = document.createElement("ul");
+    listaAdicoes.className = "lista-alteracoes";
+    adicoes.forEach(function (adicao) {
+      listaAdicoes.appendChild(_liAdicao(adicao));
+    });
+    painel.appendChild(listaAdicoes);
+  }
+
+  var lacunas = dados.lacunas || [];
+  if (lacunas.length) {
+    painel.appendChild(
+      _blocoComparacao("Lacunas identificadas sem precedente no acervo")
+    );
+    var listaLacunas = document.createElement("ul");
+    listaLacunas.className = "lista-alteracoes";
+    lacunas.forEach(function (lacuna) {
       var li = document.createElement("li");
       li.className = "alteracao-item";
       var tipo = document.createElement("span");
-      tipo.className = "alteracao-tipo " + (alteracao.tipo || "alterado");
-      tipo.textContent = alteracao.tipo || "alterado";
+      tipo.className = "alteracao-tipo sem-precedente";
+      tipo.textContent = lacuna.tema || "lacuna";
       li.appendChild(tipo);
       var corpo = document.createElement("div");
       corpo.className = "item-body";
-      if (alteracao.o_que) {
-        var h = document.createElement("h4");
-        h.textContent = alteracao.o_que;
-        corpo.appendChild(h);
-      }
-      if (alteracao.detalhe) {
+      if (lacuna.detalhe) {
         var det = document.createElement("p");
         det.className = "alteracao-detalhe";
-        det.textContent = alteracao.detalhe;
+        det.textContent = lacuna.detalhe;
         corpo.appendChild(det);
       }
       li.appendChild(corpo);
-      lista.appendChild(li);
+      listaLacunas.appendChild(li);
     });
-    painel.appendChild(lista);
+    painel.appendChild(listaLacunas);
   }
 
   if (dados.url_original) {

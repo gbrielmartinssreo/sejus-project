@@ -1,9 +1,9 @@
-from sejus_project.agent.agent import executar
-
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.rule import Rule
-from rich.live import Live
+
+from sejus_project.agent.agent import executar
 
 console = Console()
 
