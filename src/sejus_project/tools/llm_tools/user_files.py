@@ -1,6 +1,4 @@
 """
-user_files.py
--------------
 Tool que lê um arquivo enviado pelo usuário (pasta `importacoes_usuario/`)
 e devolve o conteúdo extraído para o agente.
 
@@ -10,16 +8,14 @@ apontar o que está faltando na minuta. Este módulo não faz comparação
 nem chama nenhum LLM -- só lê e extrai texto.
 
 Formatos suportados: .txt, .md, .pdf, .docx
-
-Uso standalone:
-    python user_files.py minuta_contrato.pdf
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 # Pasta onde os arquivos enviados pelo usuário ficam. Caminho ABSOLUTO a partir
 # da raiz do projeto — o mesmo usado pelo endpoint /api/upload — para upload e

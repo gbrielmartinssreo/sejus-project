@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from sejus_project.tools import minuta
+from sejus_project.tools.document_infra import docx_builder
+from sejus_project.tools.llm_tools import document_improvement as minuta
+from sejus_project.tools.llm_tools.minuta_generation import (
+    STRUTURA_DEFINITION,
+    _padronizar,
+)
 
 
 def _perfil():
@@ -163,7 +168,7 @@ def test_melhoria_definition_admite_capitulo_no_corpo():
     itens = props["corpo"]["items"]
     assert itens["properties"]["tipo"]["enum"] == ["artigo", "capitulo"]
 
-    props_minuta = minuta.STRUTURA_DEFINITION["function"]["parameters"]["properties"]
+    props_minuta = STRUTURA_DEFINITION["function"]["parameters"]["properties"]
     assert "tipo" not in props_minuta["corpo"]["items"]["properties"]
 
 
@@ -195,7 +200,7 @@ def test_padronizar_mantem_itens_capitulo_em_ordem():
             {"tipo": "capitulo", "rotulo": "", "texto": "CAPÍTULO II"},
         ],
     }
-    resultado = minuta._padronizar(estrutura, "portaria")
+    resultado = _padronizar(estrutura, "portaria")
 
     tipos = [item["tipo"] for item in resultado["corpo"]]
     assert tipos == ["capitulo", "capitulo", "artigo", "capitulo"]
@@ -226,6 +231,6 @@ def test_render_inclui_titulos_de_capitulo():
 
 
 def test_chave_rotulo_normaliza_para_comparacao():
-    assert minuta._chave_rotulo("Art. 6º-A") == "art. 6º-a"
-    assert minuta._chave_rotulo(" art. 6°a ") == "art. 6°a"
-    assert minuta._chave_rotulo("Art. 6º-A.") == "art. 6º-a"
+    assert docx_builder._chave_rotulo("Art. 6º-A") == "art. 6º-a"
+    assert docx_builder._chave_rotulo(" art. 6°a ") == "art. 6°a"
+    assert docx_builder._chave_rotulo("Art. 6º-A.") == "art. 6º-a"

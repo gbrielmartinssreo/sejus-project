@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from sejus_project.tools import minuta
+from sejus_project.tools.llm_tools import minuta_generation as minuta
 
 
 class _FakeFunction:

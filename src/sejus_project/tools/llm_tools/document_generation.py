@@ -7,10 +7,11 @@ import json
 import re
 from pathlib import Path
 
-from sejus_project.tools import minuta, modelos
-from sejus_project.tools.docx_templates import OUTPUTS_DIR
-from sejus_project.tools.retrieval import retrieve
-from sejus_project.tools.user_files import (
+from sejus_project.tools.document_infra import docx_builder, modelos
+from sejus_project.tools.document_infra.docx_templates import OUTPUTS_DIR
+from sejus_project.tools.llm_tools import document_improvement, minuta_generation
+from sejus_project.tools.llm_tools.retrieval import retrieve
+from sejus_project.tools.llm_tools.user_files import (
     UserFileError,
     _list_available_files,
     _resolve_file,
@@ -372,7 +373,7 @@ def _gerar_e_relatar(request, perfil, contexto, values):
     global _ultima_minuta, _gerada_no_turno
     tipo = perfil.act_types[0]
     modelo_referencia = (_modelo_usuario or {}).get("texto")
-    estrutura = minuta.gerar_estrutura_minuta(
+    estrutura = minuta_generation.gerar_estrutura_minuta(
         request,
         tipo,
         perfil,
@@ -380,7 +381,7 @@ def _gerar_e_relatar(request, perfil, contexto, values):
         values,
         modelo_referencia=modelo_referencia,
     )
-    output_path = minuta.montar_docx(perfil, estrutura, OUTPUTS_DIR)
+    output_path = docx_builder.montar_docx(perfil, estrutura, OUTPUTS_DIR)
     _ultima_minuta = {
         "estructura": estrutura,
         "modelo": perfil.name,
@@ -797,7 +798,7 @@ def _melhorar_e_relatar(
 ) -> str:
     global _ultima_minuta, _melhoria_no_turno, _ultima_comparacao, _gerada_no_turno
     valores = {"diretrizes": diretrizes} if diretrizes else None
-    estrutura, alteracoes, adicoes, lacunas = minuta.gerar_estrutura_melhoria(
+    estrutura, alteracoes, adicoes, lacunas = document_improvement.gerar_estrutura_melhoria(
         conteudo,
         tipo_ato,
         perfil,
@@ -805,11 +806,11 @@ def _melhorar_e_relatar(
         valores,
     )
     insercoes = {
-        minuta._chave_rotulo(a.get("o_que") or "")
+        docx_builder._chave_rotulo(a.get("o_que") or "")
         for a in adicoes
         if a.get("o_que")
     }
-    output_path = minuta.montar_docx(
+    output_path = docx_builder.montar_docx(
         perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
     )
     depois = minuta_para_texto(estrutura)

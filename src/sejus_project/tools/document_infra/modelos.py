@@ -12,7 +12,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from sejus_project.tools.docx_templates import PROJECT_ROOT, TEMPLATES_DIR
+from sejus_project.tools.document_infra.docx_templates import (
+    PROJECT_ROOT,
+    TEMPLATES_DIR,
+)
 
 TEMPLATES_PLUS_DIR = PROJECT_ROOT / "docs" / "templates-plus"
 

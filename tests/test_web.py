@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sejus_project.agent import agent
-from sejus_project.tools import document_generation as generation
+from sejus_project.tools.llm_tools import document_generation as generation
 from sejus_project.web.render_html import minuta_para_html, minuta_para_texto
 from sejus_project.web.server import app
 
@@ -221,7 +221,7 @@ def test_executar_cancela_pendencia_sem_reprompt(monkeypatch):
 
 def test_baixar_arquivo_usuario(monkeypatch, tmp_path):
     """O original enviado pode ser baixado; path traversal é bloqueado."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
     from sejus_project.web import server
 
     monkeypatch.setattr(server, "IMPORTACOES_DIR", tmp_path)
@@ -411,7 +411,7 @@ def test_upload_rejeita_formato_invalido(monkeypatch, tmp_path):
 def test_upload_e_analise_usam_a_mesma_pasta(monkeypatch, tmp_path):
     """Upload (/api/upload) e análise (tool do agente) devem enxergar a
     mesma pasta de importacoes_usuario, mesmo mudando o diretório de CWD."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
     from sejus_project.web import server
 
     assert server.IMPORTACOES_DIR == user_files.IMPORTACOES_DIR
@@ -604,7 +604,7 @@ def test_enviar_modelo_define_estado(monkeypatch, tmp_path):
     from sejus_project.web import server
 
     monkeypatch.setattr(server, "IMPORTACOES_DIR", tmp_path)
-    import sejus_project.tools.document_generation as generation_mod
+    import sejus_project.tools.llm_tools.document_generation as generation_mod
 
     generation_mod._modelo_usuario = None
     client = TestClient(app)

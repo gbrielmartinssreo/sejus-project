@@ -280,6 +280,15 @@ wheels = [
 ]
 
 [[package]]
+name = "custom-tree"
+version = "1.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/d3/c294ae8540462d8dad6707b2a02f53e6035d8e98bc669f36fccac771b97f/custom-tree-1.7.tar.gz", hash = "sha256:48b82c0a155e18469198d7dff070d006da737cb7bb21ab30cba77e1bf756950d", size = 4653, upload-time = "2024-05-17T20:15:16.407Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/67/26b28a6b79b0303d14fe49f5f854ec8dc4a25724ae1af2a83c0fa7851e67/custom_tree-1.7-py3-none-any.whl", hash = "sha256:d52d47d6defd666dbc9491fb73a067b5d0a93400bff96114cab98272a6be2f69", size = 5181, upload-time = "2024-05-17T20:14:30.04Z" },
+]
+
+[[package]]
 name = "defusedxml"
 version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1290,6 +1299,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "custom-tree" },
     { name = "httpx" },
     { name = "pytest" },
 ]
@@ -1313,6 +1323,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "custom-tree", specifier = ">=1.7" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.1.1" },
 ]

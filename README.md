@@ -121,7 +121,7 @@ importacoes_usuario/        Arquivos enviados pelo usuario (upload do chat)
 qdrant_data/                 Indice local persistido
 src/sejus_project/agent/     Loop do agente e function calling
 src/sejus_project/rag/       Ingestao, chunking, embeddings e Qdrant
-src/sejus_project/tools/     Tools de consulta, arquivos e documentos
+src/sejus_project/tools/     Tools da LLM (llm_tools/) e infra DOCX (document_infra/)
 src/sejus_project/web/       Servidor FastAPI, render de minuta e frontend
 outputs/                     DOCX gerados
 ```

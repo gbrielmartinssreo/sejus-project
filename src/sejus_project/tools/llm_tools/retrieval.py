@@ -1,14 +1,10 @@
 """
-retrieval.py
-------------
 Responsabilidade: RECUPERAR os chunks relevantes para o agente.
 
 O agente usa um modelo compatível com OpenAI para decidir quando chamar a tool e para sintetizar a
 resposta. Este módulo não chama nenhum LLM.
-
-Uso standalone:
-    python retrieval.py "qual o prazo do grupo de trabalho?"
 """
+
 from __future__ import annotations
 
 import atexit

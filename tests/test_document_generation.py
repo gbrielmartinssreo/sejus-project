@@ -6,9 +6,9 @@ import pytest
 from docx import Document
 from docx.shared import Pt
 
-from sejus_project.tools import document_generation as generation
-from sejus_project.tools import docx_templates, modelos
-from sejus_project.tools.modelos import PerfilModelo
+from sejus_project.tools.document_infra import docx_templates, modelos
+from sejus_project.tools.document_infra.modelos import PerfilModelo
+from sejus_project.tools.llm_tools import document_generation as generation
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -84,8 +84,8 @@ def fake_minuta(monkeypatch, tmp_path):
         document.save(str(output_path))
         return output_path
 
-    monkeypatch.setattr(generation.minuta, "gerar_estrutura_minuta", gerar_estrutura_minuta)
-    monkeypatch.setattr(generation.minuta, "montar_docx", montar_docx)
+    monkeypatch.setattr(generation.minuta_generation, "gerar_estrutura_minuta", gerar_estrutura_minuta)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", montar_docx)
     return tmp_path
 
 
@@ -125,7 +125,7 @@ def fake_melhoria(monkeypatch, tmp_path, fake_minuta):
         )
 
     monkeypatch.setattr(
-        generation.minuta, "gerar_estrutura_melhoria", gerar_estrutura_melhoria
+        generation.document_improvement, "gerar_estrutura_melhoria", gerar_estrutura_melhoria
     )
     return capturados
 
@@ -224,7 +224,7 @@ def test_short_confirmation_generates_pending_document(fake_retrieval, fake_minu
 def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Melhorar um .docx usa o próprio arquivo como modelo de formatação e
     guarda os dados da comparação antes/depois."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_minuta = None
     generation._ultima_comparacao = None
@@ -262,7 +262,7 @@ def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_me
 
 def test_melhoria_txt_usa_template_padrao(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Arquivos sem formatação (txt/pdf/md) caem no template oficial do tipo."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
     (tmp_path / "ato_decreto.txt").write_text(
@@ -288,7 +288,7 @@ def test_melhoria_arquivo_inexistente_retorna_erro(fake_retrieval, fake_melhoria
 def test_melhoria_sem_nome_usa_importacao_mais_recente(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Sem informar o arquivo, a tool usa a importação mais recente e devolve
     as alternativas na lista 'outros'."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -311,7 +311,7 @@ def test_melhoria_sem_nome_usa_importacao_mais_recente(fake_retrieval, fake_melh
 
 
 def test_melhoria_sem_arquivos_retorna_erro(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
     result = json.loads(generation.melhorar_documento_usuario())
@@ -323,7 +323,7 @@ def test_melhoria_sem_arquivos_retorna_erro(fake_retrieval, fake_melhoria, monke
 def test_melhoria_guarda_textos_reais_para_acompanhamento(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """A melhoria guarda os textos reais antes/depois (não só resumos) para o
     agente responder 'o que mudou' e montar tabelas com fidelidade depois."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -349,7 +349,7 @@ def test_melhoria_repetida_nao_regenera_arquivo(fake_retrieval, fake_melhoria, m
     """Repetir o pedido de melhoria do mesmo arquivo (sem diretrizes novas)
     reaproveita a comparação e não cria outro arquivo — evita duplicar o
     retrabalho em perguntas de acompanhamento."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     generation._melhoria_no_turno = False
@@ -360,13 +360,13 @@ def test_melhoria_repetida_nao_regenera_arquivo(fake_retrieval, fake_melhoria, m
     )
 
     chamadas = {"montar_docx": 0}
-    original = generation.minuta.montar_docx
+    original = generation.docx_builder.montar_docx
 
     def contar_montar_docx(perfil, estrutura, output_dir, insercoes_rastreadas=None):
         chamadas["montar_docx"] += 1
         return original(perfil, estrutura, output_dir, insercoes_rastreadas=insercoes_rastreadas)
 
-    monkeypatch.setattr(generation.minuta, "montar_docx", contar_montar_docx)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", contar_montar_docx)
 
     first = json.loads(generation.melhorar_documento_usuario("ato_repetido.txt"))
     second = json.loads(generation.melhorar_documento_usuario("ato_repetido.txt"))
@@ -384,7 +384,7 @@ def test_melhoria_repetida_nao_regenera_arquivo(fake_retrieval, fake_melhoria, m
 def test_melhoria_com_diretrizes_novas_regenera(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Diretrizes novas para o mesmo arquivo não caem no guarda
     'already_improved' — o retrabalho acontece de verdade."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -394,13 +394,13 @@ def test_melhoria_com_diretrizes_novas_regenera(fake_retrieval, fake_melhoria, m
     )
 
     chamadas = {"montar_docx": 0}
-    original = generation.minuta.montar_docx
+    original = generation.docx_builder.montar_docx
 
     def contar_montar_docx(perfil, estrutura, output_dir, insercoes_rastreadas=None):
         chamadas["montar_docx"] += 1
         return original(perfil, estrutura, output_dir, insercoes_rastreadas=insercoes_rastreadas)
 
-    monkeypatch.setattr(generation.minuta, "montar_docx", contar_montar_docx)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", contar_montar_docx)
 
     first = json.loads(generation.melhorar_documento_usuario("ato_diretriz.txt"))
     second = json.loads(
@@ -416,7 +416,7 @@ def test_melhoria_com_diretrizes_novas_regenera(fake_retrieval, fake_melhoria, m
 
 def test_obter_textos_comparacao_devolve_dados_da_ultima_melhoria(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """A tool de acompanhamento devolve textos reais sem gerar arquivo novo."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -485,7 +485,7 @@ def test_modelo_auto_selecionado_por_tipo(
 
 
 # ---------------------------------------------------------------------------
-# Montagem real (minuta.montar_docx + docx_engine)
+# Montagem real (docx_builder.montar_docx + docx_engine)
 # ---------------------------------------------------------------------------
 
 
@@ -527,9 +527,9 @@ def modelo_portaria_tmp(tmp_path):
 
 def test_montagem_preserva_formatacao_e_monta_estrutura(modelo_portaria_tmp, tmp_path):
     perfil, _ = modelo_portaria_tmp
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
 
     assert output_path.is_file()
     document = Document(str(output_path))
@@ -556,7 +556,7 @@ def test_montagem_preserva_formatacao_e_monta_estrutura(modelo_portaria_tmp, tmp
 
 def test_montagem_preserva_titulos_de_capitulo(tmp_path):
     """Títulos de capítulo entram no DOCX clonando a formatação do original."""
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     document = Document()
     document.add_paragraph("CAPÍTULO I")
@@ -594,7 +594,7 @@ def test_montagem_preserva_titulos_de_capitulo(tmp_path):
         "assinaturas": [],
     }
 
-    output_path = minuta.montar_docx(perfil, estrutura, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, estrutura, tmp_path)
     texts = [p.text for p in Document(str(output_path)).paragraphs]
 
     assert "CAPÍTULO I" in texts
@@ -603,13 +603,13 @@ def test_montagem_preserva_titulos_de_capitulo(tmp_path):
 
 
 def test_montagem_adiciona_vigencia_quando_faltam(fake_retrieval, modelo_portaria_tmp, tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     perfil, _ = modelo_portaria_tmp
     estrutura = ESTRUTURA.copy()
     estrutura["fechamento"] = []
 
-    output_path = minuta.montar_docx(perfil, estrutura, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, estrutura, tmp_path)
     document = Document(str(output_path))
     texts = [p.text for p in document.paragraphs]
 
@@ -617,10 +617,10 @@ def test_montagem_adiciona_vigencia_quando_faltam(fake_retrieval, modelo_portari
 
 
 def test_montagem_remove_lixo_de_diario(modelo_portaria_tmp, tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     perfil, _ = modelo_portaria_tmp
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
     document = Document(str(output_path))
     text = "\n".join(p.text for p in document.paragraphs)
 
@@ -638,7 +638,7 @@ def test_docx_placeholder_can_cross_runs(tmp_path):
     document.save(source)
 
     loaded = Document(source)
-    from sejus_project.tools.docx_templates import _replace_in_paragraph
+    from sejus_project.tools.document_infra.docx_templates import _replace_in_paragraph
 
     assert _replace_in_paragraph(loaded.paragraphs[0], {"[EMENTA]": "Limpeza"}) == 1
     assert loaded.paragraphs[0].text == "Ementa: Limpeza"
@@ -734,7 +734,7 @@ def test_detectar_tipo_ato_por_titulo(titulo, esperado):
 
 
 def test_modelo_usuario_detecta_tipo_pelo_titulo_ignorando_corpo(tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     document = Document()
     titulo = document.add_paragraph()
@@ -752,7 +752,7 @@ def test_modelo_usuario_detecta_tipo_pelo_titulo_ignorando_corpo(tmp_path):
     perfil = modelos.crear_perfil_de_arquivo(caminho, texto, "Com_Decreto_No_Corpo")
 
     assert perfil.act_types == modelos.PORTARIA.act_types
-    refs = minuta._referencias(Document(str(caminho)), perfil)
+    refs = docx_builder._referencias(Document(str(caminho)), perfil)
     assert refs["titulo"] is not None
     assert refs["preambulo"] is not None
     assert refs["artigo"] is not None
@@ -761,7 +761,7 @@ def test_modelo_usuario_detecta_tipo_pelo_titulo_ignorando_corpo(tmp_path):
 def test_modelo_usuario_preserva_moldura_do_diario(tmp_path):
     """Capturas do Diário Oficial têm cabeçalho e rodapé no corpo; a montagem
     com modelo do usuário deve preservar essa moldura e reconstruir o miolo."""
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     document = Document()
     document.add_paragraph("18 de junho de 2025")
@@ -785,7 +785,7 @@ def test_modelo_usuario_preserva_moldura_do_diario(tmp_path):
     texto = generation.extract_file_text(caminho)
     perfil = modelos.crear_perfil_de_arquivo(caminho, texto, "Modelo_Diario")
 
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
 
     texts = [p.text for p in Document(str(output_path)).paragraphs]
     assert texts[0] == "18 de junho de 2025"
@@ -850,8 +850,8 @@ def test_modelo_referencia_repassado_ao_llm(fake_retrieval, monkeypatch, tmp_pat
         document.save(str(caminho))
         return caminho
 
-    monkeypatch.setattr(generation.minuta, "gerar_estrutura_minuta", gerar_estrutura_minuta)
-    monkeypatch.setattr(generation.minuta, "montar_docx", montar_docx)
+    monkeypatch.setattr(generation.minuta_generation, "gerar_estrutura_minuta", gerar_estrutura_minuta)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", montar_docx)
 
     json.loads(
         generation.gerar_documento_normativo(
@@ -866,14 +866,14 @@ def test_modelo_referencia_repassado_ao_llm(fake_retrieval, monkeypatch, tmp_pat
 
 
 def test_montagem_com_docx_de_usuario_preserva_formatacao(tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     generation._modelo_usuario = None
     model_path = _salvar_docx_portaria(tmp_path)
     texto = generation.extract_file_text(model_path)
     perfil = modelos.crear_perfil_de_arquivo(model_path, texto, "Portaria_Usuario")
 
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
 
     assert output_path.is_file()
     document = Document(str(output_path))
@@ -956,7 +956,7 @@ def _chunk(score, texto, fonte="fonte.docx", numero="00/2026", tipo="IN"):
 
 def test_precedente_exige_score_e_palavra_chave(monkeypatch):
     """Sem a palavra-chave do tema no trecho, score alto nao gera precedente."""
-    from sejus_project.tools import document_generation as gen
+    from sejus_project.tools.llm_tools import document_generation as gen
 
     def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
         return [
@@ -974,7 +974,7 @@ def test_precedente_exige_score_e_palavra_chave(monkeypatch):
 
 
 def test_precedente_sem_score_minimo_nao_passa(monkeypatch):
-    from sejus_project.tools import document_generation as gen
+    from sejus_project.tools.llm_tools import document_generation as gen
 
     def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
         return [
@@ -990,7 +990,7 @@ def test_precedente_sem_score_minimo_nao_passa(monkeypatch):
 
 
 def test_tema_por_nome_aceita_variacoes():
-    from sejus_project.tools import document_generation as gen
+    from sejus_project.tools.llm_tools import document_generation as gen
 
     assert gen._tema_por_nome("recurso administrativo") == "recurso_administrativo"
     assert gen._tema_por_nome("recurso_administrativo") == "recurso_administrativo"
@@ -1000,7 +1000,7 @@ def test_tema_por_nome_aceita_variacoes():
 
 
 def test_filtra_lacunas_sem_precedente():
-    from sejus_project.tools import document_generation as gen
+    from sejus_project.tools.llm_tools import document_generation as gen
 
     precedente = {
         "prazo_validade": {"tem_precedente": True},
@@ -1019,7 +1019,7 @@ def test_filtra_lacunas_sem_precedente():
 
 
 def test_contexto_melhoria_dedupa_fontes_e_etiqueta_tema(monkeypatch):
-    from sejus_project.tools import document_generation as gen
+    from sejus_project.tools.llm_tools import document_generation as gen
 
     def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
         return [
@@ -1069,8 +1069,8 @@ def test_montagem_adicao_sai_como_revisao_de_insercao(modelo_portaria_tmp, tmp_p
     from docx.oxml.ns import qn as _qn
     from lxml import etree
 
-    from sejus_project.tools import minuta
-    from sejus_project.tools.docx_engine import paragraph_text
+    from sejus_project.tools.document_infra import docx_builder
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
 
     perfil, _ = modelo_portaria_tmp
     estrutura = dict(ESTRUTURA.copy())
@@ -1080,7 +1080,7 @@ def test_montagem_adicao_sai_como_revisao_de_insercao(modelo_portaria_tmp, tmp_p
         {"rotulo": "Art. 2º", "texto": "Criar comissão."},
     ]
 
-    output_path = minuta.montar_docx(
+    output_path = docx_builder.montar_docx(
         perfil,
         estrutura,
         tmp_path,
@@ -1102,4 +1102,4 @@ def test_montagem_adicao_sai_como_revisao_de_insercao(modelo_portaria_tmp, tmp_p
     assert 'w:author="editor"' in xml_inserido
     assert p_inserido._element.find(_qn("w:ins")) is not None
     assert p_comum._element.find(_qn("w:ins")) is None
-    assert minuta._AUTOR_REVISAO == "editor"
+    assert docx_builder._AUTOR_REVISAO == "editor"

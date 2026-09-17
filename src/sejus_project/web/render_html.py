@@ -1,6 +1,6 @@
 """Renderiza a estrutura JSON de uma minuta em HTML (e texto puro).
 
-O LLM devolve a minuta estruturada (ver sejus_project.tools.minuta) e este
+O LLM devolve a minuta estruturada (ver sejus_project.tools.llm_tools.minuta_generation) e este
 modulo transforma essa estrutura em um documento formatado no estilo oficial
 da SEJUS/MT: cabecalho institucional do Diario Oficial, faixa azul da pasta,
 moldura de pagina e rodape de imprensa. Toda string vinda do LLM e escapada
