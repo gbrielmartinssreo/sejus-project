@@ -7,15 +7,22 @@ from sejus_project.agent.skills.loader import (
 )
 from sejus_project.llm.ia import perguntar
 from sejus_project.tools.llm_tools.document_generation import (
-    cancelar_pendencia,
+    aceitar_proposta,
+    rejeitar_proposta,
+    listar_propostas,
+    aplicar_alteracoes_selecionadas,
     comparacao_definition,
     gerar_documento_normativo,
-    has_pending_document,
-    limpar_estado,
     melhorar_documento_usuario,
-    melhoria_definition,
     obter_textos_comparacao,
+    has_pending_document,
+    cancelar_pendencia,
+    limpar_estado,
+    ESTADO_PENDENTE,
+    ESTADO_ACEITA,
+    ESTADO_REJEITADA,
 )
+from sejus_project.tools.llm_tools.document_improvement import MELHORIA_DEFINITION as melhoria_definition
 from sejus_project.tools.llm_tools.document_generation import (
     definition as document_generation_definition,
 )
@@ -47,6 +54,10 @@ FUNCTIONS = {
     "gerar_documento_normativo": gerar_documento_normativo,
     "melhorar_documento_usuario": melhorar_documento_usuario,
     "obter_textos_comparacao": obter_textos_comparacao,
+    "aceitar_proposta": aceitar_proposta,
+    "rejeitar_proposta": rejeitar_proposta,
+    "listar_propostas": listar_propostas,
+    "aplicar_alteracoes_selecionadas": aplicar_alteracoes_selecionadas,
 }
 
 

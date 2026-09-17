@@ -25,7 +25,14 @@ def all_paragraphs(document: Document) -> list:
 
 def paragraph_text(w_p) -> str:
     """Texto completo de um elemento ``w:p``."""
-    return "".join((t.text or "") for t in w_p.iter(qn("w:t")))
+    # Normaliza: se for CT_P com _element, usa o _element subjacente
+    if hasattr(w_p, "_element") and w_p._element is not None:
+        w_p = w_p._element
+    # Tenta extrair texto do elemento XML; se w_p ja for um elemento com metodo iter, usa-o
+    if hasattr(w_p, "iter"):
+        return "".join((t.text or "") for t in w_p.iter(qn("w:t")))
+    # Fallback: retorna string vazia ou o que conseguir converter
+    return str(w_p) if w_p else ""
 
 
 def find_reference(w_paragraphs: list, pattern: str):

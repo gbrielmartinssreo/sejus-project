@@ -247,6 +247,16 @@ def _padronizar(estrutura: dict, tipo_ato: str) -> dict:
         if not isinstance(item, dict) or not _limpar(item.get("texto") or ""):
             continue
         tipo = _limpar(item.get("tipo") or "artigo").casefold()
+        if tipo in ("inciso", "paragrafo") and corpo and corpo[-1].get("tipo") == "artigo":
+            # Anexa inciso/parágrafo solto ao artigo anterior
+            corpo[-1].setdefault("subitens", []).append(
+                {
+                    "tipo": tipo,
+                    "rotulo": _limpar(item.get("rotulo") or ""),
+                    "texto": _limpar(item["texto"]),
+                }
+            )
+            continue
         novo = {
             "tipo": tipo if tipo in ("artigo", "capitulo") else "artigo",
             "rotulo": _limpar(item.get("rotulo") or ""),
@@ -276,16 +286,22 @@ def _padronizar(estrutura: dict, tipo_ato: str) -> dict:
                 {"rotulo": _limpar(item.get("rotulo") or ""), "texto": _limpar(item["texto"])}
             )
 
+    corpo_textos = {_limpar(item.get("texto") or "") for item in (estrutura.get("corpo") or []) if isinstance(item, dict) and _limpar(item.get("texto") or "")}
+    estrutura["fechamento"] = [f for f in fechamento if _limpar(f.get("texto") or "") not in corpo_textos]
+
     # Regra suave: o ato precisa de artigo de vigencia (garantia tambem em
     # montar_docx; aqui apenas normalizamos o que veio do LLM).
-    estrutura["fechamento"] = fechamento
 
     assinaturas = []
+    seen = set()
     for item in estrutura.get("assinaturas") or []:
-        if isinstance(item, dict) and _limpar(item.get("nome") or ""):
-            assinaturas.append(
-                {"nome": _limpar(item["nome"]), "cargo": _limpar(item.get("cargo") or "")}
-            )
+        if isinstance(item, dict):
+            nome = _limpar(item.get("nome") or "")
+            cargo = _limpar(item.get("cargo") or "")
+            key = (nome, cargo)
+            if key not in seen:
+                seen.add(key)
+                assinaturas.append({"nome": nome, "cargo": cargo})
     estrutura["assinaturas"] = assinaturas
 
     return estrutura

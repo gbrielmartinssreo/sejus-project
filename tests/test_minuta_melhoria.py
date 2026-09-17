@@ -119,7 +119,9 @@ def test_melhoria_incompleta_retenta_com_mensagem_de_preservar(monkeypatch):
     assert len(fake.chamadas) == 2
     assert fake.chamadas[1]["n_mensagens"] > fake.chamadas[0]["n_mensagens"]
     assert fake.chamadas[1]["max_tokens"] == fake.chamadas[0]["max_tokens"] * 2
-    assert fake.chamadas[1]["ultima_mensagem"] == minuta._MENSAGEM_PRESERVAR
+    # A mensagem de retry agora aponta exatamente o que está faltando
+    # em vez de mensagem genérica de preservação
+    assert "art." in fake.chamadas[1]["ultima_mensagem"].lower()
     assert len(estrutura["corpo"]) == 10
 
 

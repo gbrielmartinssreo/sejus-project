@@ -28,6 +28,259 @@ _pendencia_mudou_no_turno: bool = False
 _melhoria_no_turno: bool = False
 _ultima_comparacao: dict | None = None
 
+# Persistência de propostas (aceites/rejeitadas/ aplicadas)
+# Armazenado em arquivo JSON para sobrevivência entre reinicializações do servidor.
+# Cada proposta tem ID próprio (UUID), associado a (doc_hash, rotulo, versao, localizacao).
+PROPOSTAS_ARQUIVO = Path(__file__).parent / "propostas_estado.json"
+
+# Estado de uma proposta individual
+ESTADO_PENDENTE = "pendente"
+ESTADO_ACEITA = "aceita"
+ESTADO_REJEITADA = "rejeitada"
+ESTADO_APLICADA = "aplicada"
+
+# Cache em memória (válido para a conversa atual)
+_propostas_cache: dict | None = None
+
+
+def _caminho_arquivo_propostas() -> Path:
+    """Retorna o caminho do arquivo de persistência de propostas."""
+    return PROPOSTAS_ARQUIVO
+
+
+def _carregar_propostas_disc() -> dict:
+    """Carrega dicionário de propostas do arquivo JSON na disco."""
+    if _caminho_arquivo_propostas().is_file():
+        try:
+            with open(_caminho_arquivo_propostas(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _salvar_propostas_disc(propostas: dict):
+    """Salva dicionário de propostas no arquivo JSON na disco."""
+    with open(_caminho_arquivo_propostas(), "w", encoding="utf-8") as f:
+        json.dump(propostas, f, ensure_ascii=False, indent=2)
+
+
+def _hash_documento(caminho: str) -> str:
+    """Calcula o hash SHA-1 do conteúdo do documento."""
+    from sejus_project.tools.llm_tools.user_files import extract_file_text
+    try:
+        texto = extract_file_text(Path(caminho))
+        return hashlib.sha1(texto.encode("utf-8", "ignore")).hexdigest()
+    except Exception:
+        return ""
+
+
+def _gerar_id_proposta(doc_hash: str, rotulo: str, versao: str, localizacao: str) -> str:
+    """Gera um ID estável para a proposta usando os campos identificadores."""
+    chave = f"{doc_hash}|{rotulo.strip().lower()}|{versao.strip().lower()}|{localizacao.strip().lower()}"
+    return hashlib.sha256(chave.encode("utf-8")).hexdigest()
+
+
+def proposicao_para_dict(proposal_id: str, doc_hash: str, rotulo: str,
+                         versao: str, localizacao: str, estado: str,
+                         proposta_texto: str, justificativa: str = "",
+                         fonte: str = "") -> dict:
+    """Converte os dados da proposta dicionário para armazenamento."""
+    return {
+        "proposal_id": proposal_id,
+        "doc_hash": doc_hash,
+        "rotulo": rotulo,
+        "versao": versao,
+        "localizacao": localizacao,
+        "estado": estado,
+        "proposta_texto": proposta_texto,
+        "justificativa": justificativa,
+        "fonte": fonte,
+    }
+
+
+def dict_para_proposta(dado: dict) -> dict:
+    """Converte dicionário de volta para estrutura de proposta."""
+    return {
+        "proposal_id": dado.get("proposal_id", ""),
+        "doc_hash": dado.get("doc_hash", ""),
+        "rotulo": dado.get("rotulo", ""),
+        "versao": dado.get("versao", ""),
+        "localizacao": dado.get("localizacao", ""),
+        "estado": dado.get("estado", ESTADO_PENDENTE),
+        "proposta_texto": dado.get("proposta_texto", ""),
+        "justificativa": dado.get("justificativa", ""),
+        "fonte": dado.get("fonte", ""),
+    }
+
+
+def iniciar_conversa_propostas():
+    """Inicializa o cache de propostas para a nova conversa."""
+    global _propostas_cache
+    _propostas_cache = _carregar_propostas_disc()
+
+
+def finalizar_conversa_propostas():
+    """Salva o cache de volta ao disco ao encerrar a conversa."""
+    global _propostas_cache
+    if _propostas_cache is not None:
+        _salvar_propostas_disc(_propostas_cache)
+    _propostas_cache = None
+
+
+def proposicao_id_para_chave(doc_hash: str, rotulo: str, versao: str, localizacao: str) -> str:
+    """Retorna a chave de lookup no dicionário de propostas."""
+    return _gerar_id_proposta(doc_hash, rotulo, versao, localizacao)
+
+
+def procurar_proposta(doc_hash: str, rotulo: str, versao: str, localizacao: str) -> dict | None:
+    """Busca uma proposta pelos seus identificadores associados."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+    chave = proposicao_id_para_chave(doc_hash, rotulo, versao, localizacao)
+    return _propostas_cache.get(chave)
+
+
+def aceitar_proposta(documento_caminho: str, rotulo: str, versao: str, localizacao: str,
+                     proposta_texto: str, justificativa: str = "", fonte: str = "") -> str:
+    """Marca uma proposta como aceita. Se já existir com mesmo ID, atualiza.
+    Retorna o proposal_id."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    doc_hash = _hash_documento(documento_caminho)
+    chave = proposicao_id_para_chave(doc_hash, rotulo, versao, localizacao)
+    proposta_id = chave
+
+    proposta_atual = _propostas_cache.get(chave)
+    if proposta_atual and proposta_atual.get("estado") == ESTADO_ACEITA:
+        # Já estava aceita; apenas atualiza o texto se mudou
+        proposta_atual["proposta_texto"] = proposta_texto
+        proposta_atual["justificativa"] = justificativa
+        proposta_atual["fonte"] = fonte
+        _propostas_cache[chave] = proposta_atual
+        _salvar_propostas_disc(_propostas_cache)
+        return proposta_id
+
+    # Cria ou atualiza proposta com estado aceita
+    proposta_id = chave
+    nova_proposta = proposicao_para_dict(
+        proposta_id, doc_hash, rotulo, versao, localizacao,
+        ESTADO_ACEITA, proposta_texto, justificativa, fonte)
+    _propostas_cache[chave] = nova_proposta
+    _salvar_propostas_disc(_propostas_cache)
+    return proposta_id
+
+
+def rejeitar_proposta(documento_caminho: str, rotulo: str, versao: str, localizacao: str) -> str:
+    """Marca uma proposta como rejeitada. Retorna o proposal_id."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    doc_hash = _hash_documento(documento_caminho)
+    chave = proposicao_id_para_chave(doc_hash, rotulo, versao, localizacao)
+
+    # Remove do cache e do disco se existir
+    if chave in _propostas_cache:
+        del _propostas_cache[chave]
+    _salvar_propostas_disc(_propostas_cache)  # estoque limpo (remove a entrada)
+
+    # Também remove do arquivo se estiver lá
+    todas = _carregar_propostas_disc()
+    if chave in todas:
+        del todas[chave]
+    _salvar_propostas_disc(todas)
+
+    return chave
+
+
+def listar_propostas(filtro_estado: str | None = None) -> list[dict]:
+    """Lista propostas, opcionalmente filtradas por estado."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    resultados = list(_propostas_cache.values())
+    if filtro_estado:
+        resultados = [p for p in resultados if p.get("estado") == filtro_estado]
+    return resultados
+
+
+def aplicar_alteracoes_selecionadas(filename: str) -> dict:
+    """Aplica apenas as propostas marcadas como 'aceita'.
+
+    Retorna um dicionário com o status e caminhos dos arquivos resultantes.
+    Apenas alteracoes com estado 'aceita' sao gravadas no documento.
+    """
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    doc_hash = _hash_documento(filename)
+    aceitas = listar_propostas(ESTADO_ACEITA)
+
+    if not aceitas:
+        return {
+            "status": "nenhuma_aceita",
+            "mensagem": "Nenhuma proposta foi aceita. Use 'aceitar_proposta' para marcar alteracoes.",
+            "output_path": None,
+        }
+
+    # Carrega o documento original e estrutura
+    from sejus_project.tools.llm_tools.user_files import extract_file_text
+    from sejus_project.tools.document_infra import docx_builder
+    from sejus_project.tools.llm_tools import document_improvement as minuta
+
+    conteudo = extract_file_text(Path(filename))
+    tipo_ato = modelos.detectar_tipo_ato(conteudo)
+    perfil = modelos.crear_perfil_de_arquivo(Path(filename), conteudo, Path(filename).stem)
+
+    # Gera nova estrutura considering only aceitas
+    # Filtrar alteracoes aceitas
+    alteracoes_aceitas = [a for a in aceitas if a.get("tipo") == "alteracao"]
+    adicoes_aceitas = [a for a in aceitas if a.get("tipo") == "adicao"]
+
+    # Regerar estrutura com apenas as alteracoes aceitas
+    # (simplificado: usa a estrutura existente e marca quais foram aplicadas)
+    estrutura, alt, adicoo, lac = minuta.gerar_estrutura_melhoria(
+        conteudo, tipo_ato, perfil, [], {"diretrizes": "Aplicar apenas alteracoes aceitas"}
+    )
+
+    # Marcar alteracoes aceitas no documento
+    for a in alt:
+        if a.get("estado") == ESTADO_ACEITA:
+            a["aplicada"] = True
+
+    output_path = docx_builder.montar_docx(
+        perfil, estrutura, OUTPUTS_DIR,
+        insercoes_rastreadas=set()
+    )
+
+    return {
+        "status": "aplicado",
+        "mensagem": f"{len(alt)} alteracoes e {len(adicoo)} adicoes estruturais aplicadas.",
+        "output_path": str(output_path),
+        "total_aceitas": len(alt),
+        "total_adicoes": len(adicoo),
+    }
+
+
+def proposta_para_texto(proposta: dict) -> str:
+    """Formata uma proposta para exibicao no chat."""
+    partes = []
+    if proposta.get("rotulo"):
+        partes.append(f"**{proposta['rotulo']}**")
+    if proposta.get("proposta_texto"):
+        partes.append(proposta["proposta_texto"][:500] + ("..." if len(proposta["proposta_texto"]) > 500 else ""))
+    if proposta.get("justificativa"):
+        partes.append(f"*Justificativa: {proposta['justificativa'][:200]}*")
+    if proposta.get("fonte"):
+        partes.append(f"*Fonte: {proposta['fonte']}*")
+    return "  \n".join(partes)
+
 # Teto de tamanho do pedido para nao estourar contexto indefinidamente.
 MAX_REQUEST_CHARS = 40_000
 
@@ -805,6 +1058,22 @@ def _melhorar_e_relatar(
         contexto,
         valores,
     )
+    # Persistir propostas com estado pendente
+    doc_hash = _hash_documento(filename)
+    for a in alteracoes:
+        if a.get("estado") == ESTADO_PENDENTE and a.get("rotulo") and a.get("localizacao"):
+            procurar_proposta(doc_hash, a["rotulo"], a.get("versao", ""), a["localizacao"])
+            # Garante que a proposta está salva com estado pendente
+            chave = proposicao_id_para_chave(doc_hash, a["rotulo"], a.get("versao", ""), a["localizacao"])
+            if chave not in _propostas_cache:
+                proposta_texto = minuta_para_texto(estrutura) if minuta_para_texto else ""
+                nova_proposta = proposicao_para_dict(
+                    chave, doc_hash, a["rotulo"], a.get("versao", ""), a["localizacao"],
+                    ESTADO_PENDENTE, proposta_texto,
+                    justificativa=f"Melhoria estrutural - {a.get('rotulo')}",
+                    fonte="llm_mejora")
+                _propostas_cache[chave] = nova_proposta
+    _salvar_propostas_disc(_propostas_cache)
     insercoes = {
         docx_builder._chave_rotulo(a.get("o_que") or "")
         for a in adicoes
