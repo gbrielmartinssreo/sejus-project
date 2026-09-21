@@ -141,3 +141,20 @@ def assinalar_insercao(w_p, ins_id: int, author: str, date: str | None = None) -
         )
         w_p.replace(run, ins)
         ins.append(run)
+
+
+def verde(w_p, hex_color: str = "2E7D32") -> None:
+    """Pinta todos os runs de um ``w:p`` numa cor de destaque (texto adicionado)."""
+    from docx.shared import RGBColor
+
+    cor = RGBColor.from_string(hex_color)
+    for run in w_p.findall(qn("w:r")):
+        rPr = run.get_or_add_rPr()
+        rPr.get_or_add_color().val = cor
+
+
+def tachar(w_p) -> None:
+    """Aplica tachado em todos os runs de um ``w:p`` (texto removido/recomposto)."""
+    for run in w_p.findall(qn("w:r")):
+        rPr = run.get_or_add_rPr()
+        rPr.get_or_add_strike().val = True

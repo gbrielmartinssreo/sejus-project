@@ -84,8 +84,12 @@ def fake_minuta(monkeypatch, tmp_path):
         document.save(str(output_path))
         return output_path
 
+    def montar_docx_revisado(perfil, estrutura, output_dir, adicoes_rotulos=None):
+        return montar_docx(perfil, estrutura, output_dir, insercoes_rastreadas=adicoes_rotulos)
+
     monkeypatch.setattr(generation.minuta_generation, "gerar_estrutura_minuta", gerar_estrutura_minuta)
     monkeypatch.setattr(generation.docx_builder, "montar_docx", montar_docx)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx_revisado", montar_docx_revisado)
     return tmp_path
 
 
@@ -1103,3 +1107,80 @@ def test_montagem_adicao_sai_como_revisao_de_insercao(modelo_portaria_tmp, tmp_p
     assert p_inserido._element.find(_qn("w:ins")) is not None
     assert p_comum._element.find(_qn("w:ins")) is None
     assert docx_builder._AUTOR_REVISAO == "editor"
+
+
+def test_montar_docx_revisado_marca_diferencas_no_original(modelo_portaria_tmp, tmp_path):
+    """A copia revisada mantém o documento original e marca as mudanças:
+    texto novo em verde (adição/recomposição), texto antigo tachado
+    (remoção/recomposição), parágrafos iguais intactos."""
+    from docx.shared import RGBColor
+
+    from sejus_project.tools.document_infra import docx_builder
+
+    perfil, _ = modelo_portaria_tmp
+    estrutura = dict(ESTRUTURA.copy())
+    estrutura["numero"] = "PORTARIA Nº 45/2025/GAB-SEJUS/MT"
+    estrutura["ementa"] = "Dispõe sobre o Programa de Limpeza nas unidades da SEJUS."
+    estrutura["considerandos"] = []
+    estrutura["corpo"] = [
+        {
+            "rotulo": "Art. 1º",
+            "texto": "Instituir o Programa de Limpeza nas unidades administrativas.",
+            "subitens": [
+                {
+                    "tipo": "paragrafo",
+                    "rotulo": "§ 1º",
+                    "texto": "O programa abrange as unidades administrativas da SEJUS.",
+                },
+                {"tipo": "inciso", "rotulo": "I -", "texto": "padronizar os procedimentos diários;"},
+                {"tipo": "inciso", "rotulo": "II -", "texto": "definir responsáveis por unidade;"},
+            ],
+        },
+        {"rotulo": "Art. 1º-A", "texto": "Recurso em caso de negativa.", "subitens": []},
+    ]
+
+    output_path = docx_builder.montar_docx_revisado(
+        perfil, estrutura, tmp_path, adicoes_rotulos={"art. 1º-a"}
+    )
+
+    assert output_path.is_file()
+    document = Document(str(output_path))
+    texts = [p.text for p in document.paragraphs]
+
+    def p_por_texto(texto):
+        return next(p for p in document.paragraphs if p.text == texto)
+
+    titulo = p_por_texto("PORTARIA Nº 45/2025/GAB-SEJUS/MT")
+    assert titulo.runs[0].font.strike is None
+    assert titulo.runs[0].font.color.rgb is None
+
+    ementa_antiga = p_por_texto("Institui o Programa de Limpeza.")
+    assert ementa_antiga.runs[0].font.strike is True
+    ementa_nova = p_por_texto("Dispõe sobre o Programa de Limpeza nas unidades da SEJUS.")
+    assert ementa_nova.runs[0].font.color.rgb == RGBColor(0x2E, 0x7D, 0x32)
+    assert texts.index(ementa_nova.text) > texts.index(ementa_antiga.text)
+
+    removido = p_por_texto("CONSIDERANDO a necessidade de padronizar a rotina;")
+    assert removido.runs[0].font.strike is True
+
+    art_antigo = p_por_texto("Art. 1º Instituir o Programa de Limpeza nas unidades.")
+    assert art_antigo.runs[0].font.strike is True
+    art_novo = p_por_texto(
+        "Art. 1º Instituir o Programa de Limpeza nas unidades administrativas."
+    )
+    assert art_novo.runs[0].font.color.rgb == RGBColor(0x2E, 0x7D, 0x32)
+    assert texts.index(art_novo.text) > texts.index(art_antigo.text)
+
+    inciso = p_por_texto("I - padronizar os procedimentos diários;")
+    assert inciso.runs[0].font.strike is None
+    assert inciso.runs[0].font.color.rgb is None
+
+    paragrafo = p_por_texto("§ 1º O programa abrange as unidades administrativas da SEJUS.")
+    assert paragrafo.runs[0].font.strike is None
+
+    art_novo_a = p_por_texto("Art. 1º-A Recurso em caso de negativa.")
+    assert art_novo_a.runs[0].font.color.rgb == RGBColor(0x2E, 0x7D, 0x32)
+    assert texts.index(art_novo_a.text) > texts.index(inciso.text)
+    assert texts.index(art_novo_a.text) < texts.index(
+        "Esta Portaria entra em vigor na data de sua publicação."
+    )

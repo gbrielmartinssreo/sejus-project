@@ -1079,9 +1079,19 @@ def _melhorar_e_relatar(
         for a in adicoes
         if a.get("o_que")
     }
-    output_path = docx_builder.montar_docx(
-        perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
-    )
+    if destino.suffix.lower() == ".docx":
+        # Nova abordagem: o resultado é uma cópia do DOCX original com as
+        # mudanças marcadas (adicionado em verde, removido/recomposto tachado).
+        output_path = docx_builder.montar_docx_revisado(
+            perfil,
+            estrutura,
+            OUTPUTS_DIR,
+            adicoes_rotulos=insercoes,
+        )
+    else:
+        output_path = docx_builder.montar_docx(
+            perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
+        )
     depois = minuta_para_texto(estrutura)
     textos = _textos_antes_depois(conteudo, depois)
     lacunas_sem = _filtrar_lacunas_sem_precedente(lacunas, precedente or {})
