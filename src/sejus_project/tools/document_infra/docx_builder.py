@@ -21,7 +21,6 @@ from sejus_project.tools.document_infra.docx_engine import (
     clear_body,
     find_reference,
     paragraph_text,
-    realce_amarelo,
     tachar,
     verde,
 )
@@ -343,9 +342,7 @@ def montar_docx_revisado(
     * alterado → o antigo sai tachado seguido do novo em verde;
     * removido → fica visível com tachado;
     * adicionado (``adicoes_estruturais``) → novo artigo em verde, após o
-      artigo-base (seus incisos/§) ou no fim do miolo; adição SEM ``lastro``
-      (sem ato analogo no acervo) sai destacada em AMARELO como proposta de
-      revisão;
+      artigo-base (seus incisos/§) ou no fim do miolo;
     * não citado → fica intacto (o original nunca some por truncamento).
 
     Cabeçalho, rodapé de imprensa e demais partes do original são preservados.
@@ -361,15 +358,12 @@ def montar_docx_revisado(
         if inicio <= i < fim and ch.tag == qn("w:p")
     ]
 
-    def paragrafo_novo(texto: str, rotulo: str = "", papel: str = "artigo", destaque: str = "verde"):
+    def paragrafo_novo(texto: str, rotulo: str = "", papel: str = "artigo"):
         if not texto.strip() or not _pedir_paragrafo(refs, papel):
             return None
         ref = _referencia_para(refs, papel)
         w_p = build_paragraph(ref, rotulo, texto)
-        if destaque == "amarelo":
-            realce_amarelo(w_p)
-        else:
-            verde(w_p)
+        verde(w_p)
         return w_p
 
     def _ancoras(item: dict) -> list[str]:
@@ -421,10 +415,7 @@ def montar_docx_revisado(
             continue
         # O 'texto' de adicoes_estruturais já é o parágrafo COMPLETO (inclui
         # o rótulo 'Art. Nº-A ...'): não duplica o rótulo no build_paragraph.
-        # Adição sem 'lastro' (sem ato análogo no acervo) sai em AMARELO como
-        # proposta de revisão; com 'lastro' mantém o verde.
-        destaque = "amarelo" if not (ad.get("lastro") or "").strip() else "verde"
-        w_p = paragrafo_novo(texto, destaque=destaque)
+        w_p = paragrafo_novo(texto)
         if w_p is None:
             continue
         alvo = _indice_ancora_adicao(miolo_pars, ad.get("o_que") or "", ad.get("posicao") or "")

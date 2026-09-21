@@ -55,7 +55,6 @@ def _patch_saudavel():
                 ),
                 "novo_texto": "Art. 3º Texto do artigo 3 melhorado e detalhado.",
                 "detalhe": "Ajuste de texto.",
-                "lastro": "IN 07/2026",
             }
         ],
         "remocoes": [],
@@ -111,7 +110,6 @@ def test_melhoria_usa_orcamento_maior_e_preservar_completo(monkeypatch):
     assert "Art. 3º Texto do artigo 3 melhorado e detalhado." in _texto_da_estrutura(estrutura)
     assert len(alteracoes) == 1
     assert alteracoes[0]["trecho_original"]
-    assert alteracoes[0]["lastro"] == "IN 07/2026"
     assert remocoes == []
     assert adicoes[0]["o_que"] == "Art. 6º-A"
     assert lacunas[0]["tema"] == "seguranca_epi"
@@ -234,16 +232,6 @@ def test_melhoria_definition_tem_remocoes_adicoes_e_lacunas():
         "'alterado'"
     )
     assert props["remocoes"]["items"]["required"] == ["rotulo", "trecho_original", "detalhe"]
-    # Fonte opcional da mudanca existe em alteracoes e remocoes (e ja existia em adicoes).
-    assert "lastro" in props["alteracoes"]["items"]["properties"]
-    assert "lastro" in props["remocoes"]["items"]["properties"]
-    assert "lastro" in adicoes
-    assert "lastro" not in props["alteracoes"]["items"]["required"]
-    assert "lastro" not in props["remocoes"]["items"]["required"]
-    # Adicao sem precedente e permitida (sem 'lastro'); 'tema' ajuda o relatorio
-    # a nao listar a mesma lacuna duas vezes.
-    assert "tema" in adicoes
-    assert "tema" not in props["adicoes_estruturais"]["items"]["required"]
 
 
 def test_padronizar_mantem_itens_capitulo_em_ordem():

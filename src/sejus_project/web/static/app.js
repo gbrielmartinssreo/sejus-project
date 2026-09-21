@@ -306,9 +306,9 @@ function _liAlteracao(alteracao) {
   li.appendChild(tipo);
   var corpo = document.createElement("div");
   corpo.className = "item-body";
-  if (alteracao.rotulo || alteracao.o_que) {
+  if (alteracao.o_que) {
     var h = document.createElement("h4");
-    h.textContent = alteracao.rotulo || alteracao.o_que;
+    h.textContent = alteracao.o_que;
     corpo.appendChild(h);
   }
   if (alteracao.detalhe) {
@@ -316,12 +316,6 @@ function _liAlteracao(alteracao) {
     det.className = "alteracao-detalhe";
     det.textContent = alteracao.detalhe;
     corpo.appendChild(det);
-  }
-  if (alteracao.lastro) {
-    var fnt = document.createElement("p");
-    fnt.className = "alteracao-detalhe lastro";
-    fnt.textContent = "Fonte: " + alteracao.lastro;
-    corpo.appendChild(fnt);
   }
   li.appendChild(corpo);
   return li;
@@ -356,7 +350,7 @@ function _liAdicao(adicao) {
   if (adicao.lastro) {
     var lst = document.createElement("p");
     lst.className = "alteracao-detalhe lastro";
-    lst.textContent = "Fonte: " + adicao.lastro;
+    lst.textContent = "Lastro: " + adicao.lastro;
     corpo.appendChild(lst);
   }
   li.appendChild(corpo);
