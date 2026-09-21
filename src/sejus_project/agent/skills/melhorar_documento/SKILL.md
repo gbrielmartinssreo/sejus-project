@@ -36,9 +36,13 @@ antes/depois.
   texto original. O sistema copia o original e aplica o patch — parágrafos não
   citados permanecem intactos e o resultado nunca é truncado por limite de
   tokens (orçamento é limitado ao teto do modelo).
-- Cada `alteracao`/`remocao` precisa de `trecho_original` copiado EXATAMENTE
-  do documento recebido, para a mudança ser localizada. Itens sem âncora são
-  re-tentados uma vez e, se persistirem, geram um aviso no chat.
+- Ancoragem: cada `alteracao`/`remocao` precisa de `trecho_original` copiado
+  EXATAMENTE do documento recebido, para a mudança ser localizada. Itens sem
+  âncora são re-tentados uma vez e, se persistirem, geram um aviso no chat.
+- Fonte por mudança: preencha `lastro` com o ato do acervo que sustenta a
+  mudança (ex.: `IN 07/2026`). Adições propostas sem `lastro` (sem ato análogo
+  no acervo) são pintadas de **amarelo** no arquivo como proposta de revisão —
+  explique isso ao usuário na resposta.
 
 ## Regras para a melhoria
 - NÃO crie um ato novo: preserve número, ementa, objeto e assinaturas.

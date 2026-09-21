@@ -118,6 +118,7 @@ def fake_melhoria(monkeypatch, tmp_path, fake_minuta):
                     "trecho_original": "O Secretário de Estado de Justiça",
                     "novo_texto": "O SECRETÁRIO DE ESTADO DE JUSTIÇA, no uso de suas atribuições,",
                     "detalhe": "Atualizado para o art. vigente recuperado no RAG.",
+                    "lastro": "IN 07/2026",
                 },
             ],
             [],
@@ -262,6 +263,8 @@ def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_me
     assert comparacao["arquivo_original"] == "portaria_limpeza.docx"
     assert "PORTARIA Nº 45/2026/GAB-SEJUS/MT" in comparacao["antes"]
     assert comparacao["alteracoes"][0]["tipo"] == "corrigido"
+    assert result["alteracoes"][0]["lastro"] == "IN 07/2026"
+    assert comparacao["alteracoes"][0]["lastro"] == "IN 07/2026"
 
     capturado = fake_melhoria
     assert capturado["perfil"].preservar_moldura is True
@@ -987,7 +990,7 @@ def test_precedente_sem_score_minimo_nao_passa(monkeypatch):
 
     def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
         return [
-            _chunk(0.30, "Revogam-se as disposições em contrário e os prazos de validade."),
+            _chunk(0.25, "Revogam-se as disposições em contrário e os prazos de validade."),
         ]
 
     monkeypatch.setattr(gen, "retrieve", fake_retrieve)
@@ -996,6 +999,38 @@ def test_precedente_sem_score_minimo_nao_passa(monkeypatch):
 
     assert resultado["prazo_validade"]["tem_precedente"] is False
     assert resultado["revogacao"]["tem_precedente"] is False
+
+
+def test_precedente_limiar_reduzido_deixa_passar_score_intermediario(monkeypatch):
+    """O medidor afrouxado (0.30) aceita trechos de score intermediario, desde
+    que contenham a palavra-chave do tema — aumentando a chance de adicoes."""
+    from sejus_project.tools.llm_tools import document_generation as gen
+
+    def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
+        return [
+            _chunk(0.35, "O registro valerá pelo prazo de 02 (dois) anos."),
+        ]
+
+    monkeypatch.setattr(gen, "retrieve", fake_retrieve)
+
+    resultado = gen._precedente_das_lacunas("x", "portaria")
+
+    assert resultado["prazo_validade"]["tem_precedente"] is True
+
+
+def test_precedente_chaves_ampliadas_ancoram_mais_trechos(monkeypatch):
+    from sejus_project.tools.llm_tools import document_generation as gen
+
+    def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
+        return [
+            _chunk(0.55, "Uso permanente de EPI e segurança do trabalho."),
+        ]
+
+    monkeypatch.setattr(gen, "retrieve", fake_retrieve)
+
+    resultado = gen._precedente_das_lacunas("x", "portaria")
+
+    assert resultado["seguranca_epi"]["tem_precedente"] is True
 
 
 def test_tema_por_nome_aceita_variacoes():
@@ -1152,6 +1187,7 @@ def test_montar_docx_revisado_marca_diferencas_no_original(modelo_portaria_tmp, 
             "texto": "Art. 1º-A Recurso em caso de negativa, com efeito suspensivo.",
             "posicao": "após o art. 1º",
             "detalhe": "Novo artigo.",
+            "lastro": "IN 07/2026",
         }
     ]
 
@@ -1200,6 +1236,55 @@ def test_montar_docx_revisado_marca_diferencas_no_original(modelo_portaria_tmp, 
     assert texts.index(art_novo_a.text) < texts.index(
         "Esta Portaria entra em vigor na data de sua publicação."
     )
+
+
+def test_montar_docx_revisado_adicao_sem_fonte_fica_amarela(modelo_portaria_tmp, tmp_path):
+    """Adição estrutural SEM 'lastro' (sem ato análogo no acervo) sai destacada
+    em amarelo no arquivo — proposta de revisão; com 'lastro' mantém o verde."""
+    from docx.oxml.ns import qn as _qn
+
+    from sejus_project.tools.document_infra import docx_builder
+
+    perfil, _ = modelo_portaria_tmp
+
+    output_path = docx_builder.montar_docx_revisado(
+        perfil,
+        [],
+        [],
+        [
+            {
+                "o_que": "Art. 2º-A",
+                "texto": "Art. 2º-A Prazo de validade da autorização, com renovação anual.",
+                "posicao": "após o art. 2º",
+                "detalhe": "Proposta sem precedente no acervo.",
+            },
+            {
+                "o_que": "Art. 1º-A",
+                "texto": "Art. 1º-A Recurso em caso de negativa, com efeito suspensivo.",
+                "posicao": "após o art. 1º",
+                "detalhe": "Apoiada no acervo.",
+                "lastro": "IN 07/2026",
+            },
+        ],
+        tmp_path,
+    )
+
+    document = Document(str(output_path))
+
+    def destaque_do_paragrafo(texto):
+        p = next(p for p in document.paragraphs if p.text == texto)
+        return p.runs[0]._element.rPr.find(_qn("w:highlight"))
+
+    sem_fonte = destaque_do_paragrafo(
+        "Art. 2º-A Prazo de validade da autorização, com renovação anual."
+    )
+    assert sem_fonte is not None
+    assert sem_fonte.get(_qn("w:val")) == "yellow"
+
+    com_fonte = destaque_do_paragrafo(
+        "Art. 1º-A Recurso em caso de negativa, com efeito suspensivo."
+    )
+    assert com_fonte is None
 
 
 def test_chave_linha_normaliza_tipografia():

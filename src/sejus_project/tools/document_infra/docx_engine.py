@@ -158,3 +158,21 @@ def tachar(w_p) -> None:
     for run in w_p.findall(qn("w:r")):
         rPr = run.get_or_add_rPr()
         rPr.get_or_add_strike().val = True
+
+
+def realce_amarelo(w_p) -> None:
+    """Aplica destaque amarelo em todos os runs de um ``w:p``.
+
+    Usado para sinalizar adicoes propostas SEM lastro no acervo (proposta de
+    revisao), para a equipe identificar facilmente no arquivo o que nao tem
+    ato analogo por tras."""
+    from docx.oxml import OxmlElement
+
+    for run in w_p.findall(qn("w:r")):
+        rPr = run.get_or_add_rPr()
+        marcas = rPr.findall(qn("w:highlight"))
+        for m in marcas:
+            rPr.remove(m)
+        destaque = OxmlElement("w:highlight")
+        destaque.set(qn("w:val"), "yellow")
+        rPr.append(destaque)

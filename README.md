@@ -67,14 +67,19 @@ não reescreve o documento — ele devolve apenas as mudanças ancoradas ao text
 original (`alteracoes`, `remocoes` e `adicoes_estruturais`). O sistema copia o
 original e aplica o patch, então parágrafos não citados permanecem intactos e o
 resultado nunca é truncado por limite de tokens. A página mostra a comparação
-antes/depois (alterações, remoções, adições estruturais e lacunas).
+antes/depois (alterações, remoções, adições estruturais e lacunas). Cada mudança
+pode indicar a **fonte** do acervo (RAG) que a sustenta (ex.: `IN 07/2026`),
+exibida no card junto ao item; adições sem fonte entram como proposta de revisão
+marcada de amarelo no arquivo.
 
 Para entradas `.docx`, o resultado servido por `GET /api/minuta/docx` é uma
 **cópia do arquivo original com as mudanças já marcadas**:
 
 - texto alterado/adicionado sai em verde;
 - texto alterado/removido fica visível com tachado;
-- parágrafos iguais permanecem intactos.
+- parágrafos iguais permanecem intactos;
+- artigos novos **sem ato análogo no acervo** (proposta de revisão) saem
+  destacados em **amarelo**, facilmente identificáveis.
 
 `GET /api/minuta/pdf` converte essa cópia marcada em PDF (via LibreOffice),
 então as marcas verdes/tachado aparecem também no PDF. O arquivo original

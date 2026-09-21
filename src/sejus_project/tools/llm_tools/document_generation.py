@@ -820,7 +820,7 @@ comparacao_definition = {
 # chave no texto, o score da busca nao basta para gerar artigo.
 # ---------------------------------------------------------------------------
 
-PRECEDENTE_MIN_SCORE = 0.45
+PRECEDENTE_MIN_SCORE = 0.30
 PRECEDENTE_TOP = 6
 CONTEXTO_MELHORIA_MAX = 24
 
@@ -840,7 +840,7 @@ LACUNAS_ESTRUTURAIS = [
         "query": (
             "prazo de validade da autorização registro suspensão renovação cadastro"
         ),
-        "chaves": re.compile(r"validade|renova|revalid", re.IGNORECASE),
+        "chaves": re.compile(r"validade|renova|revalid|prazo", re.IGNORECASE),
     },
     {
         "tema": "prestacao_contas",
@@ -849,7 +849,10 @@ LACUNAS_ESTRUTURAIS = [
             "prestação de contas fiscalização obrigações do fiscal insumo "
             "fornecido recurso público"
         ),
-        "chaves": re.compile(r"presta[çc][aã]o|fiscaliz", re.IGNORECASE),
+        "chaves": re.compile(
+            r"presta[çc][aã]o|fiscaliz|fiscal do contrato|obriga[çc][oõ]es",
+            re.IGNORECASE,
+        ),
     },
     {
         "tema": "revogacao",
@@ -866,7 +869,8 @@ LACUNAS_ESTRUTURAIS = [
             "equipamento de proteção individual segurança do trabalho atividade de risco"
         ),
         "chaves": re.compile(
-            r"prote[çc][aã]o individual|\bepi\b|equipamento de prote",
+            r"prote[çc][aã]o individual|\bepi\b|equipamento de prote|"
+            r"seguran[çc]a do trabalho",
             re.IGNORECASE,
         ),
     },
@@ -875,7 +879,8 @@ LACUNAS_ESTRUTURAIS = [
         "rotulo": "Publicação e vigência",
         "query": "entrada em vigor publicação diário oficial regime de vigência",
         "chaves": re.compile(
-            r"entra em vigor|publique|di[áa]rio oficial|vig[êe]ncia", re.IGNORECASE
+            r"entra em vigor|publique|di[áa]rio oficial|vig[êe]ncia|efeito[s]? a partir",
+            re.IGNORECASE,
         ),
     },
 ]
@@ -1166,6 +1171,15 @@ def _melhorar_e_relatar(
     depois = minuta_para_texto(estrutura)
     textos = _textos_antes_depois(conteudo, depois)
     lacunas_sem = _filtrar_lacunas_sem_precedente(lacunas, precedente or {})
+    # A lacuna já pode ter sido fechada por uma adição de revisão (sem lastro,
+    # marcada em amarelo): não a lista duas vezes no relatório.
+    temas_cobertos = {
+        a.get("tema")
+        for a in adicoes
+        if a.get("tema") and not (a.get("lastro") or "").strip()
+    }
+    if temas_cobertos:
+        lacunas_sem = [l for l in lacunas_sem if l.get("tema") not in temas_cobertos]
     _ultima_minuta = {
         "estructura": estrutura,
         "modelo": perfil.name,

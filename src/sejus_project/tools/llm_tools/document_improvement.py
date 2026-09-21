@@ -101,6 +101,15 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                 "type": "string",
                 "description": "Explicacao curta da mudanca e do motivo.",
             },
+            "lastro": {
+                "type": "string",
+                "description": (
+                    "Opcional. Nome do documento do acervo (RAG) que sustenta a "
+                    "mudanca, como aparece no contexto, ex.: 'IN 07/2026'. Use "
+                    "somente ato que apareceu no contexto recuperado; para "
+                    "correcao apenas de redacao, omita o campo."
+                ),
+            },
         },
         "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe"],
     },
@@ -128,6 +137,15 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
                 "type": "string",
                 "description": "Motivo da remocao.",
             },
+            "lastro": {
+                "type": "string",
+                "description": (
+                    "Opcional. Nome do documento do acervo (RAG) que sustenta a "
+                    "remocao, como aparece no contexto, ex.: 'IN 07/2026'. Use "
+                    "somente ato que apareceu no contexto recuperado; para "
+                    "remocao apenas de redacao, omita o campo."
+                ),
+            },
         },
         "required": ["rotulo", "trecho_original", "detalhe"],
     },
@@ -136,8 +154,11 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
     "type": "array",
     "description": (
         "ADICOES ESTRUTURAIS PROPOSTAS: artigos NOVOS acrescentados ao "
-        "documento para fechar lacunas de aplicabilidade, somente quando a "
-        "lacuna tiver precedente nos atos recuperados no RAG. Cada item e um "
+        "documento para fechar lacunas de aplicabilidade. Quando a lacuna tiver "
+        "precedente nos atos recuperados no RAG, preencha 'lastro'. Sem "
+        "precedente, voce PODE propor mesmo assim como proposta de revisao, "
+        "mas SEM 'lastro' -- o sistema pinta esses artigos de AMARELO no "
+        "arquivo para identificacao facil pela equipe. Cada item e um "
         "artigo simples, com numero por sufixo quando inserido no MEIO da "
         "sequencia (LC 95/1998, art. 12, §§ 2o-3o): inserido apos o art. 6o, "
         "vira 'Art. 6o-A'; so continue a numeracao ('Art. 34') ao final do "
@@ -176,10 +197,20 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
             "lastro": {
                 "type": "string",
                 "description": (
-                    "Opcional. Atos do RAG usados como modelo de redacao, ex.: "
-                    "'IN 07/2026, art. 13 (validade de 02 anos)'. Transparencia "
+                    "Opcional. Nome do documento do acervo (RAG) que sustenta a "
+                    "adicao, como aparece no contexto, ex.: 'IN 07/2026'. Use "
+                    "somente ato que apareceu no contexto recuperado. Transparencia "
                     "de processo para o relatorio -- nao e citacao normativa no "
                     "texto do artigo."
+                ),
+            },
+            "tema": {
+                "type": "string",
+                "description": (
+                    "Opcional. Tema da lacuna fechada pela adicao, se houver "
+                    "(recurso_administrativo, prazo_validade, prestacao_contas, "
+                    "revogacao, seguranca_epi, publicacao_vigencia). Ajuda o "
+                    "sistema a nao listar a mesma lacuna duas vezes."
                 ),
             },
         },
@@ -273,8 +304,11 @@ def _sistema_melhoria():
         "capitulo adequado, com numero por sufixo, e registre-o SOMENTE em "
         "'adicoes_estruturais' com 'o_que' (rotulo), 'texto' (texto completo e "
         "autonomo), 'posicao' (onde entra), motivo e lastro. Se a lacuna "
-        "existir MAS nao houver precedente rotulado, NAO proponha artigo -- "
-        "apenas registre o tema em 'lacunas_identificadas'. Nao encha o "
+        "existir MAS nao houver precedente rotulado, voce PODE propor UM "
+        "artigo como proposta de revisao, SEM 'lastro' -- ele sera pintado de "
+        "AMARELO no arquivo para a equipe rever; se a lacuna nao tiver "
+        "tamanho suficiente para um artigo, apenas registre o tema em "
+        "'lacunas_identificadas'. Nao encha o "
         "documento de artigos novos: so adicione o que fechar omissao real de "
         "aplicacao.\n"
         "8. TEXTOS NOVOS SAO AUTONOMOS: nao cite ato SEJUS lateral (de outro "
@@ -287,6 +321,13 @@ def _sistema_melhoria():
         "apenas tipografia (travessao por hifen, aspas, espacos). 'trecho_original' "
         "DEVE casar com o texto do documento recebido -- copie fielmente, sem "
         "reescrever, sem encurtar alem do paragrafo exato.\n"
+        "10. FONTE DE CADA MUDANCA: em qualquer item (alteracao, remocao ou "
+        "adicao), preencha o campo opcional 'lastro' com o NOME do documento do "
+        "acervo que sustenta a mudanca, como aparece no contexto recuperado "
+        "(ex.: 'IN 07/2026'). Nao invente documento que nao apareceu no "
+        "contexto; correcoes/remocoes apenas de redacao podem omitir o campo. "
+        "Adicoes SEM 'lastro' sao marcadas de AMARELO no arquivo (proposta de "
+        "revisao sem ato analogo no acervo).\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 

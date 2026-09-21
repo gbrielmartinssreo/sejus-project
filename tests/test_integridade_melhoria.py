@@ -82,6 +82,7 @@ def _patch_com_ancora_ok() -> dict:
                     "observada a técnica desenvolvida."
                 ),
                 "detalhe": "Ajuste de texto.",
+                "lastro": "IN 07/2026",
             }
         ],
         "remocoes": [
