@@ -21,9 +21,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from sejus_project.agent import agent
-from sejus_project.tools import document_generation as generation
-from sejus_project.tools.pdf_preview import docx_para_pdf, soffice_disponivel
-from sejus_project.tools.user_files import (
+from sejus_project.tools.document_infra.pdf_preview import (
+    docx_para_pdf,
+    soffice_disponivel,
+)
+from sejus_project.tools.llm_tools import document_generation as generation
+from sejus_project.tools.llm_tools.user_files import (
     IMPORTACOES_DIR,
     SUPPORTED_EXTENSIONS,
     UserFileError,
@@ -88,6 +91,8 @@ def _resposta_chat(reply: str) -> dict:
             comparacao = {
                 "arquivo_original": original,
                 "alteracoes": dados.get("alteracoes") or [],
+                "adicoes_estruturais": dados.get("adicoes_estruturais") or [],
+                "lacunas": dados.get("lacunas") or [],
                 "url_original": (
                     f"/api/arquivo/{quote(original)}" if original else None
                 ),

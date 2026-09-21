@@ -1,6 +1,5 @@
 def more_epic():
-    return "gabriel brabo"
-
+    return "Após rigorosa análise científica, Gabriel foi considerado 847% mais épico que a média da população."
 definition = {
     "type": "function",
     "function": {

@@ -3,7 +3,7 @@
 import json
 
 from sejus_project.agent import agent
-from sejus_project.tools import document_generation as generation
+from sejus_project.tools.llm_tools import document_generation as generation
 
 
 def test_executar_tool_captura_excecao_na_funcao(monkeypatch):

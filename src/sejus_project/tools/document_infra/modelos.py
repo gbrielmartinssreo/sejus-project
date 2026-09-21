@@ -12,7 +12,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from sejus_project.tools.docx_templates import PROJECT_ROOT, TEMPLATES_DIR
+from sejus_project.tools.document_infra.docx_templates import (
+    PROJECT_ROOT,
+    TEMPLATES_DIR,
+)
 
 TEMPLATES_PLUS_DIR = PROJECT_ROOT / "docs" / "templates-plus"
 
@@ -40,6 +43,7 @@ IN_FUNCAO_ARMADA = PerfilModelo(
         "preambulo": r"^\s*o secret[áa]rio de estado",
         "considerando": r"^\s*considerando",
         "resolutivo": r"^\s*resolv",
+        "capitulo": r"^\s*cap[íi]tulo\s+[ivx]+",
         "artigo": r"^\s*art\.?\s*\d",
         "paragrafo": r"^\s*(?:§\s*\d|par[áa]grafo)",
         "inciso": r"^\s*(?:[ivx]{1,3})\s*[-–—]",
@@ -63,6 +67,7 @@ PORTARIA_CONJUNTA = PerfilModelo(
         "preambulo": r"^\s*o secret[áa]rio de estado de justi[çc]a",
         "considerando": r"^\s*considerando",
         "resolutivo": r"^\s*r\s*e\s*s\s*o\s*l\s*v\s*e\s*m",
+        "capitulo": r"^\s*cap[íi]tulo\s+[ivx]+",
         "artigo": r"^\s*art\.?\s*\d",
         "paragrafo": r"^\s*par[áa]grafo",
         "inciso": r"^\s*(?:[-–—]\s|(?:[ivx]{1,3})\s*[-–—])",
@@ -84,6 +89,7 @@ RETIFICACAO = PerfilModelo(
         "titulo": r"^portaria\s*n[°º.]",
         "ementa": r"retifica",
         "preambulo": r"^\s*o secret[áa]rio de estado de justi[çc]a",
+        "capitulo": r"^\s*cap[íi]tulo\s+[ivx]+",
         "artigo": r"^\s*art\.?\s*\d",
         "vigencia": r"entra em vigor",
         "assinatura": r"valter furtado",
@@ -102,6 +108,7 @@ PORTARIA = PerfilModelo(
         "preambulo": r"^\s*o secret[áa]rio de estado de justi[çc]a",
         "considerando": r"^\s*considerando",
         "resolutivo": r"^\s*resolv",
+        "capitulo": r"^\s*cap[íi]tulo\s+[ivx]+",
         "artigo": r"^\s*art\.?\s*\d",
         "paragrafo": r"^\s*§\s*\d",
         "inciso": r"^\s*(?:[ivx]{1,3})\s*[-–—]",
@@ -119,6 +126,7 @@ DECRETO = PerfilModelo(
         "ementa": r"^disp[oõ]es sobre",
         "preambulo": r"^o governador do estado",
         "considerando": r"^considerando",
+        "capitulo": r"^\s*cap[íi]tulo\s+[ivx]+",
         "resolutivo": r"^\s*d\s*e\s*c\s*r\s*e\s*t\s*a",
         "artigo": r"^art\.?\s*\d",
         "vigencia": r"entra em vigor",

@@ -6,25 +6,36 @@ from sejus_project.agent.skills.loader import (
     build_system_message,
 )
 from sejus_project.llm.ia import perguntar
-from sejus_project.tools.document_generation import (
-    cancelar_pendencia,
+from sejus_project.tools.llm_tools.document_generation import (
+    aceitar_proposta,
+    rejeitar_proposta,
+    listar_propostas,
+    aplicar_alteracoes_selecionadas,
     comparacao_definition,
     gerar_documento_normativo,
-    has_pending_document,
-    limpar_estado,
     melhorar_documento_usuario,
-    melhoria_definition,
     obter_textos_comparacao,
+    has_pending_document,
+    cancelar_pendencia,
+    limpar_estado,
+    ESTADO_PENDENTE,
+    ESTADO_ACEITA,
+    ESTADO_REJEITADA,
 )
-from sejus_project.tools.document_generation import (
+from sejus_project.tools.llm_tools.document_improvement import MELHORIA_DEFINITION as melhoria_definition
+from sejus_project.tools.llm_tools.document_generation import (
     definition as document_generation_definition,
 )
-from sejus_project.tools.more import definition as more_definition
-from sejus_project.tools.more import more_epic
-from sejus_project.tools.retrieval import consultar_atos_sejus
-from sejus_project.tools.retrieval import definition as retrieval_definition
-from sejus_project.tools.user_files import analisar_arquivo_usuario
-from sejus_project.tools.user_files import definition as user_files_definition
+from sejus_project.tools.llm_tools.more import definition as more_definition
+from sejus_project.tools.llm_tools.more import more_epic
+from sejus_project.tools.llm_tools.retrieval import consultar_atos_sejus
+from sejus_project.tools.llm_tools.retrieval import definition as retrieval_definition
+from sejus_project.tools.llm_tools.user_files import analisar_arquivo_usuario
+from sejus_project.tools.llm_tools.user_files import definition as user_files_definition
+
+# ============================================================================
+# TOOLS
+# ============================================================================
 
 TOOLS = [
     more_definition,
@@ -43,11 +54,19 @@ FUNCTIONS = {
     "gerar_documento_normativo": gerar_documento_normativo,
     "melhorar_documento_usuario": melhorar_documento_usuario,
     "obter_textos_comparacao": obter_textos_comparacao,
+    "aceitar_proposta": aceitar_proposta,
+    "rejeitar_proposta": rejeitar_proposta,
+    "listar_propostas": listar_propostas,
+    "aplicar_alteracoes_selecionadas": aplicar_alteracoes_selecionadas,
 }
 
 
-# Histórico da conversa
+# ============================================================================
+# CONFIGURAÇÃO DO AGENTE
+# ============================================================================
+
 messages = []
+
 
 SYSTEM_INSTRUCTIONS = (
     "Voce e o agente da SEJUS. Responda em portugues. "
@@ -92,51 +111,44 @@ SYSTEM_INSTRUCTIONS = (
     "status 'nao_normativo', admita o limite e responda em texto, sem "
     "insistir nem gerar o arquivo.\n"
     "Em perguntas de acompanhamento sobre uma melhoria JA feita (por ex.: "
-    "'o que exatamente foi alterado', 'mostre antes e depois', 'mostre os "
-    "textos alterados', 'monte uma tabela do antes/depois', 'quais trechos "
-    "mudaram'), use a ferramenta obter_textos_comparacao para recuperar os "
-    "TEXTOS REAIS da ultima comparacao. Copie fielmente os trechos dos campos "
-    "'antes' e 'depois' e NAO invente textos, resumos ou cotejamentos. Nessas "
-    "perguntas NAO chame melhorar_documento_usuario nem gere ou reescreva o "
-    "arquivo novamente — se ela retornar status 'already_improved' ou "
-    "'sem_comparacao', apenas responda em texto com base no que houver e "
-    "informe que arquivos novos nao serao criados para evitar duplicacoes."
+    "'o que exatamente foi alterado', 'mostre antes e depois', "
+    "'mostre os textos alterados', 'monte uma tabela do antes/depois', "
+    "'quais trechos mudaram'), use a ferramenta obter_textos_comparacao "
+    "para recuperar os TEXTOS REAIS da ultima comparacao. Copie fielmente "
+    "os trechos dos campos 'antes' e 'depois' e NAO invente textos, "
+    "resumos ou cotejamentos. Nessas perguntas NAO chame "
+    "melhorar_documento_usuario nem gere ou reescreva o arquivo novamente — "
+    "se ela retornar status 'already_improved' ou 'sem_comparacao', apenas "
+    "responda em texto com base no que houver e informe que arquivos novos "
+    "nao serao criados para evitar duplicacoes."
 )
 
+
 def _messages_for_llm() -> list[dict]:
-    return [build_system_message(SYSTEM_INSTRUCTIONS, messages), *messages]
+    return [
+        build_system_message(SYSTEM_INSTRUCTIONS, messages),
+        *messages,
+    ]
 
-# --- Configuração da poda de histórico -------------------------------------
-# Estratégia: truncar CONTEÚDO BRUTO de resultados de tools antigas de forma
-# agressiva (raramente reutilizado depois de alguns turnos, e costuma ser a
-# maior fonte de inflação de tokens — ex: chunks retornados pelo RAG) e
-# truncar respostas do assistant de forma mais generosa (o texto final tem
-# citações e resumos úteis, mas ainda assim precisa de um teto — uma única
-# resposta grande, como uma tabela markdown extensa, pode sozinha estourar
-# o limite de tokens por minuto em conversas de vários turnos).
 
-# Quantas mensagens "tool" mais recentes devem ser mantidas por completo.
+# ============================================================================
+# PODA DO HISTÓRICO
+# ============================================================================
+
 MANTER_TOOL_RESULTS_COMPLETOS = 4
-# Tamanho máximo (em caracteres) de um tool result truncado.
 TRUNCAR_TOOL_RESULT_PARA = 300
 
-# Quantas respostas "assistant" mais recentes devem ser mantidas por completo.
 MANTER_ASSISTANT_COMPLETOS = 3
-# Tamanho máximo (em caracteres) de uma resposta assistant truncada.
-# Bem mais generoso que o de tool — preserva a maior parte do texto final,
-# incluindo normalmente a citação/conclusão, só corta o excesso.
 TRUNCAR_ASSISTANT_PARA = 1500
 
 
 def _podar_tool_results_antigos():
-    """Trunca o conteúdo de tool results antigos, preservando os mais recentes.
-
-    Fica com retornos brutos de funções como consultar_atos_sejus — dado bruto,
-    pode ser truncado de forma curta sem grande perda.
-    """
+    """Trunca resultados antigos de ferramentas."""
 
     indices_tool = [
-        i for i, m in enumerate(messages) if m.get("role") == "tool"
+        i
+        for i, m in enumerate(messages)
+        if m.get("role") == "tool"
     ]
 
     if len(indices_tool) <= MANTER_TOOL_RESULTS_COMPLETOS:
@@ -154,25 +166,21 @@ def _podar_tool_results_antigos():
         ):
             messages[i]["content"] = (
                 conteudo[:TRUNCAR_TOOL_RESULT_PARA]
-                + f"... [resultado truncado — {len(conteudo)} caracteres originais]"
+                + f"... [resultado truncado — "
+                f"{len(conteudo)} caracteres originais]"
             )
 
 
 def _podar_assistant_antigos():
-    """Trunca respostas antigas do assistant, com limite bem mais generoso
-    que o de tool results.
-
-    Objetivo: evitar que uma única resposta grande (ex. tabela markdown
-    extensa, resumo longo de documento) fique intacta para sempre no
-    histórico e acabe estourando o limite de tokens por minuto em
-    conversas de vários turnos — sem descartar de forma agressiva o
-    conteúdo, que costuma carregar citações relevantes.
-    """
+    """Trunca respostas antigas do assistant."""
 
     indices_assistant = [
         i
         for i, m in enumerate(messages)
-        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+        if (
+            m.get("role") == "assistant"
+            and isinstance(m.get("content"), str)
+        )
     ]
 
     if len(indices_assistant) <= MANTER_ASSISTANT_COMPLETOS:
@@ -189,15 +197,17 @@ def _podar_assistant_antigos():
         ):
             messages[i]["content"] = (
                 conteudo[:TRUNCAR_ASSISTANT_PARA]
-                + f"... [resposta anterior truncada — {len(conteudo)} caracteres originais]"
+                + f"... [resposta anterior truncada — "
+                f"{len(conteudo)} caracteres originais]"
             )
 
 
+# ============================================================================
+# EXECUÇÃO DE TOOLS
+# ============================================================================
+
 def _executar_tool(tool_call):
-    """Executa uma ferramenta baseada no tool_call, sem nunca estourar exceções.
-    Qualquer falha interna vira um resultado de tool com ``status: error`` para
-    que o LLM consiga explicar o problema em texto — e a interface nunca receba
-    um 500 com HTML."""
+    """Executa uma ferramenta solicitada pelo LLM."""
 
     function_name = tool_call.function.name
 
@@ -217,7 +227,8 @@ def _executar_tool(tool_call):
             result = function()
         else:
             result = function(**arguments)
-    except Exception as error:  # noqa: BLE001 - erro vira tool result
+
+    except Exception as error:  # noqa: BLE001
         return json.dumps(
             {
                 "status": "error",
@@ -234,71 +245,97 @@ def _executar_tool(tool_call):
     )
 
 
+# ============================================================================
+# RESPOSTA DE MELHORIA
+# ============================================================================
+
 def _resposta_melhoria(result: dict) -> str:
-    """Transforma o JSON da tool de melhoria na resposta final do agente."""
+    """Transforma o resultado da tool de melhoria em texto."""
+
     if result.get("status") == "already_improved":
         alteracoes = result.get("alteracoes") or []
+
         linhas = [
-            f"- ({a.get('tipo', 'alterado')}) {a.get('o_que', '')}: "
+            f"- ({a.get('tipo', 'alterado')}) "
+            f"{a.get('o_que', '')}: "
             f"{a.get('detalhe', '')}"
             for a in alteracoes[:15]
         ]
-        resumo = "\n".join(linhas) if linhas else "Nenhuma alteração significativa."
+
+        resumo = (
+            "\n".join(linhas)
+            if linhas
+            else "Nenhuma alteração significativa."
+        )
+
         resposta = (
-            f"A comparação para **{result.get('arquivo_original', '')}** já "
-            "está disponível nesta conversa — não gerei um arquivo novo para "
-            "não duplicar.\n\n"
+            f"A comparação para "
+            f"**{result.get('arquivo_original', '')}** "
+            "já está disponível nesta conversa — não gerei "
+            "um arquivo novo para não duplicar.\n\n"
             "O que mudou:\n"
             f"{resumo}"
         )
+
         if result.get("textos"):
             resposta += (
                 "\n\nSe quiser, posso detalhar os trechos alterados "
                 "(antes/depois) com os textos reais."
             )
+
         return resposta
 
     if result.get("status") != "improved":
-        return result.get("error", "Não foi possível melhorar o documento.")
+        return result.get(
+            "error",
+            "Não foi possível melhorar o documento.",
+        )
 
     filename = result.get("filename") or ""
     alteracoes = result.get("alteracoes") or []
+
     linhas = [
-        f"- ({a.get('tipo', 'alterado')}) {a.get('o_que', '')}: "
+        f"- ({a.get('tipo', 'alterado')}) "
+        f"{a.get('o_que', '')}: "
         f"{a.get('detalhe', '')}"
         for a in alteracoes[:15]
     ]
-    resumo = "\n".join(linhas) if linhas else "Nenhuma alteração significativa."
+
+    resumo = (
+        "\n".join(linhas)
+        if linhas
+        else "Nenhuma alteração significativa."
+    )
 
     resposta = (
-        f"Documento melhorado e comparado! Arquivo: **{filename}**.\n"
-        "O arquivo original e a nova versão estão disponíveis nos downloads "
-        "e na comparação ao lado.\n\n"
+        f"Documento melhorado e comparado! "
+        f"Arquivo: **{filename}**.\n"
+        "O arquivo original e a nova versão estão disponíveis "
+        "nos downloads e na comparação ao lado.\n\n"
         "O que mudou:\n"
         f"{resumo}"
     )
 
     outros = result.get("outros") or []
+
     if outros:
         resposta += (
             "\n\nOutros arquivos importados disponíveis:\n"
             + "\n".join(f"- {nome}" for nome in outros)
         )
+
     return resposta
 
 
-def executar(question):
-    """Executa o agente mantendo o histórico da conversa."""
+# ============================================================================
+# FLUXOS ESPECIAIS
+# ============================================================================
 
-    # Adiciona a pergunta ao histórico
-    messages.append({
-        "role": "user",
-        "content": question
-    })
+def _tratar_geracao_pendente(question):
+    """Finaliza uma geração de documento que estava aguardando confirmação."""
 
-    # Finaliza diretamente uma minuta pendente quando o usuario autoriza
-    # dados plausiveis ou pede o arquivo, sem depender de nova tool call do LLM.
     normalized_question = question.casefold()
+
     generation_phrases = (
         "gere o arquivo",
         "gerar o arquivo",
@@ -319,43 +356,94 @@ def executar(question):
         "prossegue",
         "pode seguir",
     )
-    if has_pending_document() and any(
-        phrase in normalized_question for phrase in generation_phrases
-    ):
-        result = json.loads(gerar_documento_normativo(question))
-        if result.get("status") == "generated":
-            resposta = (
-                "Documento gerado com sucesso. O arquivo já está disponível "
-                "no cartão de download desta conversa.\n\n"
-                "A minuta foi preenchida automaticamente e precisa ser revisada."
-            )
-            messages.append({"role": "assistant", "content": resposta})
-            return resposta
 
-    # Usuario desistiu de gerar o documento: descarta o pedido pendente e
-    # deixa o LLM responder em texto normal, sem novo pedido de campos.
-    cancel_phrases = ("cancele", "cancelar", "cancela", "cancelando")
-    if has_pending_document() and any(
-        phrase in normalized_question for phrase in cancel_phrases
+    if not has_pending_document():
+        return None
+
+    if not any(
+        phrase in normalized_question
+        for phrase in generation_phrases
+    ):
+        return None
+
+    result = json.loads(
+        gerar_documento_normativo(question)
+    )
+
+    if result.get("status") != "generated":
+        return None
+
+    resposta = (
+        "Documento gerado com sucesso. O arquivo já está disponível "
+        "no cartão de download desta conversa.\n\n"
+        "A minuta foi preenchida automaticamente e precisa ser revisada."
+    )
+
+    messages.append({
+        "role": "assistant",
+        "content": resposta,
+    })
+
+    return resposta
+
+
+def _tratar_cancelamento(question):
+    """Cancela uma geração de documento pendente."""
+
+    if not has_pending_document():
+        return
+
+    normalized_question = question.casefold()
+
+    cancel_phrases = (
+        "cancele",
+        "cancelar",
+        "cancela",
+        "cancelando",
+    )
+
+    if any(
+        phrase in normalized_question
+        for phrase in cancel_phrases
     ):
         cancelar_pendencia()
 
-    # Fluxo dedicado "melhorar e comparar" (botão da interface): dispara a
-    # tool de melhoria direto, sem depender do LLM escolher a ferramenta.
+
+def _executar_melhoria(filename=None):
+    """Executa a melhoria de um documento."""
+
+    if filename:
+        result = melhorar_documento_usuario(filename)
+    else:
+        result = melhorar_documento_usuario()
+
+    resposta = _resposta_melhoria(
+        json.loads(result)
+    )
+
+    messages.append({
+        "role": "assistant",
+        "content": resposta,
+    })
+
+    return resposta
+
+
+def _tratar_melhoria_direta(question):
+    """Detecta pedidos especiais de melhoria de documento."""
+
+    normalized_question = question.casefold()
+
     match_melhoria = re.match(
         r"^melhore e compare o arquivo\s+['\"]?(.+?)['\"]?\s*$",
         normalized_question,
     )
-    if match_melhoria:
-        resposta = _resposta_melhoria(
-            json.loads(melhorar_documento_usuario(match_melhoria.group(1)))
-        )
-        messages.append({"role": "assistant", "content": resposta})
-        return resposta
 
-    # Mesmo fluxo quando o usuario pede melhoria sem nomear o arquivo
-    # ("melhore o arquivo que mandei", "melhore esse documento"...): a tool
-    # usa a importação mais recente e lista as alternativas.
+    if match_melhoria:
+        return _executar_melhoria(
+            match_melhoria.group(1)
+        )
+
     match_melhoria_sem_nome = re.match(
         r"^melhore(?: e compare)?"
         r"(?: o| este| esse| aquele| um)?"
@@ -363,12 +451,26 @@ def executar(question):
         r"(?: que (?:eu\s+)?(?:mandei|enviei|importei))?\s*$",
         normalized_question,
     )
-    if match_melhoria_sem_nome:
-        resposta = _resposta_melhoria(json.loads(melhorar_documento_usuario()))
-        messages.append({"role": "assistant", "content": resposta})
-        return resposta
 
-    # Loop para permitir chamadas de ferramentas
+    if match_melhoria_sem_nome:
+        return _executar_melhoria()
+
+    return None
+
+
+# ============================================================================
+# LOOP PRINCIPAL DO AGENTE
+# ============================================================================
+
+def _executar_loop_agente():
+    """
+    Executa o ciclo:
+
+        LLM → tool call → tool → tool result → LLM
+
+    até o LLM produzir uma resposta final.
+    """
+
     ultimo_resultado_tool = None
 
     for _ in range(5):
@@ -377,35 +479,48 @@ def executar(question):
         _podar_assistant_antigos()
 
         try:
-            response = perguntar(_messages_for_llm(), TOOLS)
-        except Exception as error:  # noqa: BLE001 - LLM/API indisponivel
-            mensagem_erro = (
-                f"Não foi possível consultar o modelo de linguagem: {error}"
+            response = perguntar(
+                _messages_for_llm(),
+                TOOLS,
             )
-            messages.append({"role": "assistant", "content": mensagem_erro})
+
+        except Exception as error:  # noqa: BLE001
+            mensagem_erro = (
+                f"Não foi possível consultar o modelo de linguagem: "
+                f"{error}"
+            )
+
+            messages.append({
+                "role": "assistant",
+                "content": mensagem_erro,
+            })
+
             return mensagem_erro
 
         message = response.choices[0].message
 
-        # Se o agente respondeu normalmente
+        # O LLM respondeu normalmente.
         if not message.tool_calls:
 
             messages.append({
                 "role": "assistant",
-                "content": message.content
+                "content": message.content,
             })
 
-            return message.content or "Não foi possível gerar uma resposta."
+            return (
+                message.content
+                or "Não foi possível gerar uma resposta."
+            )
 
-        # Adiciona a mensagem do agente ao histórico
+        # O LLM pediu uma ou mais ferramentas.
         messages.append(
             message.model_dump(exclude_none=True)
         )
 
-        # Executa as ferramentas solicitadas
         for tool_call in message.tool_calls:
 
             resultado = _executar_tool(tool_call)
+
             ultimo_resultado_tool = resultado
 
             messages.append({
@@ -419,10 +534,53 @@ def executar(question):
             "A ferramenta não concluiu a operação. "
             f"Último estado retornado: {ultimo_resultado_tool}"
         )
+
     return "Não foi possível concluir a consulta."
 
 
+# ============================================================================
+# ENTRADA PRINCIPAL
+# ============================================================================
+
+def executar(question):
+    """
+    Executa o agente mantendo o histórico da conversa.
+
+    A função apenas coordena os diferentes fluxos.
+    """
+
+    # 1. Adiciona a pergunta ao histórico.
+    messages.append({
+        "role": "user",
+        "content": question,
+    })
+
+    # 2. Trata geração de documento pendente.
+    resposta = _tratar_geracao_pendente(question)
+
+    if resposta is not None:
+        return resposta
+
+    # 3. Trata cancelamento.
+    _tratar_cancelamento(question)
+
+    # 4. Trata melhoria direta de documentos.
+    resposta = _tratar_melhoria_direta(question)
+
+    if resposta is not None:
+        return resposta
+
+    # 5. Caso nenhum fluxo especial tenha sido acionado,
+    #    executa o agente normalmente.
+    return _executar_loop_agente()
+
+
+# ============================================================================
+# LIMPEZA
+# ============================================================================
+
 def limpar_conversa():
     """Apaga o histórico da conversa e o estado de geração pendente."""
+
     messages.clear()
     limpar_estado()

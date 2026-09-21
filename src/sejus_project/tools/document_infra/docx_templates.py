@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from docx import Document
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 TEMPLATES_DIR = PROJECT_ROOT / "docs" / "templates"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 

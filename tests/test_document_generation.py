@@ -6,9 +6,9 @@ import pytest
 from docx import Document
 from docx.shared import Pt
 
-from sejus_project.tools import document_generation as generation
-from sejus_project.tools import docx_templates, modelos
-from sejus_project.tools.modelos import PerfilModelo
+from sejus_project.tools.document_infra import docx_builder, docx_templates, modelos
+from sejus_project.tools.document_infra.modelos import PerfilModelo
+from sejus_project.tools.llm_tools import document_generation as generation
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -75,7 +75,7 @@ def fake_minuta(monkeypatch, tmp_path):
         estrutura = ESTRUTURA.copy()
         return estrutura
 
-    def montar_docx(perfil, estrutura, output_dir):
+    def montar_docx(perfil, estrutura, output_dir, insercoes_rastreadas=None):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"gen_{perfil.name}.docx"
@@ -84,8 +84,12 @@ def fake_minuta(monkeypatch, tmp_path):
         document.save(str(output_path))
         return output_path
 
-    monkeypatch.setattr(generation.minuta, "gerar_estrutura_minuta", gerar_estrutura_minuta)
-    monkeypatch.setattr(generation.minuta, "montar_docx", montar_docx)
+    def montar_docx_revisado(perfil, alteracoes, remocoes, adicoes, output_dir):
+        return montar_docx(perfil, ESTRUTURA, output_dir, insercoes_rastreadas=None)
+
+    monkeypatch.setattr(generation.minuta_generation, "gerar_estrutura_minuta", gerar_estrutura_minuta)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", montar_docx)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx_revisado", montar_docx_revisado)
     return tmp_path
 
 
@@ -104,21 +108,33 @@ def fake_melhoria(monkeypatch, tmp_path, fake_minuta):
                 "valores": valores,
             }
         )
-        return ESTRUTURA.copy(), [
-            {
-                "tipo": "corrigido",
-                "o_que": "Fundamento legal no preâmbulo",
-                "detalhe": "Atualizado para o art. vigente recuperado no RAG.",
-            },
-            {
-                "tipo": "adicionado",
-                "o_que": "Artigo de vigência",
-                "detalhe": "Incluída cláusula de vigência na data de publicação.",
-            },
-        ]
+        return (
+            ESTRUTURA.copy(),
+            [
+                {
+                    "tipo": "corrigido",
+                    "rotulo": "Preâmbulo",
+                    "localizacao": "Fundamento legal no preâmbulo",
+                    "trecho_original": "O Secretário de Estado de Justiça",
+                    "novo_texto": "O SECRETÁRIO DE ESTADO DE JUSTIÇA, no uso de suas atribuições,",
+                    "detalhe": "Atualizado para o art. vigente recuperado no RAG.",
+                },
+            ],
+            [],
+            [
+                {
+                    "o_que": "Art. 6º-A",
+                    "texto": "Recurso em caso de negativa, com efeito suspensivo.",
+                    "posicao": "após o art. 2º",
+                    "detalhe": "Recurso em caso de negativa.",
+                    "lastro": "IN 07/2026, art. 13.",
+                }
+            ],
+            [],
+        )
 
     monkeypatch.setattr(
-        generation.minuta, "gerar_estrutura_melhoria", gerar_estrutura_melhoria
+        generation.document_improvement, "gerar_estrutura_melhoria", gerar_estrutura_melhoria
     )
     return capturados
 
@@ -217,7 +233,7 @@ def test_short_confirmation_generates_pending_document(fake_retrieval, fake_minu
 def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Melhorar um .docx usa o próprio arquivo como modelo de formatação e
     guarda os dados da comparação antes/depois."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_minuta = None
     generation._ultima_comparacao = None
@@ -255,7 +271,7 @@ def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_me
 
 def test_melhoria_txt_usa_template_padrao(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Arquivos sem formatação (txt/pdf/md) caem no template oficial do tipo."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
     (tmp_path / "ato_decreto.txt").write_text(
@@ -281,7 +297,7 @@ def test_melhoria_arquivo_inexistente_retorna_erro(fake_retrieval, fake_melhoria
 def test_melhoria_sem_nome_usa_importacao_mais_recente(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Sem informar o arquivo, a tool usa a importação mais recente e devolve
     as alternativas na lista 'outros'."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -304,7 +320,7 @@ def test_melhoria_sem_nome_usa_importacao_mais_recente(fake_retrieval, fake_melh
 
 
 def test_melhoria_sem_arquivos_retorna_erro(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
     result = json.loads(generation.melhorar_documento_usuario())
@@ -316,7 +332,7 @@ def test_melhoria_sem_arquivos_retorna_erro(fake_retrieval, fake_melhoria, monke
 def test_melhoria_guarda_textos_reais_para_acompanhamento(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """A melhoria guarda os textos reais antes/depois (não só resumos) para o
     agente responder 'o que mudou' e montar tabelas com fidelidade depois."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -342,7 +358,7 @@ def test_melhoria_repetida_nao_regenera_arquivo(fake_retrieval, fake_melhoria, m
     """Repetir o pedido de melhoria do mesmo arquivo (sem diretrizes novas)
     reaproveita a comparação e não cria outro arquivo — evita duplicar o
     retrabalho em perguntas de acompanhamento."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     generation._melhoria_no_turno = False
@@ -353,13 +369,13 @@ def test_melhoria_repetida_nao_regenera_arquivo(fake_retrieval, fake_melhoria, m
     )
 
     chamadas = {"montar_docx": 0}
-    original = generation.minuta.montar_docx
+    original = generation.docx_builder.montar_docx
 
-    def contar_montar_docx(perfil, estrutura, output_dir):
+    def contar_montar_docx(perfil, estrutura, output_dir, insercoes_rastreadas=None):
         chamadas["montar_docx"] += 1
-        return original(perfil, estrutura, output_dir)
+        return original(perfil, estrutura, output_dir, insercoes_rastreadas=insercoes_rastreadas)
 
-    monkeypatch.setattr(generation.minuta, "montar_docx", contar_montar_docx)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", contar_montar_docx)
 
     first = json.loads(generation.melhorar_documento_usuario("ato_repetido.txt"))
     second = json.loads(generation.melhorar_documento_usuario("ato_repetido.txt"))
@@ -377,7 +393,7 @@ def test_melhoria_repetida_nao_regenera_arquivo(fake_retrieval, fake_melhoria, m
 def test_melhoria_com_diretrizes_novas_regenera(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Diretrizes novas para o mesmo arquivo não caem no guarda
     'already_improved' — o retrabalho acontece de verdade."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -387,13 +403,13 @@ def test_melhoria_com_diretrizes_novas_regenera(fake_retrieval, fake_melhoria, m
     )
 
     chamadas = {"montar_docx": 0}
-    original = generation.minuta.montar_docx
+    original = generation.docx_builder.montar_docx
 
-    def contar_montar_docx(perfil, estrutura, output_dir):
+    def contar_montar_docx(perfil, estrutura, output_dir, insercoes_rastreadas=None):
         chamadas["montar_docx"] += 1
-        return original(perfil, estrutura, output_dir)
+        return original(perfil, estrutura, output_dir, insercoes_rastreadas=insercoes_rastreadas)
 
-    monkeypatch.setattr(generation.minuta, "montar_docx", contar_montar_docx)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", contar_montar_docx)
 
     first = json.loads(generation.melhorar_documento_usuario("ato_diretriz.txt"))
     second = json.loads(
@@ -409,7 +425,7 @@ def test_melhoria_com_diretrizes_novas_regenera(fake_retrieval, fake_melhoria, m
 
 def test_obter_textos_comparacao_devolve_dados_da_ultima_melhoria(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """A tool de acompanhamento devolve textos reais sem gerar arquivo novo."""
-    from sejus_project.tools import user_files
+    from sejus_project.tools.llm_tools import user_files
 
     generation._ultima_comparacao = None
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
@@ -478,7 +494,7 @@ def test_modelo_auto_selecionado_por_tipo(
 
 
 # ---------------------------------------------------------------------------
-# Montagem real (minuta.montar_docx + docx_engine)
+# Montagem real (docx_builder.montar_docx + docx_engine)
 # ---------------------------------------------------------------------------
 
 
@@ -520,9 +536,9 @@ def modelo_portaria_tmp(tmp_path):
 
 def test_montagem_preserva_formatacao_e_monta_estrutura(modelo_portaria_tmp, tmp_path):
     perfil, _ = modelo_portaria_tmp
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
 
     assert output_path.is_file()
     document = Document(str(output_path))
@@ -547,14 +563,62 @@ def test_montagem_preserva_formatacao_e_monta_estrutura(modelo_portaria_tmp, tmp
     assert titulo.runs[0].font.size == Pt(13)
 
 
+def test_montagem_preserva_titulos_de_capitulo(tmp_path):
+    """Títulos de capítulo entram no DOCX clonando a formatação do original."""
+    from sejus_project.tools.document_infra import docx_builder
+
+    document = Document()
+    document.add_paragraph("CAPÍTULO I")
+    document.add_paragraph("DAS DISPOSIÇÕES GERAIS")
+    document.add_paragraph("Art. 1º Instituir o programa.")
+    document.add_paragraph("Esta Portaria entra em vigor na data de sua publicação.")
+
+    model_path = tmp_path / "Modelo_Com_Capitulos.docx"
+    document.save(str(model_path))
+
+    perfil = PerfilModelo(
+        name="PORTARIA_CAPITULOS",
+        file=str(model_path),
+        act_types=modelos.PORTARIA.act_types,
+        patterns=modelos.PORTARIA.patterns,
+    )
+    estrutura = {
+        "numero": "PORTARIA Nº 1/2026",
+        "ementa": "Dispõe sobre o programa.",
+        "preambulo": "O Secretário de Estado de Justiça, no uso das atribuições,",
+        "considerandos": [],
+        "resolutivo": "RESOLVE:",
+        "corpo": [
+            {"tipo": "capitulo", "rotulo": "", "texto": "CAPÍTULO I"},
+            {"tipo": "capitulo", "rotulo": "", "texto": "DAS DISPOSIÇÕES GERAIS"},
+            {"rotulo": "Art. 1º", "texto": "Instituir o programa.", "subitens": []},
+        ],
+        "fechamento": [
+            {
+                "rotulo": "",
+                "texto": "Esta Portaria entra em vigor na data de sua publicação.",
+            }
+        ],
+        "local_data": "Cuiabá-MT, 8 de setembro de 2026.",
+        "assinaturas": [],
+    }
+
+    output_path = docx_builder.montar_docx(perfil, estrutura, tmp_path)
+    texts = [p.text for p in Document(str(output_path)).paragraphs]
+
+    assert "CAPÍTULO I" in texts
+    assert "DAS DISPOSIÇÕES GERAIS" in texts
+    assert texts.index("CAPÍTULO I") < texts.index("DAS DISPOSIÇÕES GERAIS") < texts.index("Art. 1º Instituir o programa.")
+
+
 def test_montagem_adiciona_vigencia_quando_faltam(fake_retrieval, modelo_portaria_tmp, tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     perfil, _ = modelo_portaria_tmp
     estrutura = ESTRUTURA.copy()
     estrutura["fechamento"] = []
 
-    output_path = minuta.montar_docx(perfil, estrutura, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, estrutura, tmp_path)
     document = Document(str(output_path))
     texts = [p.text for p in document.paragraphs]
 
@@ -562,10 +626,10 @@ def test_montagem_adiciona_vigencia_quando_faltam(fake_retrieval, modelo_portari
 
 
 def test_montagem_remove_lixo_de_diario(modelo_portaria_tmp, tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     perfil, _ = modelo_portaria_tmp
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
     document = Document(str(output_path))
     text = "\n".join(p.text for p in document.paragraphs)
 
@@ -583,7 +647,7 @@ def test_docx_placeholder_can_cross_runs(tmp_path):
     document.save(source)
 
     loaded = Document(source)
-    from sejus_project.tools.docx_templates import _replace_in_paragraph
+    from sejus_project.tools.document_infra.docx_templates import _replace_in_paragraph
 
     assert _replace_in_paragraph(loaded.paragraphs[0], {"[EMENTA]": "Limpeza"}) == 1
     assert loaded.paragraphs[0].text == "Ementa: Limpeza"
@@ -679,7 +743,7 @@ def test_detectar_tipo_ato_por_titulo(titulo, esperado):
 
 
 def test_modelo_usuario_detecta_tipo_pelo_titulo_ignorando_corpo(tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     document = Document()
     titulo = document.add_paragraph()
@@ -697,7 +761,7 @@ def test_modelo_usuario_detecta_tipo_pelo_titulo_ignorando_corpo(tmp_path):
     perfil = modelos.crear_perfil_de_arquivo(caminho, texto, "Com_Decreto_No_Corpo")
 
     assert perfil.act_types == modelos.PORTARIA.act_types
-    refs = minuta._referencias(Document(str(caminho)), perfil)
+    refs = docx_builder._referencias(Document(str(caminho)), perfil)
     assert refs["titulo"] is not None
     assert refs["preambulo"] is not None
     assert refs["artigo"] is not None
@@ -706,7 +770,7 @@ def test_modelo_usuario_detecta_tipo_pelo_titulo_ignorando_corpo(tmp_path):
 def test_modelo_usuario_preserva_moldura_do_diario(tmp_path):
     """Capturas do Diário Oficial têm cabeçalho e rodapé no corpo; a montagem
     com modelo do usuário deve preservar essa moldura e reconstruir o miolo."""
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     document = Document()
     document.add_paragraph("18 de junho de 2025")
@@ -730,7 +794,7 @@ def test_modelo_usuario_preserva_moldura_do_diario(tmp_path):
     texto = generation.extract_file_text(caminho)
     perfil = modelos.crear_perfil_de_arquivo(caminho, texto, "Modelo_Diario")
 
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
 
     texts = [p.text for p in Document(str(output_path)).paragraphs]
     assert texts[0] == "18 de junho de 2025"
@@ -795,8 +859,8 @@ def test_modelo_referencia_repassado_ao_llm(fake_retrieval, monkeypatch, tmp_pat
         document.save(str(caminho))
         return caminho
 
-    monkeypatch.setattr(generation.minuta, "gerar_estrutura_minuta", gerar_estrutura_minuta)
-    monkeypatch.setattr(generation.minuta, "montar_docx", montar_docx)
+    monkeypatch.setattr(generation.minuta_generation, "gerar_estrutura_minuta", gerar_estrutura_minuta)
+    monkeypatch.setattr(generation.docx_builder, "montar_docx", montar_docx)
 
     json.loads(
         generation.gerar_documento_normativo(
@@ -811,14 +875,14 @@ def test_modelo_referencia_repassado_ao_llm(fake_retrieval, monkeypatch, tmp_pat
 
 
 def test_montagem_com_docx_de_usuario_preserva_formatacao(tmp_path):
-    from sejus_project.tools import minuta
+    from sejus_project.tools.document_infra import docx_builder
 
     generation._modelo_usuario = None
     model_path = _salvar_docx_portaria(tmp_path)
     texto = generation.extract_file_text(model_path)
     perfil = modelos.crear_perfil_de_arquivo(model_path, texto, "Portaria_Usuario")
 
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
 
     assert output_path.is_file()
     document = Document(str(output_path))
@@ -882,3 +946,339 @@ def test_confirmacao_faca_isso_gera_pendente(fake_retrieval, fake_minuta):
 
     assert resultado["status"] == "generated"
     generation._pending_document = None
+
+
+# ---------------------------------------------------------------------------
+# Trava de precedente: lacuna so vira artigo se houver ato analogo no acervo
+# ---------------------------------------------------------------------------
+
+
+def _chunk(score, texto, fonte="fonte.docx", numero="00/2026", tipo="IN"):
+    return {
+        "act_type": tipo,
+        "act_number": numero,
+        "source_file": fonte,
+        "score": score,
+        "text": texto,
+    }
+
+
+def test_precedente_exige_score_e_palavra_chave(monkeypatch):
+    """Sem a palavra-chave do tema no trecho, score alto nao gera precedente."""
+    from sejus_project.tools.llm_tools import document_generation as gen
+
+    def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
+        return [
+            _chunk(0.60, "Art. 13 O registro terá validade de 02 (dois) anos."),
+            _chunk(0.80, "Art. 8º Trata de outra coisa, sem pistas do tema."),
+        ]
+
+    monkeypatch.setattr(gen, "retrieve", fake_retrieve)
+
+    resultado = gen._precedente_das_lacunas("INSTRUÇÃO NORMATIVA", "instrução normativa")
+
+    assert resultado["prazo_validade"]["tem_precedente"] is True
+    assert resultado["recurso_administrativo"]["tem_precedente"] is False
+    assert resultado["seguranca_epi"]["tem_precedente"] is False
+
+
+def test_precedente_sem_score_minimo_nao_passa(monkeypatch):
+    from sejus_project.tools.llm_tools import document_generation as gen
+
+    def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
+        return [
+            _chunk(0.30, "Revogam-se as disposições em contrário e os prazos de validade."),
+        ]
+
+    monkeypatch.setattr(gen, "retrieve", fake_retrieve)
+
+    resultado = gen._precedente_das_lacunas("x", "portaria")
+
+    assert resultado["prazo_validade"]["tem_precedente"] is False
+    assert resultado["revogacao"]["tem_precedente"] is False
+
+
+def test_tema_por_nome_aceita_variacoes():
+    from sejus_project.tools.llm_tools import document_generation as gen
+
+    assert gen._tema_por_nome("recurso administrativo") == "recurso_administrativo"
+    assert gen._tema_por_nome("recurso_administrativo") == "recurso_administrativo"
+    assert gen._tema_por_nome("prazo de validade") == "prazo_validade"
+    assert gen._tema_por_nome("  EPI  ") == "seguranca_epi"
+    assert gen._tema_por_nome("coisa estranha") is None
+
+
+def test_filtra_lacunas_sem_precedente():
+    from sejus_project.tools.llm_tools import document_generation as gen
+
+    precedente = {
+        "prazo_validade": {"tem_precedente": True},
+        "recurso_administrativo": {"tem_precedente": False},
+        "seguranca_epi": {"tem_precedente": False},
+    }
+    modelo = [
+        {"tema": "prazo_validade", "detalhe": "Sem prazo de validade."},
+        {"tema": "recurso administrativo", "detalhe": "Sem recurso."},
+        {"tema": "tema desconhecido", "detalhe": "Ignorado."},
+    ]
+
+    sem = gen._filtrar_lacunas_sem_precedente(modelo, precedente)
+
+    assert sem == [{"tema": "recurso_administrativo", "detalhe": "Sem recurso."}]
+
+
+def test_contexto_melhoria_dedupa_fontes_e_etiqueta_tema(monkeypatch):
+    from sejus_project.tools.llm_tools import document_generation as gen
+
+    def fake_retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
+        return [
+            _chunk(0.70, "Validade de 02 (dois) anos.", fonte="in07.docx"),
+            _chunk(0.66, "Art. 2º Obrigações do fiscal.", fonte="diario_06.docx"),
+        ]
+
+    monkeypatch.setattr(gen, "retrieve", fake_retrieve)
+
+    precedente = {
+        "prazo_validade": {
+            "tem_precedente": True,
+            "rotulo": "Prazo de validade e renovação",
+            "chunks": [
+                dict(_chunk(0.70, "Validade de 02 (dois) anos.", fonte="in07.docx"), tema="prazo_validade")
+            ],
+        },
+        "prestacao_contas": {
+            "tem_precedente": True,
+            "rotulo": "Prestação de contas e fiscalização",
+            "chunks": [
+                dict(_chunk(0.66, "Art. 2º Obrigações do fiscal.", fonte="diario_06.docx"), tema="prestacao_contas")
+            ],
+        },
+        "recurso_administrativo": {
+            "tem_precedente": False,
+            "rotulo": "Recurso administrativo / reconsideração",
+            "chunks": [],
+        },
+    }
+
+    contexto = gen._contexto_para_melhoria(
+        "Dispõe sobre artesanato em ambiente de privação de liberdade",
+        "instrução normativa",
+        "art.pdf",
+        precedente,
+    )
+
+    fontes = [c["source_file"] for c in contexto]
+    assert fontes == ["in07.docx", "diario_06.docx"]
+    temas = {c.get("tema") for c in contexto}
+    assert temas == {"prazo_validade", "prestacao_contas"}
+
+
+def test_montagem_adicao_sai_como_revisao_de_insercao(modelo_portaria_tmp, tmp_path):
+    """Artigos propostos saem rastreados (<w:ins>); artigos comuns ficam lisos."""
+    from docx.oxml.ns import qn as _qn
+    from lxml import etree
+
+    from sejus_project.tools.document_infra import docx_builder
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+    perfil, _ = modelo_portaria_tmp
+    estrutura = dict(ESTRUTURA.copy())
+    estrutura["corpo"] = [
+        {"rotulo": "Art. 1º", "texto": "Instituir o programa."},
+        {"rotulo": "Art. 1º-A", "texto": "Recurso em caso de negativa."},
+        {"rotulo": "Art. 2º", "texto": "Criar comissão."},
+    ]
+
+    output_path = docx_builder.montar_docx(
+        perfil,
+        estrutura,
+        tmp_path,
+        insercoes_rastreadas={"art. 1º-a"},
+    )
+
+    document = Document(str(output_path))
+    p_inserido = p_comum = None
+    for p in document.paragraphs:
+        texto = paragraph_text(p._element)
+        if texto.startswith("Art. 1º-A"):
+            p_inserido = p
+        elif texto.startswith("Art. 1º "):
+            p_comum = p
+
+    assert p_inserido is not None and p_comum is not None
+    xml_inserido = etree.tostring(p_inserido._element).decode("utf-8")
+    assert "<w:ins " in xml_inserido or "<w:ins>" in xml_inserido
+    assert 'w:author="editor"' in xml_inserido
+    assert p_inserido._element.find(_qn("w:ins")) is not None
+    assert p_comum._element.find(_qn("w:ins")) is None
+    assert docx_builder._AUTOR_REVISAO == "editor"
+
+
+def test_montar_docx_revisado_marca_diferencas_no_original(modelo_portaria_tmp, tmp_path):
+    """A copia revisada mantém o documento original e marca as mudanças do
+    patch: texto novo em verde (alterado/adicionado), texto antigo tachado
+    (alterado/removido), parágrafos não citados intactos."""
+    from docx.shared import RGBColor
+
+    from sejus_project.tools.document_infra import docx_builder
+
+    perfil, _ = modelo_portaria_tmp
+    alteracoes = [
+        {
+            "tipo": "alterado",
+            "rotulo": "Ementa",
+            "trecho_original": "Institui o Programa de Limpeza.",
+            "novo_texto": "Dispõe sobre o Programa de Limpeza nas unidades da SEJUS.",
+            "detalhe": "Ementa ajustada.",
+        },
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 1º",
+            "trecho_original": "Art. 1º Instituir o Programa de Limpeza nas unidades.",
+            "novo_texto": "Art. 1º Instituir o Programa de Limpeza nas unidades administrativas.",
+            "detalhe": "Redação ajustada.",
+        },
+    ]
+    remocoes = [
+        {
+            "rotulo": "Considerando",
+            "trecho_original": "CONSIDERANDO a necessidade de padronizar a rotina;",
+            "detalhe": "Texto removido.",
+        }
+    ]
+    adicoes = [
+        {
+            "o_que": "Art. 1º-A",
+            "texto": "Art. 1º-A Recurso em caso de negativa, com efeito suspensivo.",
+            "posicao": "após o art. 1º",
+            "detalhe": "Novo artigo.",
+        }
+    ]
+
+    output_path = docx_builder.montar_docx_revisado(
+        perfil, alteracoes, remocoes, adicoes, tmp_path
+    )
+
+    assert output_path.is_file()
+    document = Document(str(output_path))
+    texts = [p.text for p in document.paragraphs]
+
+    def p_por_texto(texto):
+        return next(p for p in document.paragraphs if p.text == texto)
+
+    titulo = p_por_texto("PORTARIA Nº 45/2025/GAB-SEJUS/MT")
+    assert titulo.runs[0].font.strike is None
+    assert titulo.runs[0].font.color.rgb is None
+
+    ementa_antiga = p_por_texto("Institui o Programa de Limpeza.")
+    assert ementa_antiga.runs[0].font.strike is True
+    ementa_nova = p_por_texto("Dispõe sobre o Programa de Limpeza nas unidades da SEJUS.")
+    assert ementa_nova.runs[0].font.color.rgb == RGBColor(0x2E, 0x7D, 0x32)
+    assert texts.index(ementa_nova.text) > texts.index(ementa_antiga.text)
+
+    removido = p_por_texto("CONSIDERANDO a necessidade de padronizar a rotina;")
+    assert removido.runs[0].font.strike is True
+
+    art_antigo = p_por_texto("Art. 1º Instituir o Programa de Limpeza nas unidades.")
+    assert art_antigo.runs[0].font.strike is True
+    art_novo = p_por_texto(
+        "Art. 1º Instituir o Programa de Limpeza nas unidades administrativas."
+    )
+    assert art_novo.runs[0].font.color.rgb == RGBColor(0x2E, 0x7D, 0x32)
+    assert texts.index(art_novo.text) > texts.index(art_antigo.text)
+
+    inciso = p_por_texto("I - padronizar os procedimentos diários;")
+    assert inciso.runs[0].font.strike is None
+    assert inciso.runs[0].font.color.rgb is None
+
+    paragrafo = p_por_texto("§ 1º O programa abrange as unidades administrativas da SEJUS.")
+    assert paragrafo.runs[0].font.strike is None
+
+    art_novo_a = p_por_texto("Art. 1º-A Recurso em caso de negativa, com efeito suspensivo.")
+    assert art_novo_a.runs[0].font.color.rgb == RGBColor(0x2E, 0x7D, 0x32)
+    assert texts.index(art_novo_a.text) > texts.index(inciso.text)
+    assert texts.index(art_novo_a.text) < texts.index(
+        "Esta Portaria entra em vigor na data de sua publicação."
+    )
+
+
+def test_chave_linha_normaliza_tipografia():
+    """Travessões/hífens e aspas curvas são equivalentes na comparação."""
+    assert docx_builder._chave_linha("I – padronizar os procedimentos;") == docx_builder._chave_linha(
+        "I - padronizar os procedimentos;"
+    )
+    assert docx_builder._chave_linha("Art. 3º “conteúdo”") == docx_builder._chave_linha(
+        "Art. 3º \"conteúdo\""
+    )
+    assert docx_builder._chave_linha("a–b—c‒d‑e−f") == docx_builder._chave_linha("a-b-c-d-e-f")
+    assert docx_builder._chave_linha("  Várias   palavras\tseparam ") == docx_builder._chave_linha(
+        "Várias palavras separam"
+    )
+
+
+def test_melhoria_integra_adicoes_estruturais_no_corpo():
+    """Adições com rótulo e texto entram no corpo na posição correta."""
+    estrutura = {
+        "numero": "PORTARIA Nº 1/2026",
+        "corpo": [
+            {"tipo": "artigo", "rotulo": "Art. 1º", "texto": "Primeiro.", "subitens": []},
+            {"tipo": "artigo", "rotulo": "Art. 2º", "texto": "Segundo.", "subitens": []},
+        ],
+    }
+    adicoes = [
+        {"o_que": "Art. 2º-A", "texto": "NOVO artigo de recurso.", "posicao": "após o art. 2º"},
+        {"o_que": "Art. 9º", "texto": "ANEXO ao final."},
+        {"o_que": "Art. 2º", "texto": "já existe no corpo", "posicao": "após o art. 1º"},
+        {"o_que": "Art. 3º", "posicao": "sem texto completo"},
+    ]
+
+    inseridos = generation._integrar_adicoes_estruturais(estrutura, adicoes)
+
+    rotulos = [item["rotulo"] for item in estrutura["corpo"]]
+    assert rotulos == ["Art. 1º", "Art. 2º", "Art. 2º-A", "Art. 9º"]
+    assert estrutura["corpo"][2]["texto"] == "NOVO artigo de recurso."
+    assert inseridos == {"art. 2º-a", "art. 9º"}
+
+
+def test_melhoria_integra_por_posicao_quando_sem_ancora_de_rotulo():
+    """Sem artigo-base no corpo, a posição sai do número citado em 'posicao'."""
+    estrutura = {
+        "corpo": [
+            {"tipo": "capitulo", "rotulo": "", "texto": "CAPÍTULO I"},
+            {"tipo": "artigo", "rotulo": "Art. 1º", "texto": "Primeiro.", "subitens": []},
+        ]
+    }
+    inseridos = generation._integrar_adicoes_estruturais(
+        estrutura,
+        [{"o_que": "Art. 6º-A", "texto": "Recurso em caso de negativa.", "posicao": "após o art. 1º"}],
+    )
+
+    assert inseridos == {"art. 6º-a"}
+    assert [i.get("rotulo") or i.get("texto") for i in estrutura["corpo"]] == [
+        "CAPÍTULO I",
+        "Art. 1º",
+        "Art. 6º-A",
+    ]
+
+
+def test_merge_de_adicoes_reflete_na_comparacao_do_turno(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """A prévia 'depois' e o rótulo passado ao montar refletem o artigo novo."""
+    from sejus_project.tools.llm_tools import user_files
+
+    generation._ultima_minuta = None
+    generation._ultima_comparacao = None
+    generation._melhoria_no_turno = False
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato.txt").write_text(
+        "PORTARIA Nº 1/2026\nDispõe sobre limpeza.\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(generation.melhorar_documento_usuario("ato.txt"))
+
+    assert result["status"] == "improved"
+    comparacao = generation.ultima_comparacao()
+    assert "Recurso em caso de negativa" in comparacao["depois"]
+    estrutura_saida = generation.ultima_minuta()["estructura"]
+    rotulos = [i["rotulo"] for i in estrutura_saida["corpo"]]
+    assert "Art. 6º-A" in rotulos

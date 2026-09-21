@@ -2,9 +2,9 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
 
-from sejus_project.tools import document_generation as generation
-from sejus_project.tools import minuta, modelos
-from sejus_project.tools.render_docx import docx_para_html
+from sejus_project.tools.document_infra import docx_builder, modelos
+from sejus_project.tools.document_infra.render_docx import docx_para_html
+from sejus_project.tools.llm_tools import document_generation as generation
 
 ESTRUTURA = {
     "numero": "PORTARIA Nº 001/2026/GAB-SEJUS/MT",
@@ -96,7 +96,7 @@ def test_preview_end_to_end_igual_output(tmp_path):
 
     texto = generation.extract_file_text(caminho)
     perfil = modelos.crear_perfil_de_arquivo(caminho, texto, "Modelo_Diario")
-    output_path = minuta.montar_docx(perfil, ESTRUTURA, tmp_path)
+    output_path = docx_builder.montar_docx(perfil, ESTRUTURA, tmp_path)
 
     html = docx_para_html(output_path)
 

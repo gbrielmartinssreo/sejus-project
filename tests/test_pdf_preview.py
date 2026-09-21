@@ -1,7 +1,7 @@
 import pytest
 from docx import Document
 
-from sejus_project.tools import pdf_preview
+from sejus_project.tools.document_infra import pdf_preview
 
 pytestmark = pytest.mark.skipif(
     not pdf_preview.soffice_disponivel(),

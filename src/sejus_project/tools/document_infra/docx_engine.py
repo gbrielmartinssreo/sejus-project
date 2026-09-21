@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import re
+from datetime import UTC
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -24,7 +25,14 @@ def all_paragraphs(document: Document) -> list:
 
 def paragraph_text(w_p) -> str:
     """Texto completo de um elemento ``w:p``."""
-    return "".join((t.text or "") for t in w_p.iter(qn("w:t")))
+    # Normaliza: se for CT_P com _element, usa o _element subjacente
+    if hasattr(w_p, "_element") and w_p._element is not None:
+        w_p = w_p._element
+    # Tenta extrair texto do elemento XML; se w_p ja for um elemento com metodo iter, usa-o
+    if hasattr(w_p, "iter"):
+        return "".join((t.text or "") for t in w_p.iter(qn("w:t")))
+    # Fallback: retorna string vazia ou o que conseguir converter
+    return str(w_p) if w_p else ""
 
 
 def find_reference(w_paragraphs: list, pattern: str):
@@ -111,3 +119,42 @@ def append_paragraph(body, w_p) -> None:
         sect_pr.addprevious(w_p)
     else:
         body.append(w_p)
+
+
+def assinalar_insercao(w_p, ins_id: int, author: str, date: str | None = None) -> None:
+    """Envolve os runs de um ``w:p`` num ``<w:ins>`` (track changes do Word).
+
+    A insercao passa a depender de aceitacao do revisor antes de publicar.
+    ``ins_id`` deve ser unico em todo o documento. ``date`` segue ISO 8601
+    (padrao do OOXML, ex.: ``2026-09-16T16:00:00Z``)."""
+    from datetime import datetime
+
+    runs = [r for r in w_p.findall(qn("w:r"))]
+    if not runs:
+        return
+    if not date:
+        date = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for run in runs:
+        ins = w_p.makeelement(
+            qn("w:ins"),
+            {qn("w:id"): str(ins_id), qn("w:author"): author, qn("w:date"): date},
+        )
+        w_p.replace(run, ins)
+        ins.append(run)
+
+
+def verde(w_p, hex_color: str = "2E7D32") -> None:
+    """Pinta todos os runs de um ``w:p`` numa cor de destaque (texto adicionado)."""
+    from docx.shared import RGBColor
+
+    cor = RGBColor.from_string(hex_color)
+    for run in w_p.findall(qn("w:r")):
+        rPr = run.get_or_add_rPr()
+        rPr.get_or_add_color().val = cor
+
+
+def tachar(w_p) -> None:
+    """Aplica tachado em todos os runs de um ``w:p`` (texto removido/recomposto)."""
+    for run in w_p.findall(qn("w:r")):
+        rPr = run.get_or_add_rPr()
+        rPr.get_or_add_strike().val = True

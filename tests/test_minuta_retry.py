@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from sejus_project.tools import minuta
+from sejus_project.tools.llm_tools import minuta_generation as minuta
 
 
 class _FakeFunction:
@@ -62,6 +62,85 @@ def test_retry_parse_succeeds_after_initial_truncation(monkeypatch):
     assert resultado == json.loads(_VALID_ARGS)
     assert chamadas[0] == 4096
     assert chamadas[1] == 8192
+
+
+def test_retry_preservar_completo_nao_manda_reduzir(monkeypatch):
+    """No modo preservar_completo (melhoria/patch), o retry pede a lista de
+    mudanças completa, sem falar em reduzir o corpo."""
+    capturado = {"tool": None}
+    calls = [0]
+
+    def fake_perguntar(mensagens, tools, **kwargs):
+        calls[0] += 1
+        for m in mensagens:
+            if m.get("role") == "tool":
+                capturado["tool"] = m["content"]
+        if calls[0] == 1:
+            return _FakeResponse(_FakeMessage([_FakeToolCall("c1", "x", _TRUNCATED_ARGS)]))
+        return _FakeResponse(_FakeMessage([_FakeToolCall("c2", "x", _VALID_ARGS)]))
+
+    monkeypatch.setattr(minuta, "perguntar", fake_perguntar)
+
+    minuta._extrair_json_com_retry(
+        [{"role": "user", "content": "pedido"}],
+        _TOOL_DEF,
+        max_tokens=4096,
+        preservar_completo=True,
+    )
+
+    mensagem = capturado["tool"]
+    assert "COMPLETA" in mensagem
+    assert "trecho_original" in mensagem
+    assert "reduzindo" not in mensagem
+
+
+def test_retry_clampa_max_tokens_no_teto_do_modelo(monkeypatch):
+    """O retry de JSON truncado nunca dobra além do teto do modelo (evita
+    erro 400 da API)."""
+    chamadas = []
+    first = {"v": False}
+
+    def fake_perguntar(mensagens, tools, **kwargs):
+        chamadas.append(kwargs.get("max_tokens"))
+        if not first["v"]:
+            first["v"] = True
+            return _FakeResponse(_FakeMessage([_FakeToolCall("c1", "x", _TRUNCATED_ARGS)]))
+        return _FakeResponse(_FakeMessage([_FakeToolCall("c2", "x", _VALID_ARGS)]))
+
+    monkeypatch.setattr(minuta, "perguntar", fake_perguntar)
+
+    minuta._extrair_json_com_retry(
+        [{"role": "user", "content": "pedido"}],
+        _TOOL_DEF,
+        max_tokens=12000,
+    )
+
+    assert chamadas == [12000, 16384]
+
+
+def test_retry_padrao_ainda_manda_reduzir_corpo(monkeypatch):
+    """Sem preservar_completo, o comportamento atual (reduzir corpo) é mantido."""
+    capturado = {"tool": None}
+    calls = [0]
+
+    def fake_perguntar(mensagens, tools, **kwargs):
+        calls[0] += 1
+        for m in mensagens:
+            if m.get("role") == "tool":
+                capturado["tool"] = m["content"]
+        if calls[0] == 1:
+            return _FakeResponse(_FakeMessage([_FakeToolCall("c1", "x", _TRUNCATED_ARGS)]))
+        return _FakeResponse(_FakeMessage([_FakeToolCall("c2", "x", _VALID_ARGS)]))
+
+    monkeypatch.setattr(minuta, "perguntar", fake_perguntar)
+
+    minuta._extrair_json_com_retry(
+        [{"role": "user", "content": "pedido"}],
+        _TOOL_DEF,
+        max_tokens=4096,
+    )
+
+    assert "reduzindo" in capturado["tool"]
 
 
 def test_retry_injects_tool_feedback_into_messages(monkeypatch):

@@ -7,10 +7,11 @@ import json
 import re
 from pathlib import Path
 
-from sejus_project.tools import minuta, modelos
-from sejus_project.tools.docx_templates import OUTPUTS_DIR
-from sejus_project.tools.retrieval import retrieve
-from sejus_project.tools.user_files import (
+from sejus_project.tools.document_infra import docx_builder, modelos
+from sejus_project.tools.document_infra.docx_templates import OUTPUTS_DIR
+from sejus_project.tools.llm_tools import document_improvement, minuta_generation
+from sejus_project.tools.llm_tools.retrieval import retrieve
+from sejus_project.tools.llm_tools.user_files import (
     UserFileError,
     _list_available_files,
     _resolve_file,
@@ -26,6 +27,253 @@ _gerada_no_turno: bool = False
 _pendencia_mudou_no_turno: bool = False
 _melhoria_no_turno: bool = False
 _ultima_comparacao: dict | None = None
+
+# Persistência de propostas (aceites/rejeitadas/ aplicadas)
+# Armazenado em arquivo JSON para sobrevivência entre reinicializações do servidor.
+# Cada proposta tem ID próprio (UUID), associado a (doc_hash, rotulo, versao, localizacao).
+PROPOSTAS_ARQUIVO = Path(__file__).parent / "propostas_estado.json"
+
+# Estado de uma proposta individual
+ESTADO_PENDENTE = "pendente"
+ESTADO_ACEITA = "aceita"
+ESTADO_REJEITADA = "rejeitada"
+ESTADO_APLICADA = "aplicada"
+
+# Cache em memória (válido para a conversa atual)
+_propostas_cache: dict | None = None
+
+
+def _caminho_arquivo_propostas() -> Path:
+    """Retorna o caminho do arquivo de persistência de propostas."""
+    return PROPOSTAS_ARQUIVO
+
+
+def _carregar_propostas_disc() -> dict:
+    """Carrega dicionário de propostas do arquivo JSON na disco."""
+    if _caminho_arquivo_propostas().is_file():
+        try:
+            with open(_caminho_arquivo_propostas(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _salvar_propostas_disc(propostas: dict):
+    """Salva dicionário de propostas no arquivo JSON na disco."""
+    with open(_caminho_arquivo_propostas(), "w", encoding="utf-8") as f:
+        json.dump(propostas, f, ensure_ascii=False, indent=2)
+
+
+def _hash_documento(caminho: str) -> str:
+    """Calcula o hash SHA-1 do conteúdo do documento."""
+    from sejus_project.tools.llm_tools.user_files import extract_file_text
+    try:
+        texto = extract_file_text(Path(caminho))
+        return hashlib.sha1(texto.encode("utf-8", "ignore")).hexdigest()
+    except Exception:
+        return ""
+
+
+def _gerar_id_proposta(doc_hash: str, rotulo: str, versao: str, localizacao: str) -> str:
+    """Gera um ID estável para a proposta usando os campos identificadores."""
+    chave = f"{doc_hash}|{rotulo.strip().lower()}|{versao.strip().lower()}|{localizacao.strip().lower()}"
+    return hashlib.sha256(chave.encode("utf-8")).hexdigest()
+
+
+def proposicao_para_dict(proposal_id: str, doc_hash: str, rotulo: str,
+                         versao: str, localizacao: str, estado: str,
+                         proposta_texto: str, justificativa: str = "",
+                         fonte: str = "") -> dict:
+    """Converte os dados da proposta dicionário para armazenamento."""
+    return {
+        "proposal_id": proposal_id,
+        "doc_hash": doc_hash,
+        "rotulo": rotulo,
+        "versao": versao,
+        "localizacao": localizacao,
+        "estado": estado,
+        "proposta_texto": proposta_texto,
+        "justificativa": justificativa,
+        "fonte": fonte,
+    }
+
+
+def dict_para_proposta(dado: dict) -> dict:
+    """Converte dicionário de volta para estrutura de proposta."""
+    return {
+        "proposal_id": dado.get("proposal_id", ""),
+        "doc_hash": dado.get("doc_hash", ""),
+        "rotulo": dado.get("rotulo", ""),
+        "versao": dado.get("versao", ""),
+        "localizacao": dado.get("localizacao", ""),
+        "estado": dado.get("estado", ESTADO_PENDENTE),
+        "proposta_texto": dado.get("proposta_texto", ""),
+        "justificativa": dado.get("justificativa", ""),
+        "fonte": dado.get("fonte", ""),
+    }
+
+
+def iniciar_conversa_propostas():
+    """Inicializa o cache de propostas para a nova conversa."""
+    global _propostas_cache
+    _propostas_cache = _carregar_propostas_disc()
+
+
+def finalizar_conversa_propostas():
+    """Salva o cache de volta ao disco ao encerrar a conversa."""
+    global _propostas_cache
+    if _propostas_cache is not None:
+        _salvar_propostas_disc(_propostas_cache)
+    _propostas_cache = None
+
+
+def proposicao_id_para_chave(doc_hash: str, rotulo: str, versao: str, localizacao: str) -> str:
+    """Retorna a chave de lookup no dicionário de propostas."""
+    return _gerar_id_proposta(doc_hash, rotulo, versao, localizacao)
+
+
+def procurar_proposta(doc_hash: str, rotulo: str, versao: str, localizacao: str) -> dict | None:
+    """Busca uma proposta pelos seus identificadores associados."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+    chave = proposicao_id_para_chave(doc_hash, rotulo, versao, localizacao)
+    return _propostas_cache.get(chave)
+
+
+def aceitar_proposta(documento_caminho: str, rotulo: str, versao: str, localizacao: str,
+                     proposta_texto: str, justificativa: str = "", fonte: str = "") -> str:
+    """Marca uma proposta como aceita. Se já existir com mesmo ID, atualiza.
+    Retorna o proposal_id."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    doc_hash = _hash_documento(documento_caminho)
+    chave = proposicao_id_para_chave(doc_hash, rotulo, versao, localizacao)
+    proposta_id = chave
+
+    proposta_atual = _propostas_cache.get(chave)
+    if proposta_atual and proposta_atual.get("estado") == ESTADO_ACEITA:
+        # Já estava aceita; apenas atualiza o texto se mudou
+        proposta_atual["proposta_texto"] = proposta_texto
+        proposta_atual["justificativa"] = justificativa
+        proposta_atual["fonte"] = fonte
+        _propostas_cache[chave] = proposta_atual
+        _salvar_propostas_disc(_propostas_cache)
+        return proposta_id
+
+    # Cria ou atualiza proposta com estado aceita
+    proposta_id = chave
+    nova_proposta = proposicao_para_dict(
+        proposta_id, doc_hash, rotulo, versao, localizacao,
+        ESTADO_ACEITA, proposta_texto, justificativa, fonte)
+    _propostas_cache[chave] = nova_proposta
+    _salvar_propostas_disc(_propostas_cache)
+    return proposta_id
+
+
+def rejeitar_proposta(documento_caminho: str, rotulo: str, versao: str, localizacao: str) -> str:
+    """Marca uma proposta como rejeitada. Retorna o proposal_id."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    doc_hash = _hash_documento(documento_caminho)
+    chave = proposicao_id_para_chave(doc_hash, rotulo, versao, localizacao)
+
+    # Remove do cache e do disco se existir
+    if chave in _propostas_cache:
+        del _propostas_cache[chave]
+    _salvar_propostas_disc(_propostas_cache)  # estoque limpo (remove a entrada)
+
+    # Também remove do arquivo se estiver lá
+    todas = _carregar_propostas_disc()
+    if chave in todas:
+        del todas[chave]
+    _salvar_propostas_disc(todas)
+
+    return chave
+
+
+def listar_propostas(filtro_estado: str | None = None) -> list[dict]:
+    """Lista propostas, opcionalmente filtradas por estado."""
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    resultados = list(_propostas_cache.values())
+    if filtro_estado:
+        resultados = [p for p in resultados if p.get("estado") == filtro_estado]
+    return resultados
+
+
+def aplicar_alteracoes_selecionadas(filename: str) -> dict:
+    """Aplica apenas as propostas marcadas como 'aceita'.
+
+    Retorna um dicionário com o status e caminhos dos arquivos resultantes.
+    Apenas alteracoes com estado 'aceita' sao gravadas no documento.
+    """
+    global _propostas_cache
+    if _propostas_cache is None:
+        iniciar_conversa_propostas()
+
+    aceitas = listar_propostas(ESTADO_ACEITA)
+
+    if not aceitas:
+        return {
+            "status": "nenhuma_aceita",
+            "mensagem": "Nenhuma proposta foi aceita. Use 'aceitar_proposta' para marcar alteracoes.",
+            "output_path": None,
+        }
+
+    # Carrega o documento original e estrutura
+    from sejus_project.tools.document_infra import docx_builder
+    from sejus_project.tools.llm_tools import document_improvement as minuta
+    from sejus_project.tools.llm_tools.user_files import extract_file_text
+
+    conteudo = extract_file_text(Path(filename))
+    tipo_ato = modelos.detectar_tipo_ato(conteudo)
+    perfil = modelos.crear_perfil_de_arquivo(Path(filename), conteudo, Path(filename).stem)
+
+    # Gera nova estrutura considering only aceitas
+    # Regenerar o patch com apenas as alteracoes aceitas
+    _estrutura, alt, rem, adicoo, _lac = minuta.gerar_estrutura_melhoria(
+        conteudo, tipo_ato, perfil, [], {"diretrizes": "Aplicar apenas alteracoes aceitas"}
+    )
+
+    # Marcar alteracoes aceitas no documento
+    for a in alt:
+        if a.get("estado") == ESTADO_ACEITA:
+            a["aplicada"] = True
+
+    output_path = docx_builder.montar_docx_revisado(
+        perfil, alt, rem, adicoo, OUTPUTS_DIR
+    )
+
+    return {
+        "status": "aplicado",
+        "mensagem": f"{len(alt)} alteracoes, {len(rem)} remocoes e {len(adicoo)} adicoes estruturais aplicadas.",
+        "output_path": str(output_path),
+        "total_aceitas": len(alt),
+        "total_remocoes": len(rem),
+        "total_adicoes": len(adicoo),
+    }
+
+
+def proposta_para_texto(proposta: dict) -> str:
+    """Formata uma proposta para exibicao no chat."""
+    partes = []
+    if proposta.get("rotulo"):
+        partes.append(f"**{proposta['rotulo']}**")
+    if proposta.get("proposta_texto"):
+        partes.append(proposta["proposta_texto"][:500] + ("..." if len(proposta["proposta_texto"]) > 500 else ""))
+    if proposta.get("justificativa"):
+        partes.append(f"*Justificativa: {proposta['justificativa'][:200]}*")
+    if proposta.get("fonte"):
+        partes.append(f"*Fonte: {proposta['fonte']}*")
+    return "  \n".join(partes)
 
 # Teto de tamanho do pedido para nao estourar contexto indefinidamente.
 MAX_REQUEST_CHARS = 40_000
@@ -372,7 +620,7 @@ def _gerar_e_relatar(request, perfil, contexto, values):
     global _ultima_minuta, _gerada_no_turno
     tipo = perfil.act_types[0]
     modelo_referencia = (_modelo_usuario or {}).get("texto")
-    estrutura = minuta.gerar_estrutura_minuta(
+    estrutura = minuta_generation.gerar_estrutura_minuta(
         request,
         tipo,
         perfil,
@@ -380,7 +628,7 @@ def _gerar_e_relatar(request, perfil, contexto, values):
         values,
         modelo_referencia=modelo_referencia,
     )
-    output_path = minuta.montar_docx(perfil, estrutura, OUTPUTS_DIR)
+    output_path = docx_builder.montar_docx(perfil, estrutura, OUTPUTS_DIR)
     _ultima_minuta = {
         "estructura": estrutura,
         "modelo": perfil.name,
@@ -552,7 +800,9 @@ comparacao_definition = {
         "description": (
             "Recupera os dados da ultima melhoria antes/depois ja feita na "
             "conversa: textos REAIS alterados (campos 'antes' e 'depois'), a "
-            "lista de alteracoes e o nome do arquivo original. Use somente em "
+            "lista de correcoes, as adicoes estruturais propostas (artigos "
+            "novos, com posicao e lastro), as lacunas sem precedente e o nome "
+            "do arquivo original. Use somente em "
             "perguntas de acompanhamento sobre uma melhoria ja feita (ex.: "
             "'o que exatamente foi alterado', 'mostre antes e depois', 'mostre "
             "os textos alterados', 'monte uma tabela do antes/depois'). NAO gere "
@@ -562,6 +812,191 @@ comparacao_definition = {
         "parameters": {"type": "object", "properties": {}},
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Trava de precedente: lacuna so vira artigo novo se houver ato analogo no
+# acervo. o 'chaves' ancora o tema num trecho recuperado -- sem a palavra-
+# chave no texto, o score da busca nao basta para gerar artigo.
+# ---------------------------------------------------------------------------
+
+PRECEDENTE_MIN_SCORE = 0.45
+PRECEDENTE_TOP = 6
+CONTEXTO_MELHORIA_MAX = 24
+
+LACUNAS_ESTRUTURAIS = [
+    {
+        "tema": "recurso_administrativo",
+        "rotulo": "Recurso administrativo / reconsideração",
+        "query": (
+            "recurso administrativo pedido de reconsideração contra decisão "
+            "fundamentada de autoridade que vedar negar técnica material"
+        ),
+        "chaves": re.compile(r"recurso|reconsidera", re.IGNORECASE),
+    },
+    {
+        "tema": "prazo_validade",
+        "rotulo": "Prazo de validade e renovação",
+        "query": (
+            "prazo de validade da autorização registro suspensão renovação cadastro"
+        ),
+        "chaves": re.compile(r"validade|renova|revalid", re.IGNORECASE),
+    },
+    {
+        "tema": "prestacao_contas",
+        "rotulo": "Prestação de contas e fiscalização",
+        "query": (
+            "prestação de contas fiscalização obrigações do fiscal insumo "
+            "fornecido recurso público"
+        ),
+        "chaves": re.compile(r"presta[çc][aã]o|fiscaliz", re.IGNORECASE),
+    },
+    {
+        "tema": "revogacao",
+        "rotulo": "Revogação de norma anterior",
+        "query": (
+            "revogação de disposições em contrário normas anteriores sobre o mesmo objeto"
+        ),
+        "chaves": re.compile(r"revog", re.IGNORECASE),
+    },
+    {
+        "tema": "seguranca_epi",
+        "rotulo": "Segurança do trabalho / EPI",
+        "query": (
+            "equipamento de proteção individual segurança do trabalho atividade de risco"
+        ),
+        "chaves": re.compile(
+            r"prote[çc][aã]o individual|\bepi\b|equipamento de prote",
+            re.IGNORECASE,
+        ),
+    },
+    {
+        "tema": "publicacao_vigencia",
+        "rotulo": "Publicação e vigência",
+        "query": "entrada em vigor publicação diário oficial regime de vigência",
+        "chaves": re.compile(
+            r"entra em vigor|publique|di[áa]rio oficial|vig[êe]ncia", re.IGNORECASE
+        ),
+    },
+]
+
+_SIMPLES_TEXTO = re.compile(r"\s+")
+
+_STOP = {"de", "da", "do", "das", "dos", "em", "no", "na", "a", "o", "e"}
+
+
+def _tema_por_nome(nome: str) -> str | None:
+    """Mapeia o nome de tema escrito pelo modelo para a chave canônica."""
+    texto = _SIMPLES_TEXTO.sub(
+        " ", (nome or "").strip().casefold().replace("_", " ").replace("-", " ")
+    )
+    if not texto:
+        return None
+    palavras = set(texto.split())
+    for lacuna in LACUNAS_ESTRUTURAIS:
+        chave = lacuna["tema"].replace("_", " ")
+        if texto == chave:
+            return lacuna["tema"]
+        nucleo = {p for p in chave.split() if p not in _STOP}
+        if nucleo and nucleo <= palavras:
+            return lacuna["tema"]
+        if chave in texto or texto in chave:
+            return lacuna["tema"]
+    return None
+
+
+def _precedente_das_lacunas(conteudo: str, tipo_ato: str) -> dict:
+    """Avalia, por lacuna, se o acervo tem precedente analogo.
+
+    Devolve por tema um dict com ``rotulo``, ``tem_precedente`` e ``chunks``
+    (trechos de suporte com a palavra-chave e score acima do limiar). Usa
+    somente a leitura do indice Qdrant (nao chama LLM)."""
+    resultado = {}
+    for lacuna in LACUNAS_ESTRUTURAIS:
+        chunks = retrieve(lacuna["query"], limit=PRECEDENTE_TOP)
+        suporte = [
+            {**c, "tema": lacuna["tema"]}
+            for c in chunks
+            if c.get("score", 0) >= PRECEDENTE_MIN_SCORE
+            and lacuna["chaves"].search(c.get("text") or "")
+        ]
+        resultado[lacuna["tema"]] = {
+            "rotulo": lacuna["rotulo"],
+            "tem_precedente": bool(suporte),
+            "chunks": suporte,
+        }
+    return resultado
+
+
+def _assunto_do_documento(conteudo: str) -> str:
+    """Pequena base textual do documento (ementa) para a query de assunto."""
+    for linha in (conteudo or "").splitlines():
+        linha = linha.strip()
+        if not linha:
+            continue
+        if linha.casefold().startswith("disp"):
+            return linha[:300]
+        return linha[:300]
+    return ""
+
+
+def _contexto_para_melhoria(
+    conteudo: str,
+    tipo_ato: str,
+    filename: str,
+    precedente: dict,
+) -> list[dict]:
+    """Monta o contexto RAG da melhoria: temas com precedente + assunto.
+
+    Consulta o acervo pelo assunto do documento e reaproveita os chunks de
+    suporte dos temas aprovados pela trava (ja rotulados por tema), sem
+    duplicar fontes (dedupe por ``source_file``). Os chunks rotulados entram
+    primeiro: quando a mesma fonte aparece no assunto, a etiqueta de tema
+    precisa prevalecer para embasar a adicao."""
+    chunks: list[dict] = []
+    vistos: set[str] = set()
+
+    for info in precedente.values():
+        if not info.get("tem_precedente"):
+            continue
+        for chunk in info.get("chunks", []):
+            fonte = chunk.get("source_file")
+            if fonte in vistos:
+                continue
+            vistos.add(fonte)
+            chunks.append(chunk)
+            if len(chunks) >= CONTEXTO_MELHORIA_MAX:
+                return chunks
+
+    assunto = _assunto_do_documento(conteudo)
+    if assunto:
+        for chunk in retrieve(
+            f"{assunto}\nTipo de ato: {tipo_ato}", limit=8
+        ):
+            fonte = chunk.get("source_file")
+            if fonte in vistos:
+                continue
+            vistos.add(fonte)
+            chunks.append(chunk)
+            if len(chunks) >= CONTEXTO_MELHORIA_MAX:
+                return chunks
+    return chunks
+
+
+def _filtrar_lacunas_sem_precedente(lacunas_do_modelo: list[dict], precedente: dict) -> list[dict]:
+    """Mantem apenas as lacunas que o modelo viu como pertinentes e que nao
+    passaram na trava de precedente (mostradas no relatorio como informacao)."""
+    sem = []
+    for lacuna in lacunas_do_modelo:
+        tema = _tema_por_nome(lacuna.get("tema"))
+        if tema and not precedente.get(tema, {}).get("tem_precedente"):
+            sem.append(
+                {
+                    "tema": tema,
+                    "detalhe": (lacuna.get("detalhe") or "").strip()[:400],
+                }
+            )
+    return sem
 
 
 def obter_textos_comparacao() -> str:
@@ -587,12 +1022,86 @@ def obter_textos_comparacao() -> str:
             "status": "ok",
             "arquivo_original": dados.get("arquivo_original"),
             "alteracoes": dados.get("alteracoes") or [],
+            "adicoes_estruturais": dados.get("adicoes_estruturais") or [],
+            "lacunas": dados.get("lacunas") or [],
             "textos": dados.get("textos") or [],
             "antes": (dados.get("antes") or "")[:12_000],
             "depois": (dados.get("depois") or "")[:12_000],
         },
         ensure_ascii=False,
     )
+
+
+def _numero_base_rotulo(rotulo: str) -> str | None:
+    """Extrai o número-base do rótulo de um artigo ('Art. 6º-A' -> '6')."""
+    m = re.match(r"^\s*art\.?\s*(\d+)", rotulo or "", re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _indice_insercao_artigo(corpo: list, rotulo: str, posicao: str) -> int:
+    """Índice do `corpo` onde inserir um artigo novo.
+
+    Primeiro tenta a âncora pelo número-base do rótulo (sufixo LC 95/1998:
+    'Art. 6º-A' vai logo após o último 'Art. 6º'). Sem âncora, tenta o número
+    citado em ``posicao``; se nada casar, anexa ao fim do corpo.
+    """
+    base = _numero_base_rotulo(rotulo)
+    if base:
+        for i in range(len(corpo) - 1, -1, -1):
+            item = corpo[i]
+            if (item.get("tipo") or "artigo") == "capitulo":
+                continue
+            if _numero_base_rotulo(item.get("rotulo") or "") == base:
+                return i + 1
+    for num in re.findall(r"\d+", posicao or ""):
+        for i in range(len(corpo) - 1, -1, -1):
+            item = corpo[i]
+            if (item.get("tipo") or "artigo") == "capitulo":
+                continue
+            if _numero_base_rotulo(item.get("rotulo") or "") == num:
+                return i + 1
+    return len(corpo)
+
+
+def _integrar_adicoes_estruturais(estrutura: dict, adicoes: list) -> set[str]:
+    """Mescla ``adicoes_estruturais`` dentro de ``estrutura['corpo']``.
+
+    Para cada adição com rótulo e texto, insere um artigo novo no corpo na
+    posição correta (após o artigo-base; fallback segue o número citado em
+    ``posicao``; senão, no fim). Adições cujo rótulo já existe no corpo (o
+    modelo já as incluiu) ou sem texto completo são ignoradas. Devolve os
+    rótulos normalizados efetivamente inseridos.
+    """
+    inseridos: set[str] = set()
+    corpo = estrutura.setdefault("corpo", [])
+    presentes = {
+        docx_builder._chave_rotulo(item.get("rotulo") or "")
+        for item in corpo
+        if (item.get("tipo") or "artigo") != "capitulo"
+        and (item.get("rotulo") or "").strip()
+    }
+    for a in adicoes:
+        if not isinstance(a, dict):
+            continue
+        rotulo = (a.get("o_que") or "").strip()
+        if not rotulo:
+            continue
+        chave = docx_builder._chave_rotulo(rotulo)
+        if chave in presentes:
+            continue
+        texto = (a.get("texto") or "").strip()
+        if not texto:
+            continue
+        artigo = {
+            "tipo": "artigo",
+            "rotulo": rotulo,
+            "texto": texto,
+            "subitens": [],
+        }
+        corpo.insert(_indice_insercao_artigo(corpo, rotulo, a.get("posicao") or ""), artigo)
+        presentes.add(chave)
+        inseridos.add(chave)
+    return inseridos
 
 
 def _melhorar_e_relatar(
@@ -604,19 +1113,59 @@ def _melhorar_e_relatar(
     contexto: list[dict],
     diretrizes: str | None,
     outros: list[str] | None = None,
+    precedente: dict | None = None,
 ) -> str:
     global _ultima_minuta, _melhoria_no_turno, _ultima_comparacao, _gerada_no_turno
     valores = {"diretrizes": diretrizes} if diretrizes else None
-    estrutura, alteracoes = minuta.gerar_estrutura_melhoria(
+    estrutura, alteracoes, remocoes, adicoes, lacunas = document_improvement.gerar_estrutura_melhoria(
         conteudo,
         tipo_ato,
         perfil,
         contexto,
         valores,
     )
-    output_path = minuta.montar_docx(perfil, estrutura, OUTPUTS_DIR)
+    # Persistir propostas com estado pendente
+    doc_hash = _hash_documento(filename)
+    for a in alteracoes:
+        if a.get("estado") == ESTADO_PENDENTE and a.get("rotulo") and a.get("localizacao"):
+            procurar_proposta(doc_hash, a["rotulo"], a.get("versao", ""), a["localizacao"])
+            # Garante que a proposta está salva com estado pendente
+            chave = proposicao_id_para_chave(doc_hash, a["rotulo"], a.get("versao", ""), a["localizacao"])
+            if chave not in _propostas_cache:
+                proposta_texto = minuta_para_texto(estrutura) if minuta_para_texto else ""
+                nova_proposta = proposicao_para_dict(
+                    chave, doc_hash, a["rotulo"], a.get("versao", ""), a["localizacao"],
+                    ESTADO_PENDENTE, proposta_texto,
+                    justificativa=f"Melhoria estrutural - {a.get('rotulo')}",
+                    fonte="llm_mejora")
+                _propostas_cache[chave] = nova_proposta
+    _salvar_propostas_disc(_propostas_cache)
+    insercoes = {
+        docx_builder._chave_rotulo(a.get("o_que") or "")
+        for a in adicoes
+        if a.get("o_que")
+    }
+    # Adições estruturais viram artigos de verdade no corpo (posição correta),
+    # tanto para o arquivo quanto para a prévia antes/depois.
+    insercoes |= _integrar_adicoes_estruturais(estrutura, adicoes)
+    if destino.suffix.lower() == ".docx":
+        # Nova abordagem: o resultado é uma cópia do DOCX original com as
+        # mudanças (patch) marcadas (alterado/removido tachado, adicionado e
+        # novo texto em verde). Parágrafos não citados permanecem intactos.
+        output_path = docx_builder.montar_docx_revisado(
+            perfil,
+            alteracoes,
+            remocoes,
+            adicoes,
+            OUTPUTS_DIR,
+        )
+    else:
+        output_path = docx_builder.montar_docx(
+            perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
+        )
     depois = minuta_para_texto(estrutura)
     textos = _textos_antes_depois(conteudo, depois)
+    lacunas_sem = _filtrar_lacunas_sem_precedente(lacunas, precedente or {})
     _ultima_minuta = {
         "estructura": estrutura,
         "modelo": perfil.name,
@@ -630,22 +1179,31 @@ def _melhorar_e_relatar(
         "antes": conteudo[:40_000],
         "depois": depois[:40_000],
         "alteracoes": alteracoes,
+        "adicoes_estruturais": adicoes,
+        "lacunas": lacunas_sem,
         "textos": textos,
         "sha1": hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest(),
     }
-    return json.dumps(
-        {
-            "status": "improved",
-            "filename": filename,
-            "modelo": perfil.name,
-            "output_path": str(output_path),
-            "alteracoes": alteracoes,
-            "textos": textos,
-            "outros": outros or [],
-            "sources": _source_summary(contexto),
-        },
-        ensure_ascii=False,
-    )
+    resposta = {
+        "status": "improved",
+        "filename": filename,
+        "modelo": perfil.name,
+        "output_path": str(output_path),
+        "alteracoes": alteracoes,
+        "remocoes": remocoes,
+        "adicoes_estruturais": adicoes,
+        "lacunas": lacunas_sem,
+        "textos": textos,
+        "outros": outros or [],
+        "sources": _source_summary(contexto),
+    }
+    if document_improvement._problemas_do_patch(conteudo, alteracoes, remocoes):
+        resposta["aviso"] = (
+            "O arquivo foi gerado e entregue, mas o patch de melhoria ficou com "
+            "itens sem âncora no documento original (alguns trechos podem não "
+            "ter sido alterados como pedido). Revise o arquivo gerado."
+        )
+    return json.dumps(resposta, ensure_ascii=False)
 
 
 def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | None = None) -> str:
@@ -691,6 +1249,11 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
                     "status": "already_improved",
                     "arquivo_original": filename,
                     "alteracoes": _ultima_comparacao.get("alteracoes") or [],
+                    "adicoes_estruturais": _ultima_comparacao.get(
+                        "adicoes_estruturais"
+                    )
+                    or [],
+                    "lacunas": _ultima_comparacao.get("lacunas") or [],
                     "textos": _ultima_comparacao.get("textos") or [],
                     "outros": [f for f in disponiveis if f != filename],
                 },
@@ -705,11 +1268,8 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
         else:
             perfil = modelos.selecionar_modelo(tipo_ato)
 
-        contexto = retrieve(
-            f"Melhoria e adequacao do documento: {filename}\nTipo de ato: {tipo_ato}",
-            limit=16,
-            act_type=modelos.ACT_TYPE_FILTER.get(tipo_ato),
-        )
+        precedente = _precedente_das_lacunas(conteudo, tipo_ato)
+        contexto = _contexto_para_melhoria(conteudo, tipo_ato, filename, precedente)
         return _melhorar_e_relatar(
             filename,
             destino,
@@ -719,6 +1279,7 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
             contexto,
             diretrizes,
             outros=[f for f in disponiveis if f != filename],
+            precedente=precedente,
         )
     except UserFileError as error:
         return json.dumps({"status": "error", "error": str(error)}, ensure_ascii=False)
