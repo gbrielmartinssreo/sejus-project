@@ -219,7 +219,6 @@ def aplicar_alteracoes_selecionadas(filename: str) -> dict:
     if _propostas_cache is None:
         iniciar_conversa_propostas()
 
-    doc_hash = _hash_documento(filename)
     aceitas = listar_propostas(ESTADO_ACEITA)
 
     if not aceitas:
@@ -230,22 +229,17 @@ def aplicar_alteracoes_selecionadas(filename: str) -> dict:
         }
 
     # Carrega o documento original e estrutura
-    from sejus_project.tools.llm_tools.user_files import extract_file_text
     from sejus_project.tools.document_infra import docx_builder
     from sejus_project.tools.llm_tools import document_improvement as minuta
+    from sejus_project.tools.llm_tools.user_files import extract_file_text
 
     conteudo = extract_file_text(Path(filename))
     tipo_ato = modelos.detectar_tipo_ato(conteudo)
     perfil = modelos.crear_perfil_de_arquivo(Path(filename), conteudo, Path(filename).stem)
 
     # Gera nova estrutura considering only aceitas
-    # Filtrar alteracoes aceitas
-    alteracoes_aceitas = [a for a in aceitas if a.get("tipo") == "alteracao"]
-    adicoes_aceitas = [a for a in aceitas if a.get("tipo") == "adicao"]
-
-    # Regerar estrutura com apenas as alteracoes aceitas
-    # (simplificado: usa a estrutura existente e marca quais foram aplicadas)
-    estrutura, alt, adicoo, lac = minuta.gerar_estrutura_melhoria(
+    # Regenerar o patch com apenas as alteracoes aceitas
+    _estrutura, alt, rem, adicoo, _lac = minuta.gerar_estrutura_melhoria(
         conteudo, tipo_ato, perfil, [], {"diretrizes": "Aplicar apenas alteracoes aceitas"}
     )
 
@@ -254,16 +248,16 @@ def aplicar_alteracoes_selecionadas(filename: str) -> dict:
         if a.get("estado") == ESTADO_ACEITA:
             a["aplicada"] = True
 
-    output_path = docx_builder.montar_docx(
-        perfil, estrutura, OUTPUTS_DIR,
-        insercoes_rastreadas=set()
+    output_path = docx_builder.montar_docx_revisado(
+        perfil, alt, rem, adicoo, OUTPUTS_DIR
     )
 
     return {
         "status": "aplicado",
-        "mensagem": f"{len(alt)} alteracoes e {len(adicoo)} adicoes estruturais aplicadas.",
+        "mensagem": f"{len(alt)} alteracoes, {len(rem)} remocoes e {len(adicoo)} adicoes estruturais aplicadas.",
         "output_path": str(output_path),
         "total_aceitas": len(alt),
+        "total_remocoes": len(rem),
         "total_adicoes": len(adicoo),
     }
 
@@ -1038,6 +1032,78 @@ def obter_textos_comparacao() -> str:
     )
 
 
+def _numero_base_rotulo(rotulo: str) -> str | None:
+    """Extrai o número-base do rótulo de um artigo ('Art. 6º-A' -> '6')."""
+    m = re.match(r"^\s*art\.?\s*(\d+)", rotulo or "", re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _indice_insercao_artigo(corpo: list, rotulo: str, posicao: str) -> int:
+    """Índice do `corpo` onde inserir um artigo novo.
+
+    Primeiro tenta a âncora pelo número-base do rótulo (sufixo LC 95/1998:
+    'Art. 6º-A' vai logo após o último 'Art. 6º'). Sem âncora, tenta o número
+    citado em ``posicao``; se nada casar, anexa ao fim do corpo.
+    """
+    base = _numero_base_rotulo(rotulo)
+    if base:
+        for i in range(len(corpo) - 1, -1, -1):
+            item = corpo[i]
+            if (item.get("tipo") or "artigo") == "capitulo":
+                continue
+            if _numero_base_rotulo(item.get("rotulo") or "") == base:
+                return i + 1
+    for num in re.findall(r"\d+", posicao or ""):
+        for i in range(len(corpo) - 1, -1, -1):
+            item = corpo[i]
+            if (item.get("tipo") or "artigo") == "capitulo":
+                continue
+            if _numero_base_rotulo(item.get("rotulo") or "") == num:
+                return i + 1
+    return len(corpo)
+
+
+def _integrar_adicoes_estruturais(estrutura: dict, adicoes: list) -> set[str]:
+    """Mescla ``adicoes_estruturais`` dentro de ``estrutura['corpo']``.
+
+    Para cada adição com rótulo e texto, insere um artigo novo no corpo na
+    posição correta (após o artigo-base; fallback segue o número citado em
+    ``posicao``; senão, no fim). Adições cujo rótulo já existe no corpo (o
+    modelo já as incluiu) ou sem texto completo são ignoradas. Devolve os
+    rótulos normalizados efetivamente inseridos.
+    """
+    inseridos: set[str] = set()
+    corpo = estrutura.setdefault("corpo", [])
+    presentes = {
+        docx_builder._chave_rotulo(item.get("rotulo") or "")
+        for item in corpo
+        if (item.get("tipo") or "artigo") != "capitulo"
+        and (item.get("rotulo") or "").strip()
+    }
+    for a in adicoes:
+        if not isinstance(a, dict):
+            continue
+        rotulo = (a.get("o_que") or "").strip()
+        if not rotulo:
+            continue
+        chave = docx_builder._chave_rotulo(rotulo)
+        if chave in presentes:
+            continue
+        texto = (a.get("texto") or "").strip()
+        if not texto:
+            continue
+        artigo = {
+            "tipo": "artigo",
+            "rotulo": rotulo,
+            "texto": texto,
+            "subitens": [],
+        }
+        corpo.insert(_indice_insercao_artigo(corpo, rotulo, a.get("posicao") or ""), artigo)
+        presentes.add(chave)
+        inseridos.add(chave)
+    return inseridos
+
+
 def _melhorar_e_relatar(
     filename: str,
     destino,
@@ -1051,7 +1117,7 @@ def _melhorar_e_relatar(
 ) -> str:
     global _ultima_minuta, _melhoria_no_turno, _ultima_comparacao, _gerada_no_turno
     valores = {"diretrizes": diretrizes} if diretrizes else None
-    estrutura, alteracoes, adicoes, lacunas = document_improvement.gerar_estrutura_melhoria(
+    estrutura, alteracoes, remocoes, adicoes, lacunas = document_improvement.gerar_estrutura_melhoria(
         conteudo,
         tipo_ato,
         perfil,
@@ -1079,14 +1145,19 @@ def _melhorar_e_relatar(
         for a in adicoes
         if a.get("o_que")
     }
+    # Adições estruturais viram artigos de verdade no corpo (posição correta),
+    # tanto para o arquivo quanto para a prévia antes/depois.
+    insercoes |= _integrar_adicoes_estruturais(estrutura, adicoes)
     if destino.suffix.lower() == ".docx":
         # Nova abordagem: o resultado é uma cópia do DOCX original com as
-        # mudanças marcadas (adicionado em verde, removido/recomposto tachado).
+        # mudanças (patch) marcadas (alterado/removido tachado, adicionado e
+        # novo texto em verde). Parágrafos não citados permanecem intactos.
         output_path = docx_builder.montar_docx_revisado(
             perfil,
-            estrutura,
+            alteracoes,
+            remocoes,
+            adicoes,
             OUTPUTS_DIR,
-            adicoes_rotulos=insercoes,
         )
     else:
         output_path = docx_builder.montar_docx(
@@ -1113,21 +1184,26 @@ def _melhorar_e_relatar(
         "textos": textos,
         "sha1": hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest(),
     }
-    return json.dumps(
-        {
-            "status": "improved",
-            "filename": filename,
-            "modelo": perfil.name,
-            "output_path": str(output_path),
-            "alteracoes": alteracoes,
-            "adicoes_estruturais": adicoes,
-            "lacunas": lacunas_sem,
-            "textos": textos,
-            "outros": outros or [],
-            "sources": _source_summary(contexto),
-        },
-        ensure_ascii=False,
-    )
+    resposta = {
+        "status": "improved",
+        "filename": filename,
+        "modelo": perfil.name,
+        "output_path": str(output_path),
+        "alteracoes": alteracoes,
+        "remocoes": remocoes,
+        "adicoes_estruturais": adicoes,
+        "lacunas": lacunas_sem,
+        "textos": textos,
+        "outros": outros or [],
+        "sources": _source_summary(contexto),
+    }
+    if document_improvement._problemas_do_patch(conteudo, alteracoes, remocoes):
+        resposta["aviso"] = (
+            "O arquivo foi gerado e entregue, mas o patch de melhoria ficou com "
+            "itens sem âncora no documento original (alguns trechos podem não "
+            "ter sido alterados como pedido). Revise o arquivo gerado."
+        )
+    return json.dumps(resposta, ensure_ascii=False)
 
 
 def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | None = None) -> str:

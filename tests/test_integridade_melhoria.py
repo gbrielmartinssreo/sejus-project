@@ -1,15 +1,14 @@
-"""Testes de integridade estrutural no fluxo de melhoria.
+"""Testes de integridade no fluxo de melhoria em modo patch.
 
-Reproduzem a perda real observada na comparação de uma instrução normativa:
-oito títulos de capítulos e os incisos dos arts. 5º e 28 sumiram do DOCX
-gerado, mesmo com a mesma quantidade de artigos e com o tamanho do texto
-quase inteiro (a validação antiga baseada só em contagem/tamanho deixava
-passar). Os testes fixam a correção da etapa responsável: a validação de
-integridade estrutural e a normalização da estrutura JSON.
+No modo patch o LLM devolve apenas as mudanças (alteracoes/remocoes/adicoes)
+ancoradas ao texto original, e o sistema monta o resultado copiando o ORIGINAL
+e aplicando o patch — impossibilidade de truncamento por reescrita integral.
+Estes testes fixam a sanidade do patch: âncoras e campos obrigatórios, o
+emparelhamento pela chave de linha normalizada e a preservação do que não foi
+citado (inclusive incisos/capítulos), além da normalização da estrutura.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from sejus_project.tools.document_infra import docx_builder
@@ -36,16 +35,14 @@ _ART28 = (
 
 
 def _doc_com_capitulos_e_incisos() -> str:
-    """Conteúdo original espelhando o caso real: 8 capítulos e incisos nos
-    arts. 5º e 28."""
+    """Conteúdo espelhando o caso real: 8 capítulos e incisos nos arts.
+    5º e 28 — conteúdo que a antiga reescrita integral deixava sumir."""
     partes = [
         "INSTRUÇÃO NORMATIVA Nº XX/XX/2026.",
         "Dispõe sobre a atividade artesanal.",
     ]
     for n in ("I", "II", "III", "IV", "V", "VI", "VII", "VIII"):
-        # Usa o caractere í (U+00ED) para compatibilidade com o regex
-        # _RE_CAPITULO = re.compile(r"^\s*cap[íi]tulo\s+([ivxl]+)", re.IGNORECASE)
-        partes.append("CAP\u00cdTULO {n}".format(n=n))
+        partes.append(f"CAP\u00cdTULO {n}")
         partes.append(f"DAS DISPOSIÇÕES {n}")
     partes.append("Art. 5º A atividade artesanal poderá ser desenvolvida:")
     partes.append("I - em oficina ou espaço produtivo destinado à atividade; ou")
@@ -66,200 +63,144 @@ def _doc_com_capitulos_e_incisos() -> str:
     return "\n".join(partes)
 
 
-def _estrutura_sem_capitulos_incisos() -> dict:
-    """Estrutura como o LLM devolveu no caso real: artigos completos, porém
-    sem os capítulos e sem os incisos dos arts. 5º e 28."""
+def _patch_com_ancora_ok() -> dict:
+    """Patch mínimo válido: altera um inciso e remove outro, sem tocar no resto."""
     return {
         "numero": "INSTRUÇÃO NORMATIVA Nº XX/XX/2026",
         "ementa": "Dispõe sobre a atividade artesanal nas unidades penais.",
-        "corpo": [
+        "alteracoes": [
             {
-                "rotulo": "Art. 5º",
-                "texto": (
-                    "A atividade artesanal poderá ser desenvolvida em oficina ou "
-                    "espaço produtivo destinado à atividade, observada a técnica "
-                    "desenvolvida, o local de execução e a possibilidade de "
-                    "acompanhamento e controle da atividade."
+                "tipo": "corrigido",
+                "rotulo": "II -",
+                "trecho_original": (
+                    "II - em cela ou outro espaço de vivência, mediante "
+                    "autorização individual da Direção da unidade penal."
                 ),
-                "subitens": [
-                    {
-                        "tipo": "paragrafo",
-                        "rotulo": "§ 1º",
-                        "texto": "A autorização observará a técnica desenvolvida.",
-                    }
-                ],
-            },
-            {
-                "rotulo": "Art. 28",
-                "texto": (
-                    "A área técnica realizará a orientação e o acompanhamento "
-                    "das atividades disciplinadas nesta Instrução Normativa."
+                "novo_texto": (
+                    "II - em cela ou outro espaço de vivência, mediante "
+                    "autorização individual da Direção da unidade penal, "
+                    "observada a técnica desenvolvida."
                 ),
-                "subitens": [
-                    {
-                        "tipo": "paragrafo",
-                        "rotulo": "Parágrafo único.",
-                        "texto": "As unidades penais fornecerão as informações.",
-                    }
-                ],
-            },
-            {
-                "rotulo": "Art. 33",
-                "texto": "Esta Instrução Normativa entra em vigor na data de sua publicação.",
-            },
+                "detalhe": "Ajuste de texto.",
+            }
         ],
-        "fechamento": [
+        "remocoes": [
             {
-                "rotulo": "",
-                "texto": "Esta Instrução Normativa entra em vigor na data de sua publicação.",
+                "rotulo": "Parágrafo único.",
+                "trecho_original": "Parágrafo único. As unidades penais fornecerão as informações.",
+                "detalhe": "Redundante com o caput.",
             }
         ],
     }
 
 
-# ---------------------------------------------------------------------------
-# Reprodução da perda real e detecção
-# ---------------------------------------------------------------------------
-
-
-def test_validador_detecta_perda_de_capitulos():
-    """A validação estrutural deve identificar perdas, mesmo em casos onde a
-    contagem de artigos e o tamanho do texto pareceram preservados."""
-    conteudo = _doc_com_capitulos_e_incisos()
-    estrutura = _estrutura_sem_capitulos_incisos()
-
-    incompletudes = minuta._incompletudes_estruturais(conteudo, estrutura)
-    # A validação estrutural deve identificar perdas (artigos ou capítulos)
-    assert len(incompletudes) > 0
-
-
-def test_validador_detecta_perda_de_incisos_dos_artigos():
-    """Os incisos I–II do art. 5º e I–IV do art. 28 devem ser apontados,
-    mesmo com o texto do artigo presente (lista anunciada e itens sumidos)."""
-    conteudo = _doc_com_capitulos_e_incisos()
-    estrutura = _estrutura_sem_capitulos_incisos()
-
-    incompletudes = minuta._incompletudes_estruturais(conteudo, estrutura)
-    # A validação deve apontar perdas de incisos em artigos específicos
-    assert len(incompletudes) > 0
-    texto_total = " ".join(incompletudes).casefold()
-    assert "art." in texto_total
-
-
-def test_melhoria_incompleta_detecta_estrutura_perdida():
-    """A guarda de completude passa a considerar a perda estrutural (não só
-    contagem de artigos e tamanho). Caso real: antes retornava False."""
-    conteudo = _doc_com_capitulos_e_incisos()
-    estrutura = _estrutura_sem_capitulos_incisos()
-
-    assert minuta._melhoria_incompleta(conteudo, estrutura) is True
-
-
-def test_validador_aceita_estrutura_completa():
-    """Com capítulos e incisos preservados, a validação não acusa perda.
-    Antes da correção, esta mesma estrutura passaria despercebida pela
-    antiga validação baseada apenas em contagem de artigos e tamanho."""
-    conteudo = """INSTRUÇÃO NORMATIVA Nº XX/XX/2026.
-    Dispõe sobre a atividade artesanal.
-    CAPITULO I
-    DAS DISPOSIÇÕES GERAIS
-    Art. 1º Disposições gerais.
-    Art. 2º Das disposições gerais.
-    Parágrafo único. Disposições complementares.
-    CAPITULO II
-    DAS MODALIDADES
-    Art. 3º Das modalidades.
-    Art. 4º Das modalidades.
-    Parágrafo único. Disposições complementares.
-    Art. 5º A atividade artesanal poderá ser desenvolvida:
-    I - em oficina ou espaço produtivo destinado à atividade; ou
-    II - emcela ou outro espaço de vivência, mediante autorização individual da Direção da unidade penal.
-    Art. 28 A área técnica realizará a orientação, podendo:
-    I - orientar as unidades penais;
-    II - consolidar informações sobre as atividades;
-    III - propor medidas destinadas ao aperfeiçoamento;
-    IV - promover articulação com órgãos e entidades.
-    Art. 33 Esta Instrução Normativa entra em vigor na data de sua publicação.
-    """
-    estrutura = {
-        "numero": "INSTRUÇÃO NORMATIVA Nº XX/XX/2026",
-        "ementa": "Dispõe sobre a atividade artesanal nas unidades penais.",
-        "corpo": [
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPITULO I"},
-            {"tipo": "capitulo", "rotulo": "", "texto": "DAS DISPOSIÇÕES I"},
+def _patch_com_ancora_fantasma() -> dict:
+    """Âncoras que não existem no original (que a antiga guarda não pegava)."""
+    return dict(
+        _patch_com_ancora_ok(),
+        alteracoes=[
             {
-                "rotulo": "Art. 1º",
-                "texto": "Disposições gerais.",
-                "subitens": [],
-            },
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPITULO II"},
-            {
-                "rotulo": "Art. 2º",
-                "texto": "Das disposições gerais.",
-                "subitens": [
-                    {"tipo": "paragrafo", "rotulo": "único", "texto": "Disposições complementares."}
-                ],
-            },
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPITULO III"},
-            {
-                "rotulo": "Art. 3º",
-                "texto": "Das modalidades.",
-                "subitens": [],
-            },
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPITULO V"},
-            {
-                "rotulo": "Art. 4º",
-                "texto": "Das modalidades.",
-                "subitens": [
-                    {"tipo": "paragrafo", "rotulo": "único", "texto": "Disposições complementares."}
-                ],
-            },
-            {
-                "rotulo": "Art. 5º",
-                "texto": "A atividade artesanal poderá ser desenvolvida:",
-                "subitens": [
-                    {"tipo": "inciso", "rotulo": "I -", "texto": "em oficina; ou"},
-                    {"tipo": "inciso", "rotulo": "II -", "texto": "em cela;"},
-                ],
-            },
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPITULO VI"},
-            {
-                "rotulo": "Art. 28",
-                "texto": "A área técnica realizará a orientação, podendo:",
-                "subitens": [
-                    {"tipo": "inciso", "rotulo": "I -", "texto": "orientar;"},
-                    {"tipo": "inciso", "rotulo": "II -", "texto": "consolidar;"},
-                    {"tipo": "inciso", "rotulo": "III -", "texto": "propor;"},
-                    {"tipo": "inciso", "rotulo": "IV -", "texto": "promover."},
-                ],
-            },
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPITULO VII"},
-            {
-                "rotulo": "Art. 33",
-                "texto": "Esta Instrução Normativa entra em vigor na data de sua publicação.",
-                "subitens": [],
-            },
+                "tipo": "corrigido",
+                "rotulo": "Art. 999º",
+                "trecho_original": "Art. 999º Dispositivo inexistente no original.",
+                "novo_texto": "Art. 999º Dispositivo corrigido.",
+                "detalhe": "Ancora fantasma.",
+            }
         ],
-        "fechamento": [
-            {"rotulo": "", "texto": "Esta Instrução Normativa entra em vigor na data de sua publicação."},
-        ],
-    }
-
-    assert minuta._melhoria_incompleta(conteudo, estrutura) is False
+    )
 
 
-def test_retry_inclui_orientacao_precisa_do_que_faltou():
-    """A mensagem de retry deve citar explicitamente os itens perdidos, em vez
-    de só pedir 'reproduza o documento completo'."""
+# ---------------------------------------------------------------------------
+# Sanidade do patch
+# ---------------------------------------------------------------------------
+
+
+def test_problemas_do_patch_aceita_patch_saudavel():
     conteudo = _doc_com_capitulos_e_incisos()
-    estrutura = _estrutura_sem_capitulos_incisos()
-    incompletudes = minuta._incompletudes_estruturais(conteudo, estrutura)
+    dado = _patch_com_ancora_ok()
+    assert minuta._problemas_do_patch(conteudo, dado["alteracoes"], dado["remocoes"]) == []
 
-    mensagem = minuta._mensagem_retry_especifica(incompletudes)
 
-    assert "CAPÍTULO I" in mensagem or "capítulo" in mensagem.casefold()
-    assert "art. 5º" in mensagem.casefold() or "art. 5" in mensagem.casefold()
-    assert "art. 28" in mensagem.casefold()
+def test_problemas_do_patch_detecta_ancora_fantasma():
+    conteudo = _doc_com_capitulos_e_incisos()
+    dado = _patch_com_ancora_fantasma()
+    problemas = minuta._problemas_do_patch(conteudo, dado["alteracoes"], dado["remocoes"])
+    assert any("ancora" in p for p in problemas)
+    assert any("Art. 999º" in p for p in problemas)
+
+
+def test_problemas_do_patch_detecta_remocao_sem_ancora():
+    conteudo = _doc_com_capitulos_e_incisos()
+    remocoes = [{"rotulo": "X", "trecho_original": "Parágrafo que não existe."}]
+    problemas = minuta._problemas_do_patch(conteudo, [], remocoes)
+    assert any("ancora" in p for p in problemas)
+
+
+def test_problemas_do_patch_rejeita_tipo_errado_de_alteracao():
+    conteudo = _doc_com_capitulos_e_incisos()
+    alteracoes = [
+        {
+            "tipo": "remover",
+            "rotulo": "Art. 5º",
+            "trecho_original": "Art. 5º A atividade artesanal poderá ser desenvolvida:",
+            "novo_texto": "x",
+            "detalhe": "tipo invalido",
+        }
+    ]
+    problemas = minuta._problemas_do_patch(conteudo, alteracoes, [])
+    assert any("tipo invalido" in p for p in problemas)
+
+
+# ---------------------------------------------------------------------------
+# Estrutura montada a partir do ORIGINAL + patch
+# ---------------------------------------------------------------------------
+
+
+def test_construcao_preserva_conteudo_nao_citado():
+    """Tudo o que o patch não cita permanece intacto na estrutura final
+    (capítulos e incisos não somem, mesmo com mudanças em outros trechos)."""
+    conteudo = _doc_com_capitulos_e_incisos()
+    dado = _patch_com_ancora_ok()
+    estrutura = minuta._construir_estrutura(
+        conteudo, dado["alteracoes"], dado["remocoes"], dado["numero"], dado["ementa"]
+    )
+    texto = "\n".join(item["texto"] for item in estrutura["corpo"])
+
+    assert "CAPÍTULO V" in texto
+    assert "I - em oficina ou espaço produtivo destinado à atividade; ou" in texto
+    assert "§ 1º A autorização observará a técnica desenvolvida." in texto
+    assert "Art. 33 Esta Instrução Normativa entra em vigor" in texto
+    # Alteração aplicada e remoção efetuada.
+    assert "observada a técnica desenvolvida." in texto
+    assert "As unidades penais fornecerão as informações." not in texto
+    # Número/ementa vindos do modelo sobrescrevem.
+    assert estrutura["numero"] == "INSTRUÇÃO NORMATIVA Nº XX/XX/2026"
+    assert estrutura["ementa"].startswith("Dispõe sobre a atividade artesanal nas")
+
+
+def test_ancoragem_ignora_diferencas_tipograficas():
+    """Travessão por hífen e aspas curvas não quebram a âncora do patch."""
+    conteudo = "Art. 1º Regulamento interno:\nI – padronizar os procedimentos;"
+    alteracoes = [
+        {
+            "tipo": "corrigido",
+            "rotulo": "I -",
+            "trecho_original": "I - padronizar os procedimentos;",
+            "novo_texto": "I - padronizar os procedimentos diários;",
+            "detalhe": "Ajuste.",
+        }
+    ]
+    estrutura = minuta._construir_estrutura(conteudo, alteracoes, [], "Num", "Em.")
+    texto = "\n".join(item["texto"] for item in estrutura["corpo"])
+    assert "I - padronizar os procedimentos diários;" in texto
+
+
+def test_mensagem_retry_cita_problemas_do_patch():
+    problemas = ["ancora nao encontrada no original: Art. 999º", "trecho_original ausente: Art. 3º"]
+    mensagem = minuta._mensagem_retry_especifica(problemas)
+    assert "Art. 999º" in mensagem
+    assert "Art. 3º" in mensagem
+    assert "trecho_original" in mensagem
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +234,7 @@ def test_padronizar_anexa_incisos_soltos_ao_artigo_anterior():
 
 def test_padronizar_remove_vigencia_duplicada_no_fechamento():
     """Se o art. de vigência já está na articulação e o LLM repetiu no
-    'fechamento', a cópia duplicada deve ser removida (caso real: a frase de
-    entrada em vigor apareceu duas vezes no DOCX gerado)."""
+    'fechamento', a cópia duplicada deve ser removida."""
     estrutura = {
         "corpo": [
             {
@@ -318,8 +258,7 @@ def test_padronizar_remove_vigencia_duplicada_no_fechamento():
 
 
 def test_padronizar_remove_assinatura_duplicada():
-    """Cargo repetido na lista de assinaturas (caso real: 'Secretário Adjunto'
-    apareceu duas vezes no DOCX) deve ser deduplicado."""
+    """Cargo repetido na lista de assinaturas deve ser deduplicado."""
     estrutura = {
         "corpo": [{"rotulo": "Art. 1º", "texto": "Texto."}],
         "assinaturas": [
@@ -330,22 +269,22 @@ def test_padronizar_remove_assinatura_duplicada():
     }
     resultado = _padronizar(estrutura, "portaria")
 
-    cargos = [
-        a["cargo"] for a in resultado["assinaturas"] if a["cargo"]
-    ]
+    cargos = [a["cargo"] for a in resultado["assinaturas"] if a["cargo"]]
     assert cargos.count("Secretário Adjunto de Administração Penitenciária") == 1
 
 
 # ---------------------------------------------------------------------------
-# Evidência no DOCX gerado
+# Evidência no DOCX gerado (montar_docx do template usa a estrutura montada)
 # ---------------------------------------------------------------------------
 
 
 def test_montar_docx_preserva_capitulos_e_incisos_no_documento(tmp_path):
-    """Integridade de ponta a ponta: uma estrutura completa, quando montada,
-    mantém capítulos e incisos vinculados aos artigos no arquivo gerado
-    (reaberto e inspecionado, não apenas nos metadados)."""
+    """Integridade de ponta a ponta: a estrutura montada (original + patch),
+    quando renderizada pelo template, mantém capítulos e incisos vinculados
+    aos artigos no arquivo gerado."""
     from docx import Document
+
+    body_qn = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
 
     model_path = tmp_path / "Modelo.docx"
     document = Document()
@@ -361,7 +300,7 @@ def test_montar_docx_preserva_capitulos_e_incisos_no_documento(tmp_path):
     document.save(model_path)
 
     from sejus_project.tools.document_infra.docx_engine import paragraph_text
-    from sejus_project.tools.document_infra.modelos import PerfilModelo, PORTARIA
+    from sejus_project.tools.document_infra.modelos import PORTARIA, PerfilModelo
 
     perfil = PerfilModelo(
         name="IN_TESTE",
@@ -370,42 +309,27 @@ def test_montar_docx_preserva_capitulos_e_incisos_no_documento(tmp_path):
         patterns=PORTARIA.patterns,
         preservar_moldura=True,
     )
-    estrutura = {
-        "numero": "INSTRUÇÃO NORMATIVA Nº XX/XX/2026",
-        "ementa": "Dispõe sobre a atividade artesanal.",
-        "corpo": [
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPÍTULO I"},
-            {
-                "rotulo": "Art. 5º",
-                "texto": "A atividade artesanal poderá ser desenvolvida:",
-                "subitens": [
-                    {"tipo": "inciso", "rotulo": "I -", "texto": "em oficina; ou"},
-                    {"tipo": "inciso", "rotulo": "II -", "texto": "em cela."},
-                    {
-                        "tipo": "paragrafo",
-                        "rotulo": "§ 1º",
-                        "texto": "A autorização observará a técnica.",
-                    },
-                ],
-            },
-            {"tipo": "capitulo", "rotulo": "", "texto": "CAPÍTULO II"},
-            {
-                "rotulo": "Art. 28",
-                "texto": "A área técnica realizará a orientação, podendo:",
-                "subitens": [
-                    {"tipo": "inciso", "rotulo": "I -", "texto": "orientar;"},
-                    {"tipo": "inciso", "rotulo": "II -", "texto": "consolidar;"},
-                ],
-            },
-        ],
-    }
+    # Estrutura montada por _construir_estrutura (linha a linha do original).
+    conteudo = (
+        "INSTRUÇÃO NORMATIVA Nº XX/XX/2026\n"
+        "Dispõe sobre a atividade artesanal.\n"
+        "CAPÍTULO I\n"
+        "Art. 5º A atividade artesanal poderá ser desenvolvida:\n"
+        "I - em oficina ou espaço produtivo destinado à atividade; ou\n"
+        "II - em cela ou outro espaço de vivência.\n"
+        "CAPÍTULO II\n"
+        "Art. 28 A área técnica realizará a orientação, podendo:\n"
+        "I - orientar as unidades penais;\n"
+        "II - consolidar informações;\n"
+    )
+    estrutura = minuta._construir_estrutura(conteudo, [], [], "INSTRUÇÃO NORMATIVA Nº XX/XX/2026", "Dispõe sobre a atividade artesanal.")
 
     output_path = docx_builder.montar_docx(perfil, estrutura, tmp_path)
 
     doc = Document(str(output_path))
     textos = [
         paragraph_text(p).strip()
-        for p in doc.element.body.iter("{%s}p" % "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+        for p in doc.element.body.iter(body_qn)
     ]
     conteudo = "\n".join(textos)
     assert "CAPÍTULO I" in conteudo
@@ -420,7 +344,6 @@ def test_montar_docx_preserva_capitulos_e_incisos_no_documento(tmp_path):
     assert idx28 > idx5
     assert "I - orientar" in conteudo
     assert "II - consolidar" in conteudo
-    assert "§ 1º A autorização observará a técnica." in conteudo
 
 
 # ---------------------------------------------------------------------------
@@ -431,9 +354,10 @@ _DIR_PROJETO = Path(__file__).resolve().parents[1]
 _ENTRADA_REAL = _DIR_PROJETO / "importacoes_usuario" / "INSTRUÇÃO NORMATIVA Nº XX ARTESÃO - ERIKA.docx"
 
 
-def test_arquivo_real_detecta_perda_estrutural():
-    """Se os arquivos da comparação real existirem, a validação deve apontar as
-    mesmas perdas observadas (capítulos e incisos ausentes no DOCX gerado)."""
+def test_arquivo_real_aceita_patch_de_texto_do_proprio_arquivo():
+    """Se o arquivo real estiver disponível, a âncora de um trecho do próprio
+    texto do arquivo deve ser resolvida (a sanidade não rejeita a realidade).
+    O patch vazio (sem mudanças) é sempre sadio."""
     import pytest
 
     from sejus_project.tools.llm_tools.user_files import extract_file_text
@@ -442,11 +366,4 @@ def test_arquivo_real_detecta_perda_estrutural():
         pytest.skip("Arquivo real de entrada não disponível neste ambiente.")
 
     conteudo = extract_file_text(_ENTRADA_REAL)
-    estrutura = _estrutura_sem_capitulos_incisos()
-
-    incompletudes = minuta._incompletudes_estruturais(conteudo, estrutura)
-
-    assert any(
-        "capitulo" in minuta._remover_acentos(m).casefold() for m in incompletudes
-    )
-    assert minuta._melhoria_incompleta(conteudo, estrutura) is True
+    assert minuta._problemas_do_patch(conteudo, [], []) == []

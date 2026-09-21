@@ -6,7 +6,7 @@ import pytest
 from docx import Document
 from docx.shared import Pt
 
-from sejus_project.tools.document_infra import docx_templates, modelos
+from sejus_project.tools.document_infra import docx_builder, docx_templates, modelos
 from sejus_project.tools.document_infra.modelos import PerfilModelo
 from sejus_project.tools.llm_tools import document_generation as generation
 
@@ -84,8 +84,8 @@ def fake_minuta(monkeypatch, tmp_path):
         document.save(str(output_path))
         return output_path
 
-    def montar_docx_revisado(perfil, estrutura, output_dir, adicoes_rotulos=None):
-        return montar_docx(perfil, estrutura, output_dir, insercoes_rastreadas=adicoes_rotulos)
+    def montar_docx_revisado(perfil, alteracoes, remocoes, adicoes, output_dir):
+        return montar_docx(perfil, ESTRUTURA, output_dir, insercoes_rastreadas=None)
 
     monkeypatch.setattr(generation.minuta_generation, "gerar_estrutura_minuta", gerar_estrutura_minuta)
     monkeypatch.setattr(generation.docx_builder, "montar_docx", montar_docx)
@@ -113,14 +113,19 @@ def fake_melhoria(monkeypatch, tmp_path, fake_minuta):
             [
                 {
                     "tipo": "corrigido",
-                    "o_que": "Fundamento legal no preâmbulo",
+                    "rotulo": "Preâmbulo",
+                    "localizacao": "Fundamento legal no preâmbulo",
+                    "trecho_original": "O Secretário de Estado de Justiça",
+                    "novo_texto": "O SECRETÁRIO DE ESTADO DE JUSTIÇA, no uso de suas atribuições,",
                     "detalhe": "Atualizado para o art. vigente recuperado no RAG.",
                 },
             ],
+            [],
             [
                 {
                     "o_que": "Art. 6º-A",
-                    "posicao": "após o art. 6º",
+                    "texto": "Recurso em caso de negativa, com efeito suspensivo.",
+                    "posicao": "após o art. 2º",
                     "detalhe": "Recurso em caso de negativa.",
                     "lastro": "IN 07/2026, art. 13.",
                 }
@@ -1110,37 +1115,48 @@ def test_montagem_adicao_sai_como_revisao_de_insercao(modelo_portaria_tmp, tmp_p
 
 
 def test_montar_docx_revisado_marca_diferencas_no_original(modelo_portaria_tmp, tmp_path):
-    """A copia revisada mantém o documento original e marca as mudanças:
-    texto novo em verde (adição/recomposição), texto antigo tachado
-    (remoção/recomposição), parágrafos iguais intactos."""
+    """A copia revisada mantém o documento original e marca as mudanças do
+    patch: texto novo em verde (alterado/adicionado), texto antigo tachado
+    (alterado/removido), parágrafos não citados intactos."""
     from docx.shared import RGBColor
 
     from sejus_project.tools.document_infra import docx_builder
 
     perfil, _ = modelo_portaria_tmp
-    estrutura = dict(ESTRUTURA.copy())
-    estrutura["numero"] = "PORTARIA Nº 45/2025/GAB-SEJUS/MT"
-    estrutura["ementa"] = "Dispõe sobre o Programa de Limpeza nas unidades da SEJUS."
-    estrutura["considerandos"] = []
-    estrutura["corpo"] = [
+    alteracoes = [
         {
-            "rotulo": "Art. 1º",
-            "texto": "Instituir o Programa de Limpeza nas unidades administrativas.",
-            "subitens": [
-                {
-                    "tipo": "paragrafo",
-                    "rotulo": "§ 1º",
-                    "texto": "O programa abrange as unidades administrativas da SEJUS.",
-                },
-                {"tipo": "inciso", "rotulo": "I -", "texto": "padronizar os procedimentos diários;"},
-                {"tipo": "inciso", "rotulo": "II -", "texto": "definir responsáveis por unidade;"},
-            ],
+            "tipo": "alterado",
+            "rotulo": "Ementa",
+            "trecho_original": "Institui o Programa de Limpeza.",
+            "novo_texto": "Dispõe sobre o Programa de Limpeza nas unidades da SEJUS.",
+            "detalhe": "Ementa ajustada.",
         },
-        {"rotulo": "Art. 1º-A", "texto": "Recurso em caso de negativa.", "subitens": []},
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 1º",
+            "trecho_original": "Art. 1º Instituir o Programa de Limpeza nas unidades.",
+            "novo_texto": "Art. 1º Instituir o Programa de Limpeza nas unidades administrativas.",
+            "detalhe": "Redação ajustada.",
+        },
+    ]
+    remocoes = [
+        {
+            "rotulo": "Considerando",
+            "trecho_original": "CONSIDERANDO a necessidade de padronizar a rotina;",
+            "detalhe": "Texto removido.",
+        }
+    ]
+    adicoes = [
+        {
+            "o_que": "Art. 1º-A",
+            "texto": "Art. 1º-A Recurso em caso de negativa, com efeito suspensivo.",
+            "posicao": "após o art. 1º",
+            "detalhe": "Novo artigo.",
+        }
     ]
 
     output_path = docx_builder.montar_docx_revisado(
-        perfil, estrutura, tmp_path, adicoes_rotulos={"art. 1º-a"}
+        perfil, alteracoes, remocoes, adicoes, tmp_path
     )
 
     assert output_path.is_file()
@@ -1178,9 +1194,91 @@ def test_montar_docx_revisado_marca_diferencas_no_original(modelo_portaria_tmp, 
     paragrafo = p_por_texto("§ 1º O programa abrange as unidades administrativas da SEJUS.")
     assert paragrafo.runs[0].font.strike is None
 
-    art_novo_a = p_por_texto("Art. 1º-A Recurso em caso de negativa.")
+    art_novo_a = p_por_texto("Art. 1º-A Recurso em caso de negativa, com efeito suspensivo.")
     assert art_novo_a.runs[0].font.color.rgb == RGBColor(0x2E, 0x7D, 0x32)
     assert texts.index(art_novo_a.text) > texts.index(inciso.text)
     assert texts.index(art_novo_a.text) < texts.index(
         "Esta Portaria entra em vigor na data de sua publicação."
     )
+
+
+def test_chave_linha_normaliza_tipografia():
+    """Travessões/hífens e aspas curvas são equivalentes na comparação."""
+    assert docx_builder._chave_linha("I – padronizar os procedimentos;") == docx_builder._chave_linha(
+        "I - padronizar os procedimentos;"
+    )
+    assert docx_builder._chave_linha("Art. 3º “conteúdo”") == docx_builder._chave_linha(
+        "Art. 3º \"conteúdo\""
+    )
+    assert docx_builder._chave_linha("a–b—c‒d‑e−f") == docx_builder._chave_linha("a-b-c-d-e-f")
+    assert docx_builder._chave_linha("  Várias   palavras\tseparam ") == docx_builder._chave_linha(
+        "Várias palavras separam"
+    )
+
+
+def test_melhoria_integra_adicoes_estruturais_no_corpo():
+    """Adições com rótulo e texto entram no corpo na posição correta."""
+    estrutura = {
+        "numero": "PORTARIA Nº 1/2026",
+        "corpo": [
+            {"tipo": "artigo", "rotulo": "Art. 1º", "texto": "Primeiro.", "subitens": []},
+            {"tipo": "artigo", "rotulo": "Art. 2º", "texto": "Segundo.", "subitens": []},
+        ],
+    }
+    adicoes = [
+        {"o_que": "Art. 2º-A", "texto": "NOVO artigo de recurso.", "posicao": "após o art. 2º"},
+        {"o_que": "Art. 9º", "texto": "ANEXO ao final."},
+        {"o_que": "Art. 2º", "texto": "já existe no corpo", "posicao": "após o art. 1º"},
+        {"o_que": "Art. 3º", "posicao": "sem texto completo"},
+    ]
+
+    inseridos = generation._integrar_adicoes_estruturais(estrutura, adicoes)
+
+    rotulos = [item["rotulo"] for item in estrutura["corpo"]]
+    assert rotulos == ["Art. 1º", "Art. 2º", "Art. 2º-A", "Art. 9º"]
+    assert estrutura["corpo"][2]["texto"] == "NOVO artigo de recurso."
+    assert inseridos == {"art. 2º-a", "art. 9º"}
+
+
+def test_melhoria_integra_por_posicao_quando_sem_ancora_de_rotulo():
+    """Sem artigo-base no corpo, a posição sai do número citado em 'posicao'."""
+    estrutura = {
+        "corpo": [
+            {"tipo": "capitulo", "rotulo": "", "texto": "CAPÍTULO I"},
+            {"tipo": "artigo", "rotulo": "Art. 1º", "texto": "Primeiro.", "subitens": []},
+        ]
+    }
+    inseridos = generation._integrar_adicoes_estruturais(
+        estrutura,
+        [{"o_que": "Art. 6º-A", "texto": "Recurso em caso de negativa.", "posicao": "após o art. 1º"}],
+    )
+
+    assert inseridos == {"art. 6º-a"}
+    assert [i.get("rotulo") or i.get("texto") for i in estrutura["corpo"]] == [
+        "CAPÍTULO I",
+        "Art. 1º",
+        "Art. 6º-A",
+    ]
+
+
+def test_merge_de_adicoes_reflete_na_comparacao_do_turno(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """A prévia 'depois' e o rótulo passado ao montar refletem o artigo novo."""
+    from sejus_project.tools.llm_tools import user_files
+
+    generation._ultima_minuta = None
+    generation._ultima_comparacao = None
+    generation._melhoria_no_turno = False
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato.txt").write_text(
+        "PORTARIA Nº 1/2026\nDispõe sobre limpeza.\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(generation.melhorar_documento_usuario("ato.txt"))
+
+    assert result["status"] == "improved"
+    comparacao = generation.ultima_comparacao()
+    assert "Recurso em caso de negativa" in comparacao["depois"]
+    estrutura_saida = generation.ultima_minuta()["estructura"]
+    rotulos = [i["rotulo"] for i in estrutura_saida["corpo"]]
+    assert "Art. 6º-A" in rotulos

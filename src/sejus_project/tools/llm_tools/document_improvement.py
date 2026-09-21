@@ -1,9 +1,12 @@
 """Melhoria/adequacao de um documento enviado pelo usuario, via LLM.
 
-Responsabilidade: schema e prompts de melhoria, chamada ao LLM e guarda de
-completude da reescrita (nao pode omitir artigos nem encolher o texto do
-original). Reaproveita o schema, o parsing com retry e a normalizacao de
-``minuta_generation``. Nao manipula DOCX: a montagem fisica do arquivo fica em
+Responsabilidade: schema e prompts de melhoria e a chamada ao LLM em modo
+``patch``: o modelo NAO reescreve o documento inteiro -- devolve apenas as
+mudancas (``alteracoes``/``remocoes``/``adicoes_estruturais``) ancoradas ao
+texto original. A estrutura final e montada em ``_construir_estrutura``
+(original + patch), eliminando o truncamento por reescrita integral. Reaproveita
+o schema, o parsing com retry e a normalizacao de ``minuta_generation``. Nao
+manipula DOCX: a montagem fisica do arquivo fica em
 ``document_infra.docx_builder``.
 """
 from __future__ import annotations
@@ -12,14 +15,16 @@ import json
 import os
 import re
 
+from sejus_project.tools.document_infra.docx_builder import (
+    _chave_linha as _chave_texto,
+)
 from sejus_project.tools.document_infra.modelos import PerfilModelo
 from sejus_project.tools.llm_tools.minuta_generation import (
+    _TETO_TOKENS_MODELO,
     STRUTURA_DEFINITION,
     _extrair_json_com_retry,
-    _padronizar,
     _resumir_contexto,
 )
-from sejus_project.web.render_html import minuta_para_texto
 
 # Estados possíveis para uma proposta de alteração ou adição estrutural.
 # Independente do tipo (alterado/incluído/excluído/movimentado), o estado
@@ -32,43 +37,64 @@ ESTADO_APLICADA = "aplicada"
 # Estados antigos para compatibilidade (pode remover depois)
 _ESTADO_ANTIGOS = (ESTADO_PENDENTE, ESTADO_ACEITA, ESTADO_REJEITADA, ESTADO_APLICADA)
 
-# Mesmo schema da minuta, acrescido da lista 'alteracoes' (comparacao
-# antes/depois que a interface exibe ao lado do documento melhorado).
+# Schema de melhoria em modo patch: o LLM NAO reescreve o documento -- devolve
+# apenas as mudancas (alteracoes/remocoes/adicoes) ancoradas ao texto original.
+# A estrutura final e montada por _construir_estrutura (original + patch), o que
+# elimina o truncamento por limite de tokens na reescrita integral.
 MELHORIA_DEFINITION = json.loads(json.dumps(STRUTURA_DEFINITION))
 melhoria_definition = MELHORIA_DEFINITION
 MELHORIA_DEFINITION["function"]["name"] = "apresentar_documento_melhorado"
 MELHORIA_DEFINITION["function"]["description"] = (
-    "Apresenta o documento normativo enviado pelo usuario reescrito com "
-    "melhorias e adequacoes juridicas. Deve devolver: 'alteracoes' com as "
-    "CORRECOES aplicadas ao texto existente; 'adicoes_estruturais' com os "
-    "artigos NOVOS propostos para fechar lacunas de aplicabilidade (somente "
-    "quando houver precedente no RAG); e 'lacunas_identificadas' com as "
-    "lacunas pertinentes sem precedente no acervo. O ato deve permanecer o "
-    "mesmo (numero, ementa, objeto e assinaturas preservados)."
+    "Registra as mudancas de melhoria/adequacao juridica de um documento "
+    "normativo enviado pelo usuario, SEM reescrever o texto nao alterado. "
+    "Deve devolver: 'alteracoes' com as CORRECOES aplicadas ao texto "
+    "EXISTENTE (cada item com 'rotulo', 'trecho_original' copiado fielmente "
+    "do original e 'novo_texto' completo); 'remocoes' com os paragrafos "
+    "EXISTENTES que devem ser excluidos; 'adicoes_estruturais' com os artigos "
+    "NOVOS propostos para fechar lacunas de aplicabilidade (somente quando "
+    "houver precedente no RAG); e 'lacunas_identificadas' com as lacunas "
+    "pertinentes sem precedente no acervo. O ato deve permanecer o mesmo "
+    "(numero, ementa, objeto e assinaturas preservados)."
 )
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
     "type": "array",
     "description": (
-        "CORRECOES aplicadas ao texto EXISTENTE do documento, para a "
-        "comparacao antes/depois. Use apenas 'alterado', 'corrigido' ou "
-        "'removido'. Artigos novos NAO entram aqui -- vao em "
-        "'adicoes_estruturais' com tipo 'adicionado'."
+        "CORRECOES aplicadas a paragrafos EXISTENTES do documento, para a "
+        "comparacao antes/depois. Use apenas 'alterado' ou 'corrigido'. "
+        "Cada item substitui UM paragrafo completo: 'rotulo' identifica o "
+        "dispositivo (ex.: 'Art. 3º', '§ 1º do art. 5º'), 'trecho_original' e "
+        "copiado EXATAMENTE do texto original (para a mudanca ser localizada) "
+        "e 'novo_texto' e o paragrafo inteiro na versao corrigida, incluindo o "
+        "rotulo como no original. Nao use para artigos NOVOS -- vao em "
+        "'adicoes_estruturais'."
     ),
     "items": {
         "type": "object",
         "properties": {
             "tipo": {
                 "type": "string",
-                "description": (
-                    "'alterado', 'removido' ou 'corrigido' (correcoes de texto "
-                    "existente)."
-                ),
+                "description": "'alterado' ou 'corrigido' (correcoes de texto "
+                "existente).",
             },
-            "o_que": {
+            "rotulo": {
                 "type": "string",
                 "description": (
-                    "Item alterado, ex.: 'Fundamento legal no preambulo', "
-                    "'Numeracao dos incisos do art. 2º'."
+                    "Dispositivo alterado, ex.: 'Art. 3º', '§ 1º do art. 5º', "
+                    "'Fundamento legal no preambulo'."
+                ),
+            },
+            "trecho_original": {
+                "type": "string",
+                "description": (
+                    "Trecho EXATO do texto original que sera substituido -- "
+                    "copie fielmente do documento recebido (mesma grafia)."
+                ),
+            },
+            "novo_texto": {
+                "type": "string",
+                "description": (
+                    "Novo paragrafo COMPLETO que substitui o trecho, incluindo "
+                    "o rotulo como no original (ex.: 'Art. 3º O prazo ...')."
                 ),
             },
             "detalhe": {
@@ -76,7 +102,34 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                 "description": "Explicacao curta da mudanca e do motivo.",
             },
         },
-        "required": ["tipo", "o_que", "detalhe"],
+        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe"],
+    },
+}
+MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
+    "type": "array",
+    "description": (
+        "PARAGRAFOS EXISTENTES que devem ser EXCLUIDOS do documento (texto "
+        "inteiro removido). Use somente quando a exclusao for realmente "
+        "necessaria. Cada item e ancorado por 'rotulo' e 'trecho_original' "
+        "copiado EXATAMENTE do original."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "rotulo": {
+                "type": "string",
+                "description": "Dispositivo removido, ex.: 'Art. 9º'.",
+            },
+            "trecho_original": {
+                "type": "string",
+                "description": "Trecho EXATO do texto original a remover.",
+            },
+            "detalhe": {
+                "type": "string",
+                "description": "Motivo da remocao.",
+            },
+        },
+        "required": ["rotulo", "trecho_original", "detalhe"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais"] = {
@@ -101,9 +154,13 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
             "o_que": {
                 "type": "string",
                 "description": (
-                    "Identificacao do artigo novo, ex.: 'Art. 6o-A'. Igual ao "
-                    "rotulo usado no 'corpo'."
+                    "Rotulo do artigo novo, ex.: 'Art. 6o-A'. Tambem usado "
+                    "como ancora (apos o artigo-base)."
                 ),
+            },
+            "texto": {
+                "type": "string",
+                "description": "Texto completo e AUTONOMO do artigo novo.",
             },
             "posicao": {
                 "type": "string",
@@ -153,46 +210,38 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["lacunas_identificad
 MELHORIA_DEFINITION["function"]["parameters"]["required"] = [
     "numero",
     "ementa",
-    "corpo",
     "alteracoes",
+    "remocoes",
 ]
-
-# Títulos de capítulo (ex.: 'CAPÍTULO I' e o subtítulo 'DAS DISPOSIÇÕES
-# GERAIS') entram como itens do próprio 'corpo', em ordem de aparecimento,
-# cada linha como um item com tipo 'capitulo'. Documentos sem capítulos não
-# usam esse campo — basta omitir.
-_corpo_items = MELHORIA_DEFINITION["function"]["parameters"]["properties"]["corpo"]["items"]
-_corpo_items["properties"]["tipo"] = {
-    "type": "string",
-    "description": (
-        "'capitulo' para a linha de titulo de capitulo (ex.: 'CAPÍTULO I' ou o "
-        "subtitulo 'DAS DISPOSIÇÕES GERAIS', cada um como item separado e em "
-        "ordem no corpo). Omita para artigos comuns ('artigo', padrao)."
-    ),
-    "enum": ["artigo", "capitulo"],
-}
-_corpo_items["description"] = (
-    "Articulacao do ato em ordem: artigos, incisos/paragrafos e, quando o "
-    "original tiver, itens 'capitulo' (titulos de capitulo) na posicao correta."
-)
+# Modo patch: o modelo NAO reescreve o corpo -- ele só devolve as mudanças.
+MELHORIA_DEFINITION["function"]["parameters"]["properties"].pop("corpo", None)
 
 
 def _sistema_melhoria():
     return (
         "Voce e um consultor juridico experiente da Secretaria de Estado de "
-        "Justiça de Mato Grosso (SEJUS/MT). Sua tarefa e REESCREVER um "
-        "documento normativo enviado pelo usuario com melhorias e adequacoes, "
-        "mantendo o mesmo ato: mesmo numero, mesma ementa, mesmo objeto e "
-        "mesmas assinaturas. Nao crie um ato novo nem mude o sentido do texto "
+        "Justiça de Mato Grosso (SEJUS/MT). Sua tarefa e PROPOR MELHORIAS E "
+        "ADEQUACOES a um documento normativo enviado pelo usuario, mantendo o "
+        "mesmo ato: mesmo numero, mesma ementa, mesmo objeto e mesmas "
+        "assinaturas. Nao crie um ato novo nem mude o sentido do texto "
         "original.\n\n"
+        "MODO DE TRABALHO (PATCH): voce NAO reescreve o documento inteiro. O "
+        "sistema parte do texto original e aplica sua lista de mudancas. "
+        "Devolva apenas:\n"
+        "- 'alteracoes': paragrafos EXISTENTES corrigidos (tipo 'alterado' ou "
+        "'corrigido'), cada um com 'rotulo', 'trecho_original' copiado "
+        "EXATAMENTE do texto recebido e 'novo_texto' com o paragrafo inteiro "
+        "ja corrigido (incluindo o rotulo, como no original).\n"
+        "- 'remocoes': paragrafos EXISTENTES que devem sair (rotulo + "
+        "trecho_original exato).\n"
+        "- 'adicoes_estruturais': artigos NOVOS propostos para fechar lacunas "
+        "de aplicabilidade (com 'o_que', 'texto' completo e autonomo, "
+        "'posicao' e 'motivo').\n"
         "ORIENTACOES DE MELHORIA E ADEQUACAO:\n"
         "1. Preserve o esqueleto do documento: numero, ementa, estrutura de "
         "artigos, titulos de capitulo e assinaturas. Aprimore o texto onde ele "
         "estiver fragil.\n"
-        "2. Capitulos: se o original tiver titulos de capitulo (ex.: 'CAPÍTULO "
-        "I' seguido de 'DAS DISPOSIÇÕES GERAIS'), reproduza TODOS eles como "
-        "itens 'capitulo' do 'corpo', na mesma posicao do original. Nao crie "
-        "capitulos que o original nao tinha.\n"
+        "2. Capitulos: nao crie capitulos que o original nao tinha.\n"
         "3. Fundamentacao legal: confira e ajuste o preambulo e os considerandos "
         "usando as normas e fundamentos presentes nos atos recuperados no RAG "
         "(nao invente referencias que nao possa sustentar nos atos recuperados).\n"
@@ -204,7 +253,8 @@ def _sistema_melhoria():
         "('Art. 34', 'Art. 35') para artigos acrescentados apos o ULTIMO "
         "artigo do ato.\n"
         "6. Fechamento: garanta artigo de vigencia e, quando o original revoga "
-        "algo, preserve a revogacao nos termos corretos.\n"
+        "algo, preserve a revogacao nos termos corretos (via 'alteracoes' ou "
+        "'remocoes').\n"
         "7. ANALISE DE APLICABILIDADE (LACUNAS): revise o ato como quem vai "
         "aplica-lo no dia a dia e avalie cada lacuna: "
         "(a) 'recurso_administrativo' -- recurso ou pedido de reconsideracao "
@@ -220,8 +270,9 @@ def _sistema_melhoria():
         "(f) 'publicacao_vigencia' -- veiculo de publicacao e regime de "
         "vigencia. Se a lacuna existir E houver precedente no RAG rotulado "
         "com o MESMO tema, acrescente UM artigo simples (nao uma serie), no "
-        "capitulo adequado, com numero por sufixo, e registre-o em "
-        "'adicoes_estruturais' com posicao, motivo e lastro. Se a lacuna "
+        "capitulo adequado, com numero por sufixo, e registre-o SOMENTE em "
+        "'adicoes_estruturais' com 'o_que' (rotulo), 'texto' (texto completo e "
+        "autonomo), 'posicao' (onde entra), motivo e lastro. Se a lacuna "
         "existir MAS nao houver precedente rotulado, NAO proponha artigo -- "
         "apenas registre o tema em 'lacunas_identificadas'. Nao encha o "
         "documento de artigos novos: so adicione o que fechar omissao real de "
@@ -231,10 +282,11 @@ def _sistema_melhoria():
         "'lastro' do relatorio. Citacoes VERTICAIS ja embasadas no preambulo "
         "(ex.: LEP, Decreto 548/2016) e citacoes SUBSTANTIVAS (ex.: o ato "
         "concreto a ser revogado) podem entrar no texto.\n"
-        "9. Separacao: toda mudanca em texto EXISTENTE vai em 'alteracoes' "
-        "(alterado/corrigido/removido); todo artigo NOVO vai em "
-        "'adicoes_estruturais' (adicionado). Mude apenas o necessario: se um "
-        "trecho ja esta adequado, mantenha-o sem lista-lo.\n"
+        "9. Mude apenas o necessario: se um trecho ja esta adequado, NAO o "
+        "liste em lugar algum (o sistema mantem o original intacto). Nao altere "
+        "apenas tipografia (travessao por hifen, aspas, espacos). 'trecho_original' "
+        "DEVE casar com o texto do documento recebido -- copie fielmente, sem "
+        "reescrever, sem encurtar alem do paragrafo exato.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -248,8 +300,10 @@ def _usuario_melhoria(
 ) -> str:
     partes = [
         (
-            "DOCUMENTO ORIGINAL ENVIADO PELO USUARIO (reescreva ESTE documento "
-            "com melhorias, preservando numero, ementa, objeto e assinaturas):"
+            "DOCUMENTO ORIGINAL ENVIADO PELO USUARIO (liste as mudancas contra "
+            "ESTE texto: nao reescreva o documento, apenas aponte alteracoes, "
+            "remocoes e adicoes, preservando numero, ementa, objeto e "
+            "assinaturas):"
         ),
         str(conteudo)[:60_000],
         "",
@@ -277,14 +331,14 @@ def _usuario_melhoria(
     return "\n".join(partes)
 
 
-# Completude mínima para aceitar uma melhoria sem re-tentar/errar: a melhoria
-# deve reproduzir o ato (mesmo número, ementa, objeto) — encolher demais ou
-# omitir artigos descaracteriza o documento.
-_MELHORIA_MAX_TOKENS_DEFAULT = 16384
-_COMPLETUDE_MIN_ARTIGOS = 0.8
-_COMPLETUDE_MIN_RATIO = 0.55
+# Orçamento de tokens da melhoria. Como o fluxo usa patch (só as mudanças são
+# devolvidas pelo modelo), a resposta é pequena; mesmo assim o orçamento NUNCA
+# sobe acima do teto do modelo (evita o erro 400 da API OpenAI em modelos com
+# saída limitada, ex.: gpt-4o-mini). O padrão fica abaixo do teto para que
+# MELHORIA_MAX_TOKENS ainda tenha efeito em documentos grandes.
+_MELHORIA_MAX_TOKENS_DEFAULT = 8192
 
-_RE_ARTIGO_ORIGEM = re.compile(r"^\s*art\.?\s*\d", re.IGNORECASE)
+
 def _remover_acentos(texto: str) -> str:
     """Remove acentos caracteristicos do português para permitar comparação
    regex case-insensitive com variantes acentuadas."""
@@ -313,178 +367,178 @@ def _tem_capitulo(linha: str) -> str | bool:
     if m2:
         return m2.group(1).casefold()
     return False
-_RE_INCISO_ORIGEM = re.compile(r"^\s*([ivxl]{1,4})\s*[-–—]", re.IGNORECASE)
-_RE_PARAGRAFO_ORIGEM = re.compile(r"^\s*(?:§\s*\d|par[áa]grafo\s+[úu]nico)", re.IGNORECASE)
-
-_MENSAGEM_PRESERVAR = (
-    "A versão gerada ficou INCOMPLETA: artigos, títulos de capítulo e trechos "
-    "do documento original foram omitidos e o texto encolheu. Refaça "
-    "preservando TODOS os artigos, capítulos, considerandos, títulos e o nível "
-    "de detalhamento do original — não omita, não resuma e não renumere de "
-    "forma que descaracterize o ato. Devolva o JSON completo e encerrado."
-)
 
 
-def _numero_artigo(texto: str) -> str | None:
-    """Extrai o número do artigo (ex.: '5', '5º', '10') de uma linha como
-    'Art. 5º ...' ou 'Art. 10 ...'."""
-    m = re.match(r"^\s*art\.?\s*(\d+[\wº°]*)", texto or "", re.IGNORECASE)
-    if m:
-        return re.sub(r"[^\d]", "", m.group(1))
-    return None
+def _chave_linha(texto: str) -> str:
+    """Chave normalizada de um trecho para ancorar mudanças no original."""
+    return _chave_texto(texto)
 
 
-def _ordinal_romano(texto: str) -> int:
-    """Converte numeral romano simples (i, ii, iii, iv, v) em valor inteiro."""
-    valores = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5,
-               "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10}
-    return valores.get(texto.casefold(), 0)
+def _aplicar_patch_no_texto(
+    conteudo: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+) -> str:
+    """Aplica as mudanças (patch) ao texto original e devolve o 'depois'.
 
+    Cada mudança é ancorada ao primeiro parágrafo do original cuja chave casing
+    com 'trecho_original' ou 'rotulo'. Alterações substituem o parágrafo por
+    'novo_texto'; remoções apagam o parágrafo. Tudo o que não foi citado
+    permanece intacto — o original nunca é encolhido por omissão do modelo.
+    """
+    linhas: list[str | None] = list((conteudo or "").splitlines())
 
-def _esqueleto_original(conteudo: str) -> dict:
-    """Extrai do conteúdo original (texto extraído do DOCX) o esqueleto de
-    capítulos, artigos, incisos e parágrafos, para comparação estrutural."""
-    esqueleto = {"capitulos": set(), "artigos": {}}
-    artigo_atual = None
-    for linha in (conteudo or "").splitlines():
-        t = linha.strip()
-        if not t:
+    def _encontrar(campos: dict) -> int | None:
+        alvos = [
+            _chave_linha(campos.get(nome) or "")
+            for nome in ("trecho_original", "rotulo")
+        ]
+        alvos = [a for a in alvos if a]
+        for i, linha in enumerate(linhas):
+            if linha is None:
+                continue
+            chave = _chave_linha(linha)
+            if any(chave == a or chave.startswith(a) for a in alvos):
+                return i
+        return None
+
+    for a in alteracoes:
+        if not isinstance(a, dict):
             continue
-        m = _tem_capitulo(linha)
-        if m:
-            esqueleto["capitulos"].add(m)
-            artigo_atual = None
+        i = _encontrar(a)
+        if i is not None:
+            linhas[i] = (a.get("novo_texto") or "").strip()
+    for r in remocoes:
+        if not isinstance(r, dict):
             continue
-        m = _RE_ARTIGO_ORIGEM.match(linha)
-        if m:
-            artigo_atual = _numero_artigo(linha)
-            esqueleto["artigos"].setdefault(artigo_atual, {"incisos": set(), "paragrafos": set()})
-            continue
-        if artigo_atual is None:
-            continue
-        m = _RE_INCISO_ORIGEM.match(linha)
-        if m:
-            esqueleto["artigos"][artigo_atual]["incisos"].add(m.group(1).casefold())
-            continue
-        if _RE_PARAGRAFO_ORIGEM.match(linha):
-            m2 = re.match(r"^\s*§\s*(\d+)", linha)
-            chave = f"num:{m2.group(1)}" if m2 else "unico"
-            esqueleto["artigos"][artigo_atual]["paragrafos"].add(chave)
-    return esqueleto
+        i = _encontrar(r)
+        if i is not None:
+            linhas[i] = None
+    return "\n".join(linha for linha in linhas if linha is not None)
 
 
-def _esqueleto_estrutura(estrutura: dict) -> dict:
-    """Extrai da estrutura JSON devolvida pelo LLM o mesmo esqueleto para
-    comparação com o original."""
-    esqueleto = {"capitulos": set(), "artigos": {}}
-    for item in (estrutura.get("corpo") or []):
-        tipo = (item.get("tipo") or "artigo").casefold()
-        rotulo = item.get("rotulo") or ""
-        m = re.match(r"^\s*art\.?\s*(\d+[\wº°]*)", rotulo, re.IGNORECASE)
-        if m:
-            chave = re.sub(r"[^\d]", "", m.group(1))
-            art = esqueleto["artigos"].setdefault(chave, {"incisos": set(), "paragrafos": set()})
-        else:
-            continue
-        for sub in (item.get("subitens") or []):
-            stipo = (sub.get("tipo") or "inciso").casefold()
-            srot = (sub.get("rotulo") or "")
-            if stipo == "paragrafo":
-                m2 = re.match(r"^\s*§\s*(\d+)", srot)
-                chave_par = f"num:{m2.group(1)}" if m2 else "unico"
-                art["paragrafos"].add(chave_par)
-            else:
-                m2 = re.match(r"^\s*([ivxl]{1,4})(?:[.\s\-–—]|$)", srot, re.IGNORECASE)
-                if m2 and art is not None:
-                    art["incisos"].add(m2.group(1).casefold())
-    for item in (estrutura.get("corpo") or []):
-        if (item.get("tipo") or "").casefold() == "capitulo":
-            texto = (item.get("texto") or "")
-            m = _tem_capitulo(texto)
-            if m:
-                esqueleto["capitulos"].add(m)
-    return esqueleto
-
-
-def _incompletudes_estruturais(conteudo: str, estrutura: dict) -> list[str]:
-    """Retorna uma lista descrevendo o que de estrutural está faltando na
-    estrutura em relação ao original (capítulos, incisos, parágrafos)."""
-    orig = _esqueleto_original(conteudo)
-    ger = _esqueleto_estrutura(estrutura)
-    problemas: list[str] = []
-    cap_faltantes = sorted(orig["capitulos"] - ger["capitulos"],
-                           key=_ordinal_romano)
-    if cap_faltantes:
-        problemas.append(
-            "capítulos ausentes: " + ", ".join(
-                f"CAPÍTULO {c.upper()}" for c in cap_faltantes
-            )
+def _estruturar_original(conteudo: str) -> dict:
+    """Estrutura mínima a partir do texto original: cada linha vira um item de
+    'corpo' (linhas de capítulo ganham tipo 'capitulo'); a primeira linha é o
+    'numero'. Suficiente para renderizar a prévia/texto ('Copiar') e para o
+    'montar_docx' (versões não-docx) sem heurística frágil de seções."""
+    linhas = [linha.strip() for linha in (conteudo or "").splitlines() if linha.strip()]
+    corpo: list[dict] = []
+    for i, linha in enumerate(linhas):
+        if i == 0:
+            continue  # vira 'numero'
+        corpo.append(
+            {
+                "tipo": "capitulo" if _tem_capitulo(linha) else "artigo",
+                "rotulo": "",
+                "texto": linha,
+                "subitens": [],
+            }
         )
-    for chave in sorted(orig["artigos"].keys(), key=_ordinal_romano):
-        dados_orig = orig["artigos"][chave]
-        dados_ger = ger["artigos"].get(chave)
-        if dados_ger is None:
-            problemas.append(f"Art. {chave}: artigo ausente da articulação")
+    return {
+        "numero": linhas[0] if linhas else "",
+        "ementa": "",
+        "considerandos": [],
+        "preambulo": "",
+        "resolutivo": "",
+        "corpo": corpo,
+        "fechamento": [],
+        "local_data": "",
+        "assinaturas": [],
+    }
+
+
+def _construir_estrutura(
+    conteudo: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    numero: str = "",
+    ementa: str = "",
+) -> dict:
+    """Monta a estrutura final: o original do usuário com o patch aplicado.
+
+    O número/ementa devolvidos pelo modelo (campos preservados do ato, que ele
+    pode corrigir) sobrescrevem os originais; o corpo vem sempre do texto
+    original + mudanças."""
+    depois = _aplicar_patch_no_texto(conteudo, alteracoes, remocoes)
+    estrutura = _estruturar_original(depois)
+    if (numero or "").strip():
+        estrutura["numero"] = numero
+    if (ementa or "").strip():
+        estrutura["ementa"] = ementa
+    return estrutura
+
+
+def _problemas_do_patch(
+    conteudo: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+) -> list[str]:
+    """Valida a sanidade do patch (substitui a antiga guarda de completude).
+
+    Toda alteração/remoção precisa de campos mínimos e de âncora
+    ('trecho_original' ou 'rotulo') resolvível no texto ORIGINAL — sem âncora a
+    mudança seria silenciosamente ignorada. Devolve a lista de problemas (vazia
+    = patch saudável)."""
+    linhas = [linha for linha in (conteudo or "").splitlines() if linha.strip()]
+    chaves = [_chave_linha(linha) for linha in linhas]
+    problemas: list[str] = []
+
+    def _ancora_ok(item: dict) -> bool:
+        alvos = [
+            _chave_linha(item.get(nome) or "")
+            for nome in ("trecho_original", "rotulo")
+        ]
+        alvos = [a for a in alvos if a]
+        if not alvos:
+            return False
+        return any(
+            chave == a or chave.startswith(a)
+            for chave in chaves
+            for a in alvos
+        )
+
+    for a in alteracoes:
+        if not isinstance(a, dict):
+            problemas.append("alteracoes possui item invalido")
             continue
-        inc_falt = sorted(dados_orig["incisos"] - dados_ger["incisos"],
-                          key=_ordinal_romano)
-        if inc_falt:
+        if a.get("tipo") not in ("alterado", "corrigido"):
             problemas.append(
-                f"Art. {chave}: faltam incisos " + ", ".join(i.upper() for i in inc_falt)
+                f"tipo invalido em alteracao: {a.get('tipo')!r} "
+                "(use 'alterado' ou 'corrigido'; remocoes ficam em 'remocoes')"
             )
-        par_falt = sorted(dados_orig["paragrafos"] - dados_ger["paragrafos"])
-        if par_falt:
+        if not (a.get("novo_texto") or "").strip():
+            problemas.append(f"novo_texto ausente: {a.get('rotulo') or '?'}")
+        if not (a.get("trecho_original") or "").strip():
+            problemas.append(f"trecho_original ausente: {a.get('rotulo') or '?'}")
+        elif not _ancora_ok(a):
             problemas.append(
-                f"Art. {chave}: faltam parágrafos " + ", ".join(p for p in par_falt)
+                f"ancora nao encontrada no original: {a.get('rotulo') or '?'}"
+            )
+    for r in remocoes:
+        if not isinstance(r, dict):
+            problemas.append("remocoes possui item invalido")
+            continue
+        if not (r.get("rotulo") or "").strip() or not (r.get("trecho_original") or "").strip():
+            problemas.append("remocao sem rotulo/trecho_original")
+        elif not _ancora_ok(r):
+            problemas.append(
+                f"ancora nao encontrada para remocao: {r.get('rotulo') or '?'}"
             )
     return problemas
 
 
-def _mensagem_retry_especifica(incompletudes: list[str]) -> str:
-    """Constrói a mensagem de retry apontando exatamente o que está faltando."""
-    detalhes = "; ".join(incompletudes)
-    # Garante que referências a art. 5 e art. 28 apareçam na mensagem,
-    # pois o teste espera essas referências mesmo quando a validação
-    # estrutural não as detecta explicitamente.
-    referencias = []
-    if any("art. 5" in str(c).lower() or "artigo 5" in str(c).lower() for c in incompletudes):
-        referencias.append("art. 5")
-    if any("art. 28" in str(c).lower() or "artigo 28" in str(c).lower() for c in incompletudes):
-        referencias.append("art. 28")
-    if not referencias:
-        # Sempre inclui as referências padrão quando a estrutura original as contém
-        referencias = ["art. 5", "art. 28"]
-    detalhes = "; ".join(incompletudes + [f"{r} deve ser reproduzido exatamente como no original" for r in referencias])
+def _mensagem_retry_especifica(problemas: list[str]) -> str:
+    """Mensagem de retry apontando exatamente os problemas de sanidade do patch."""
+    detalhes = "; ".join(problemas)
     return (
-        "A versão gerada ficou incompleta e o documento original foi "
-        "descaracterizado. Faltaram trechos estruturais que devem ser "
-        "REPRODUZIDOS exatamente como no original: "
-        f"{detalhes}. "
-        "Reaja preservando TODOS os capítulos, incisos e parágrafos no "
-        "mesmo artigo e na mesma posição, sem omitir, sem resumir e sem "
-        "renumerar. Devolva o JSON completo e encerrado."
+        "A lista de mudanças está incompleta ou com âncoras erradas. Problemas "
+        f"detectados: {detalhes}. "
+        "Reenvie o JSON com cada item de 'alteracoes' e 'remocoes' apontando "
+        "'trecho_original' copiado EXATAMENTE do texto original (mesma grafia, "
+        "sem resumir) e 'novo_texto' completo para as alteracoes. Devolva o "
+        "JSON valido e encerrado."
     )
-
-
-def _melhoria_incompleta(conteudo: str, estrutura: dict) -> bool:
-    """Diz se a estrutura gerada omitiu conteúdo relevante do original.
-
-    Primeiro verifica a integridade estrutural (capítulos, incisos, parágrafos),
-    depois confere a proporção de artigos e o tamanho do texto."""
-    incompletudes = _incompletudes_estruturais(conteudo, estrutura)
-    if incompletudes:
-        return True
-
-    linhas_origem = [linha.strip() for linha in (conteudo or "").splitlines()]
-    artigos_origem = sum(1 for linha in linhas_origem if _RE_ARTIGO_ORIGEM.match(linha))
-    artigos_gerados = len(estrutura.get("corpo") or []) + len(
-        estrutura.get("fechamento") or []
-    )
-    if artigos_origem and artigos_gerados < artigos_origem * _COMPLETUDE_MIN_ARTIGOS:
-        return True
-
-    tamanho_depois = len(minuta_para_texto(estrutura))
-    return tamanho_depois < max(1, len(conteudo or "")) * _COMPLETUDE_MIN_RATIO
 
 
 def gerar_estrutura_melhoria(
@@ -493,17 +547,16 @@ def gerar_estrutura_melhoria(
     perfil: PerfilModelo,
     contexto: list[dict],
     valores: dict | None = None,
-) -> tuple[dict, list[dict], list[dict], list[dict]]:
-    """Chama o LLM e devolve (estrutura, correções, adições, lacunas).
+) -> tuple[dict, list[dict], list[dict], list[dict], list[dict]]:
+    """Chama o LLM e devolve (estrutura, alteracoes, remocoes, adicoes, lacunas).
 
-    Além da estrutura melhorada e das ``alteracoes`` (correções em texto
-    existente), devolve as ``adicoes_estruturais`` (artigos novos propostos
-    para fechar lacunas) e as ``lacunas_identificadas`` pelo modelo.
-
-    Ao contrário da minuta livre, a melhoria deve reproduzir o documento
-    completo: usa um orçamento de tokens maior (``MELHORIA_MAX_TOKENS``) e uma
-    guarda de completude que re-tenta (e depois erra com mensagem clara) caso o
-    modelo omita artigos ou encolha o texto, em vez de entregar um ato cortado.
+    Modo patch: o modelo devolve apenas as mudanças ancoradas ao texto original;
+    a ``estrutura`` final é montada em ``_construir_estrutura`` (original +
+    patch), impossibilitando o truncamento por reescrita integral. A guarda vira
+    a sanidade do patch (``_problemas_do_patch``): campos mínimos + âncora
+    resolvível. Se falhar, re-tenta uma vez com mensagem direcionada; se mesmo
+    assim persistir, o melhor esforço é devolvido para que o arquivo sempre seja
+    entregue.
     """
     mensagens = [
         {"role": "system", "content": _sistema_melhoria()},
@@ -513,10 +566,18 @@ def gerar_estrutura_melhoria(
         },
     ]
 
+    valor_env = os.getenv("MELHORIA_MAX_TOKENS")
     max_tokens = max(
         _MELHORIA_MAX_TOKENS_DEFAULT,
-        int(os.getenv("MELHORIA_MAX_TOKENS") or _MELHORIA_MAX_TOKENS_DEFAULT),
+        int(valor_env) if valor_env else _MELHORIA_MAX_TOKENS_DEFAULT,
     )
+    max_tokens = min(max_tokens, _TETO_TOKENS_MODELO)
+
+    estrutura: dict = _estruturar_original(conteudo)
+    alteracoes: list[dict] = []
+    remocoes: list[dict] = []
+    adicoes: list[dict] = []
+    lacunas: list[dict] = []
 
     for tentativa in range(2):
         dados = _extrair_json_com_retry(
@@ -525,68 +586,32 @@ def gerar_estrutura_melhoria(
             max_tokens,
             preservar_completo=True,
         )
-        estrutura = _padronizar(
-            {
-                chave: valor
-                for chave, valor in dados.items()
-                if chave
-                not in ("alteracoes", "adicoes_estruturais", "lacunas_identificadas")
-            },
-            tipo_ato,
-        )
+        numero = dados.get("numero") or ""
+        ementa = dados.get("ementa") or ""
         alteracoes = [a for a in (dados.get("alteracoes") or []) if isinstance(a, dict)]
         for a in alteracoes:
-            if "estado" not in a:
-                a["estado"] = ESTADO_PENDENTE
-        adicoes = [
-            a for a in (dados.get("adicoes_estruturais") or []) if isinstance(a, dict)
-        ]
+            a.setdefault("estado", ESTADO_PENDENTE)
+        remocoes = [r for r in (dados.get("remocoes") or []) if isinstance(r, dict)]
+        for r in remocoes:
+            r.setdefault("estado", ESTADO_PENDENTE)
+        adicoes = [a for a in (dados.get("adicoes_estruturais") or []) if isinstance(a, dict)]
         for a in adicoes:
-            if "estado" not in a:
-                a["estado"] = ESTADO_PENDENTE
+            a.setdefault("estado", ESTADO_PENDENTE)
         lacunas = [
             l for l in (dados.get("lacunas_identificadas") or []) if isinstance(l, dict)
         ]
 
-        adicoes = [
-            a for a in (dados.get("adicoes_estruturais") or []) if isinstance(a, dict)
-        ]
-        for a in adicoes:
-            if "estado" not in a:
-                a["estado"] = ESTADO_PENDENTE
-        lacunas = [
-            l for l in (dados.get("lacunas_identificadas") or []) if isinstance(l, dict)
-        ]
+        problemas = _problemas_do_patch(conteudo, alteracoes, remocoes)
+        estrutura = _construir_estrutura(conteudo, alteracoes, remocoes, numero, ementa)
+        if not problemas:
+            return estrutura, alteracoes, remocoes, adicoes, lacunas
 
-    # Removida a guarda de completude estrita: o sistema sempre tenta gerar
-    # a estrutura completa, mas caso a modelo omita conteúdo, a estrutura
-    # será retornada mesmo com perdas, e o usuário será orientado via
-    # mensagem de retry ou modo analysis-only.
-    # if not _melhoria_incompleta(conteudo, estrutura):
-    #     return estrutura, alteracoes, adicoes, lacunas
+        if tentativa == 0:
+            mensagens.append(
+                {"role": "user", "content": _mensagem_retry_especifica(problemas)}
+            )
 
-    if tentativa == 0:
-            # Primeira tentativa falhou: adiciona mensagem de retry apontando
-            # exatamente o que a validação estrutural detectou como faltando.
-            incompletudes = _incompletudes_estruturais(conteudo, estrutura)
-            if incompletudes:
-                mensagens.append(
-                    {"role": "user", "content": _mensagem_retry_especifica(incompletudes)}
-                )
-            else:
-                # Se passou na estrutura mas falhou em artigo/tamanho, mantém
-                # mensagem genérica para não poluir com detalhes que já foram
-                # checados.
-                mensagens.append({"role": "user", "content": _MENSAGEM_PRESERVAR})
-            max_tokens *= 2
-
-    max_tokens *= 2
-
-# A tentativa excedeu o limite; retorna o que foi gerado mesmo assim,
-    # para que a interface não quebre. O caller pode decidir se aplica
-    # as alteracoes ou solicita novo tentativa com ajuste de foco.
-    return estrutura, alteracoes, adicoes, lacunas
-
-
-# Caso todas as tentativas esgotem, retorna a estrutura final com
-# a mensagem de aviso incorporada via alteracoes/lacunas.
+    # As duas tentativas falharam: entrega o melhor esforço mesmo incompleto,
+    # para que o arquivo sempre seja gerado e entregue ao usuário. O conteúdo
+    # afetado é sinalizado à parte (aviso) quando possível.
+    return estrutura, alteracoes, remocoes, adicoes, lacunas

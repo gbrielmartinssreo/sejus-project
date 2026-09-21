@@ -62,14 +62,18 @@ do tema. Sempre que a minuta for preenchida automaticamente, ela exige revisao.
 ## Melhorar e comparar um documento (.docx)
 
 Depois do `POST /api/upload`, peça no chat uma melhoria do arquivo enviado
-(ex.: "melhore esta portaria"). O agente propõe a nova versão e a página
-mostra a comparação antes/depois (alterações, adições estruturais e lacunas).
+(ex.: "melhore esta portaria"). A melhoria trabalha em **modo patch**: o modelo
+não reescreve o documento — ele devolve apenas as mudanças ancoradas ao texto
+original (`alteracoes`, `remocoes` e `adicoes_estruturais`). O sistema copia o
+original e aplica o patch, então parágrafos não citados permanecem intactos e o
+resultado nunca é truncado por limite de tokens. A página mostra a comparação
+antes/depois (alterações, remoções, adições estruturais e lacunas).
 
 Para entradas `.docx`, o resultado servido por `GET /api/minuta/docx` é uma
 **cópia do arquivo original com as mudanças já marcadas**:
 
-- texto adicionado/recomposto sai em verde;
-- texto removido/recomposto fica visível com tachado;
+- texto alterado/adicionado sai em verde;
+- texto alterado/removido fica visível com tachado;
 - parágrafos iguais permanecem intactos.
 
 `GET /api/minuta/pdf` converte essa cópia marcada em PDF (via LibreOffice),
@@ -181,7 +185,7 @@ uv run pytest tests/ -q
   endpoint `/api/chat` e upload de arquivos.
 - `tests/prompts/` — cenarios de pedido por tipo de ato usados nos testes de
   geracao de documentos.
-
-`tests/test_minuta_melhoria.py` tem 5 casos que testam o loop de retry de
-`gerar_estrutura_melhoria` e hoje falham por bug pré-existente nessa função
-(`IndexError: pop from empty list`); não foram tocados nesta mudança.
+- `tests/test_minuta_melhoria.py` e `tests/test_integridade_melhoria.py` —
+  fluxo de melhoria em modo patch: teto de tokens com clamp, sanidade do
+  patch (âncoras/campos), retry e construção da estrutura a partir do
+  original + patch sem perda de capítulos/incisos.

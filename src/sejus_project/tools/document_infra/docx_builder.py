@@ -8,7 +8,6 @@ normalizada e devolve o caminho do arquivo gerado.
 """
 from __future__ import annotations
 
-import difflib
 import re
 import uuid
 from pathlib import Path
@@ -28,6 +27,31 @@ from sejus_project.tools.document_infra.docx_engine import (
 from sejus_project.tools.document_infra.modelos import PerfilModelo
 
 _SIMPLES = re.compile(r"\s+")
+
+# Equivalentes tipográficos para _chave_linha: travessões/hífens variantes -> '-',
+# aspas curvas -> retas, espaços de largura variável -> espaço simples.
+_TIPOGRAFIA_EQUIVALENTE = str.maketrans(
+    {
+        "–": "-",
+        "—": "-",
+        "‒": "-",
+        "‑": "-",
+        "−": "-",
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "«": '"',
+        "»": '"',
+        "\u00a0": " ",
+        "\u2007": " ",
+        "\u2009": " ",
+        "\u202f": " ",
+        "\u2003": " ",
+    }
+)
 
 _VERBO_ATO = {
     "portaria": "Esta Portaria",
@@ -247,82 +271,81 @@ def montar_docx(
 # ---------------------------------------------------------------------------
 
 def _chave_linha(texto: str) -> str:
-    """Chave de comparação por linha/parágrafo (espaços colapsados, caixa baixa)."""
-    return _SIMPLES.sub(" ", (texto or "").strip()).casefold()
+    """Chave de comparação por linha/parágrafo.
 
-
-def _paragrafos_estrutura(estrutura: dict) -> list[dict]:
-    """Converte a estrutura da minuta numa lista ordenada de parágrafos.
-
-    Cada item guarda o ``papel`` (para escolher a referência de formatação), o
-    ``rotulo`` e o ``texto`` — mesmos dados que ``montar_docx`` usa para montar
-    o corpo, agora com a ordem de redação do documento preservada.
+    Normaliza variantes de tipografia (travessões e hífens, aspas curvas e os
+    vários espaços unicode) para que diferenças puramente tipográficas não
+    virem falsos 'replace' no diff, depois colapsa espaços e converte para
+    caixa baixa.
     """
-    paragrafos: list[dict] = []
-
-    def add(papel: str, rotulo: str, texto: str) -> None:
-        texto = (texto or "").strip()
-        if texto:
-            paragrafos.append(
-                {"papel": papel, "rotulo": (rotulo or "").strip(), "texto": texto}
-            )
-
-    add("titulo", "", estrutura.get("numero", ""))
-    add("ementa", "", estrutura.get("ementa", ""))
-
-    for considerando in estrutura.get("considerandos") or []:
-        add("considerando", "", considerando)
-
-    add("preambulo", "", estrutura.get("preambulo", ""))
-    add("resolutivo", "", estrutura.get("resolutivo", ""))
-
-    for artigo in estrutura.get("corpo") or []:
-        if artigo.get("tipo") == "capitulo":
-            add("capitulo", "", artigo.get("texto", ""))
-            continue
-        add("artigo", artigo.get("rotulo", ""), artigo.get("texto", ""))
-        for sub in artigo.get("subitens") or []:
-            papel = "paragrafo" if sub.get("tipo") == "paragrafo" else "inciso"
-            add(papel, sub.get("rotulo", ""), sub.get("texto", ""))
-
-    for fechamento in estrutura.get("fechamento") or []:
-        add("artigo", fechamento.get("rotulo", ""), fechamento.get("texto", ""))
-
-    add("data", "", estrutura.get("local_data", ""))
-    for assinatura in estrutura.get("assinaturas") or []:
-        add("assinatura", "", assinatura.get("nome", ""))
-        add("assinatura", "", assinatura.get("cargo", ""))
-
-    return paragrafos
+    texto = (texto or "").translate(_TIPOGRAFIA_EQUIVALENTE)
+    return _SIMPLES.sub(" ", texto.strip()).casefold()
 
 
-def _chave_paragrafos(meta: dict) -> str:
-    """Linha de comparação de um parágrafo da estrutura (rótulo + texto)."""
-    texto = f"{meta['rotulo']} {meta['texto']}".strip() if meta["rotulo"] else meta["texto"]
-    return _chave_linha(texto)
+_RE_ARTIGO_PAR = re.compile(r"^\s*art\.?\s*(\d+)", re.IGNORECASE)
+_RE_SUBITEM_PAR = re.compile(
+    r"^\s*(?:§\s*\d|par[áa]grafo\s+[úu]nico|[ivxl]{1,4}\s*[-–—])",
+    re.IGNORECASE,
+)
+
+
+def _numero_artigo_de(texto: str) -> str | None:
+    """Número-base de um parágrafo de artigo ('Art. 6º-A ...' -> '6')."""
+    m = _RE_ARTIGO_PAR.match(texto or "")
+    return m.group(1) if m else None
+
+
+def _indice_ancora_adicao(miolo_pars: list, rotulo: str, posicao: str) -> int | None:
+    """Índice do parágrafo após o qual inserir um artigo novo.
+
+    Procura o último parágrafo de artigo cujo número-base casar com o rótulo
+    (ex.: 'Art. 6º-A' -> '6'; fallback: número citado em ``posicao``) e avança
+    sobre os incisos/parágrafos do artigo localizado — o artigo novo entra
+    DEPOIS deles. Sem âncora, devolve None (captura no fim do miolo).
+    """
+    base = _numero_artigo_de(rotulo)
+    alvos = [base] if base else []
+    alvos += re.findall(r"\d+", posicao or "")
+    if not alvos:
+        return None
+    candidatos = [
+        i
+        for i, wp in enumerate(miolo_pars)
+        if _numero_artigo_de(paragraph_text(wp)) in alvos
+    ]
+    if not candidatos:
+        return None
+    idx = candidatos[-1]
+    while (
+        idx + 1 < len(miolo_pars)
+        and _RE_SUBITEM_PAR.match(paragraph_text(miolo_pars[idx + 1]))
+    ):
+        idx += 1
+    return idx
 
 
 def montar_docx_revisado(
     perfil: PerfilModelo,
-    estrutura: dict,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
     output_dir: Path,
-    adicoes_rotulos: set[str] | None = None,
 ) -> Path:
-    """Duplica o DOCX original e marca visualmente as mudanças da melhoria.
+    """Duplica o DOCX original e marca visualmente as mudanças (patch) da
+    melhoria.
 
-    Diferente de ``montar_docx`` (que reconstroi o corpo a partir do zero),
-    aqui o resultado é uma cópia do próprio arquivo original: cada parágrafo do
-    miolo normativo é comparado (diff linha a linha) contra a estrutura
-    melhorada —
+    Diferente de ``montar_docx`` (que reconstrói o corpo a partir do zero),
+    aqui o resultado é uma cópia do próprio arquivo original: cada mudança das
+    listas é ancorada ao parágrafo correspondente do miolo normativo (por
+    ``trecho_original``/``rotulo``, chave normalizada para ignorar tipografia) —
 
-    * igual → fica intacto;
-    * removido → fica visível com tachado;
     * alterado → o antigo sai tachado seguido do novo em verde;
-    * adicionado → entra em verde.
+    * removido → fica visível com tachado;
+    * adicionado (``adicoes_estruturais``) → novo artigo em verde, após o
+      artigo-base (seus incisos/§) ou no fim do miolo;
+    * não citado → fica intacto (o original nunca some por truncamento).
 
     Cabeçalho, rodapé de imprensa e demais partes do original são preservados.
-    ``adicoes_rotulos`` (rótulos normalizados dos artigos novos) é mantido como
-    metadado para diagnóstico — visualmente toda adição fica verde.
     """
     doc = _abrir_ou_criar(perfil.file)
     refs = _referencias(doc, perfil)
@@ -334,39 +357,80 @@ def montar_docx_revisado(
         for i, ch in enumerate(children)
         if inicio <= i < fim and ch.tag == qn("w:p")
     ]
-    antes = [_chave_linha(paragraph_text(wp)) for wp in miolo_pars]
-    novos = _paragrafos_estrutura(estrutura)
-    depois = [_chave_paragrafos(p) for p in novos]
 
-    def novo_paragrafo(meta: dict):
-        papel = meta["papel"]
-        if not _pedir_paragrafo(refs, papel):
+    def paragrafo_novo(texto: str, rotulo: str = "", papel: str = "artigo"):
+        if not texto.strip() or not _pedir_paragrafo(refs, papel):
             return None
         ref = _referencia_para(refs, papel)
-        w_p = build_paragraph(ref, meta["rotulo"], meta["texto"])
+        w_p = build_paragraph(ref, rotulo, texto)
         verde(w_p)
         return w_p
 
-    matcher = difflib.SequenceMatcher(None, antes, depois, autojunk=False)
-    for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
-        if opcode in ("equal", "delete", "replace"):
-            prev_wp = None
-            for k in range(i1, i2):
-                prev_wp = miolo_pars[k]
-                if opcode != "equal":
-                    tachar(prev_wp)
-            if opcode == "replace":
-                for meta in novos[j1:j2]:
-                    w_p = novo_paragrafo(meta)
-                    if w_p is not None:
-                        prev_wp.addnext(w_p)
-                        prev_wp = w_p
-        else:  # insert
-            alvo = miolo_pars[i2] if i2 < len(miolo_pars) else ancora
-            for meta in novos[j1:j2]:
-                w_p = novo_paragrafo(meta)
-                if w_p is not None:
-                    alvo.addprevious(w_p)
+    def _ancoras(item: dict) -> list[str]:
+        return [
+            _chave_linha(item.get(campo) or "")
+            for campo in ("trecho_original", "rotulo")
+        ]
+
+    def _encontrar(item: dict, usados: set[int]) -> int | None:
+        alvos = [a for a in _ancoras(item) if a]
+        for i, wp in enumerate(miolo_pars):
+            if i in usados:
+                continue
+            chave = _chave_linha(paragraph_text(wp))
+            if any(chave == a or chave.startswith(a) for a in alvos):
+                return i
+        return None
+
+    acoes: dict[int, dict] = {}
+    for item in alteracoes:
+        if not isinstance(item, dict):
+            continue
+        i = _encontrar(item, set(acoes))
+        if i is not None:
+            acoes[i] = {"tipo": "alterado", "novo_texto": item.get("novo_texto") or ""}
+    for item in remocoes:
+        if not isinstance(item, dict):
+            continue
+        i = _encontrar(item, set(acoes))
+        if i is not None:
+            acoes[i] = {"tipo": "removido"}
+
+    for i in sorted(acoes):
+        wp = miolo_pars[i]
+        acao = acoes[i]
+        if acao["tipo"] in ("alterado", "removido"):
+            tachar(wp)
+        if acao["tipo"] == "alterado":
+            novo = paragrafo_novo(acao["novo_texto"])
+            if novo is not None:
+                wp.addnext(novo)
+
+    insercoes: dict[int | None, list] = {}
+    for ad in adicoes:
+        if not isinstance(ad, dict):
+            continue
+        texto = (ad.get("texto") or "").strip()
+        if not texto:
+            continue
+        # O 'texto' de adicoes_estruturais já é o parágrafo COMPLETO (inclui
+        # o rótulo 'Art. Nº-A ...'): não duplica o rótulo no build_paragraph.
+        w_p = paragrafo_novo(texto)
+        if w_p is None:
+            continue
+        alvo = _indice_ancora_adicao(miolo_pars, ad.get("o_que") or "", ad.get("posicao") or "")
+        insercoes.setdefault(alvo, []).append(w_p)
+
+    for alvo in sorted(insercoes, key=lambda x: -1 if x is None else x):
+        if alvo is not None:
+            no = miolo_pars[alvo]
+        elif miolo_pars:
+            no = miolo_pars[-1]
+        else:
+            no = ancora
+        for w_p in insercoes[alvo]:
+            no.addnext(w_p)
+            no = w_p
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{perfil.name}_{uuid.uuid4().hex[:8]}.docx"

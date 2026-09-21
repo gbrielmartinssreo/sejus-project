@@ -18,6 +18,11 @@ from sejus_project.tools.document_infra.modelos import PerfilModelo
 
 _SIMPLES = re.compile(r"\s+")
 
+# Teto de tokens de saída do modelo usado por padrão (gpt-4o-mini = 16384).
+# Os retries de JSON truncado NUNCA dobram além deste valor -- passar disso
+# geraria erro 400 na API OpenAI, em vez de uma resposta maior.
+_TETO_TOKENS_MODELO = 16384
+
 _DEFAULT_RESOLUTIVO = {
     "portaria": "RESOLVE:",
     "portaria conjunta": "R E S O L V E M:",
@@ -316,19 +321,21 @@ def _extrair_json_com_retry(
     """Chama o LLM (function calling) e devolve o argumento JSON já parseado.
 
     Se a resposta vier truncada (JSON incompleto por estouro do limite de
-    tokens), reenvia a conversa com o dobro de ``max_tokens`` e instrução para
-    o modelo devolver um JSON válido. Quando ``preservar_completo=True`` (fluxo
-    de melhoria), o retry instrui o modelo a reproduzir TODO o conteúdo do
-    original sem omitir nem resumir; caso contrário mantém o comportamento de
-    permitir reduzir o campo ``corpo``. Falha com mensagem clara se a repetição
-    também vier truncada.
+    tokens), reenvia a conversa com a instrução para o modelo devolver um JSON
+    válido. ``max_tokens`` NUNCA dobra além de ``_TETO_TOKENS_MODELO`` (acima
+    disso a API OpenAI responde erro 400). Quando ``preservar_completo=True``
+    (fluxo de melhoria em modo patch), o retry pede a lista COMPLETA de
+    mudanças com 'trecho_original' fiel; caso contrário mantém o comportamento
+    de permitir reduzir o campo ``corpo``. Falha com mensagem clara se a
+    repetição também vier truncada.
     """
     if preservar_completo:
         instrucao_retry = (
             "JSON invalido ou truncado (resposta cortada no limite de tokens). "
-            "Reproduza o documento COMPLETO, preservando TODOS os artigos, "
-            "considerandos, titulos e trechos do original, sem omitir nem "
-            "resumir. Apenas devolva um JSON valido, completo e encerrado."
+            "Reenvie a lista COMPLETA e VALIDA de mudancas (alteracoes / "
+            "remocoes / adicoes_estruturais), com 'trecho_original' copiado "
+            "EXATAMENTE do documento original. Apenas devolva um JSON valido, "
+            "completo e encerrado."
         )
     else:
         instrucao_retry = (
@@ -355,7 +362,7 @@ def _extrair_json_com_retry(
                     "O documento pode ser grande demais para gerar de uma vez; "
                     "tente novamente ou envie um arquivo mais curto."
                 )
-            max_tokens *= 2
+            max_tokens = min(max_tokens * 2, _TETO_TOKENS_MODELO)
             tool_call_id = getattr(tool_call, "id", "call_retry")
             mensagens.extend(
                 [
