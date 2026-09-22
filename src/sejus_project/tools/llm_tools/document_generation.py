@@ -9,7 +9,11 @@ from pathlib import Path
 
 from sejus_project.tools.document_infra import docx_builder, modelos
 from sejus_project.tools.document_infra.docx_templates import OUTPUTS_DIR
-from sejus_project.tools.llm_tools import document_improvement, minuta_generation
+from sejus_project.tools.llm_tools import (
+    analysis_registry,
+    document_improvement,
+    minuta_generation,
+)
 from sejus_project.tools.llm_tools.retrieval import retrieve
 from sejus_project.tools.llm_tools.user_files import (
     UserFileError,
@@ -293,6 +297,95 @@ def limpar_estado():
     _pendencia_mudou_no_turno = False
     _melhoria_no_turno = False
     _ultima_comparacao = None
+    # Nova sessão: as análises da conversa anterior não se aplicam à nova.
+    analysis_registry.nova_sessao()
+
+
+# ---------------------------------------------------------------------------
+# Análise do documento enviado (contexto para a correção posterior)
+# ---------------------------------------------------------------------------
+
+# Intenção de correção/entrega do documento já analisado (não é geração nova).
+# Verbos fortes de correção bastam; 'ajustar' é ambíguo e exige referência ao
+# documento para não capturar um pedido de ato novo ("ajuste o fluxo...").
+_RE_CORRECAO = re.compile(
+    r"(corri[gj]|corre[çc][ãa]o|consert|arrum|refa[çz]|retific)",
+    re.IGNORECASE,
+)
+_RE_CORRECAO_CONTEXTO = re.compile(
+    r"(arquivo|documento|texto|minuta|ato|norma|instru[çc][ãa]o|portaria|"
+    r"decreto|anexo|cl[áa]usula|artigo|dispositivo|reda[çc][ãa]o)",
+    re.IGNORECASE,
+)
+_RE_GERACAO = re.compile(
+    r"\b(gere|gerar|crie|criar|elabore|elaborar|redija|redigir|produza|"
+    r"produzir|monte|nova|novo)\b",
+    re.IGNORECASE,
+)
+
+
+def pedido_de_correcao(request: str) -> bool:
+    """Diz se o pedido é de corrigir/entregar o documento já analisado."""
+    texto = request or ""
+    if _RE_CORRECAO.search(texto):
+        return True
+    return bool(
+        re.search(r"ajust", texto, re.IGNORECASE)
+        and _RE_CORRECAO_CONTEXTO.search(texto)
+        and not _RE_GERACAO.search(texto)
+    )
+
+
+def registrar_analise(filename: str, analise_completa: str) -> dict | None:
+    """Guarda a análise do documento na sessão corrente (com a versão).
+
+    Vincula os apontamentos ao arquivo REALMENTE analisado e à sua versão
+    (hash do conteúdo), acumulando por ID em análises de vários turnos."""
+    if not filename:
+        return None
+    try:
+        caminho = _resolve_file(filename)
+        texto = extract_file_text(caminho)
+    except (UserFileError, OSError):
+        return None
+    return analysis_registry.registrar(
+        analysis_registry.sessao_atual(),
+        caminho.name,
+        analysis_registry.hash_conteudo(texto),
+        analise_completa or "",
+    )
+
+
+def analise_para_correcao(filename: str | None = None) -> dict | None:
+    """Análise registrada do documento a corrigir (ou da análise mais recente).
+
+    Sem nome, usa a análise registrada mais recentemente na sessão (não a
+    importação mais recente), para corrigir o documento que foi de fato
+    analisado. Só devolve quando a versão em disco casa com a analisada."""
+    if not filename:
+        recente = analysis_registry.mais_recente(analysis_registry.sessao_atual())
+        if recente is None:
+            return None
+        filename = recente.get("arquivo")
+    if not filename:
+        return None
+    try:
+        caminho = _resolve_file(filename)
+        texto = extract_file_text(caminho)
+    except (UserFileError, OSError):
+        return None
+    entrada = analysis_registry.obter(
+        analysis_registry.sessao_atual(),
+        caminho.name,
+        analysis_registry.hash_conteudo(texto),
+    )
+    if entrada is None:
+        return None
+    return {
+        "filename": entrada.get("arquivo") or caminho.name,
+        "apontamentos": entrada.get("apontamentos") or [],
+        "analise_completa": entrada.get("analise_completa") or "",
+    }
 
 
 def set_modelo_usuario(filename: str, importacoes_dir: Path) -> dict:
@@ -672,6 +765,25 @@ def gerar_documento_normativo(
             ensure_ascii=False,
         )
 
+    # Correção de um documento já analisado NÃO é geração de ato novo: sinaliza
+    # para o agente encaminhar a melhoria do documento com os apontamentos.
+    if pedido_de_correcao(request):
+        analise = analise_para_correcao()
+        if analise:
+            return json.dumps(
+                {
+                    "status": "melhoria_necessaria",
+                    "filename": analise["filename"],
+                    "apontamentos": analise["apontamentos"],
+                    "message": (
+                        "O pedido é uma correção do documento já analisado. "
+                        "Use melhorar_documento_usuario com este arquivo e os "
+                        "apontamentos da análise — não gere um ato novo."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
     try:
         if not values and _pending_document and _is_generation_confirmation(request):
             pendente = _pending_document
@@ -785,6 +897,15 @@ melhoria_definition = {
                         "Opcional. Diretrizes/pedido do usuario para a "
                         "melhoria (ex.: 'mantenha a mesma numeracao dos "
                         "artigos', 'adeque ao novo organograma')."
+                    ),
+                },
+                "apontamentos": {
+                    "type": "string",
+                    "description": (
+                        "Opcional. Apontamentos de uma analise anterior deste "
+                        "documento, quando o usuario pedir para corrigir o "
+                        "arquivo apos uma analise. Se omitido, a tool usa "
+                        "automaticamente a analise registrada para o arquivo."
                     ),
                 },
             },
@@ -1114,9 +1235,18 @@ def _melhorar_e_relatar(
     diretrizes: str | None,
     outros: list[str] | None = None,
     precedente: dict | None = None,
+    apontamentos: list[dict] | None = None,
+    analise_completa: str | None = None,
 ) -> str:
     global _ultima_minuta, _melhoria_no_turno, _ultima_comparacao, _gerada_no_turno
-    valores = {"diretrizes": diretrizes} if diretrizes else None
+    valores: dict = {}
+    if diretrizes:
+        valores["diretrizes"] = diretrizes
+    if apontamentos:
+        valores["apontamentos"] = apontamentos
+    if analise_completa:
+        valores["analise_completa"] = analise_completa
+    valores = valores or None
     estrutura, alteracoes, remocoes, adicoes, lacunas = document_improvement.gerar_estrutura_melhoria(
         conteudo,
         tipo_ato,
@@ -1124,6 +1254,8 @@ def _melhorar_e_relatar(
         contexto,
         valores,
     )
+    # Cobertura dos apontamentos da análise (validada contra o patch efetivo).
+    cobertura = estrutura.pop("_cobertura_analise", None) or []
     # Identifica o documento especifico do RAG referenciado pelo 'lastro' de
     # cada mudanca e sinaliza divergencias no relatorio (sem bloquear); em
     # seguida, verifica a coerencia TEMATICA (item 3): lastro de outro assunto
@@ -1199,6 +1331,7 @@ def _melhorar_e_relatar(
         "adicoes_estruturais": adicoes,
         "lacunas": lacunas_sem,
         "textos": textos,
+        "apontamentos_analise": cobertura,
         "sha1": hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest(),
     }
     resposta = {
@@ -1211,10 +1344,20 @@ def _melhorar_e_relatar(
         "adicoes_estruturais": adicoes,
         "lacunas": lacunas_sem,
         "textos": textos,
+        "apontamentos_analise": cobertura,
         "outros": outros or [],
         "sources": _source_summary(contexto),
     }
     avisos: list[str] = []
+    nao_aplicados = [
+        c for c in cobertura if c.get("status") == "nao_aplicado"
+    ]
+    if apontamentos and nao_aplicados:
+        avisos.append(
+            f"{len(nao_aplicados)} apontamento(s) da análise não foram "
+            "aplicados ao documento — confira a justificativa na cobertura "
+            "dos apontamentos."
+        )
     if document_improvement._problemas_do_patch(conteudo, alteracoes, remocoes):
         avisos.append(
             "O arquivo foi gerado e entregue, mas o patch de melhoria ficou com "
@@ -1256,14 +1399,28 @@ def _melhorar_e_relatar(
     return json.dumps(resposta, ensure_ascii=False)
 
 
-def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | None = None) -> str:
+def melhorar_documento_usuario(
+    filename: str | None = None,
+    diretrizes: str | None = None,
+    apontamentos: list[dict] | str | None = None,
+) -> str:
     """Reescreve um arquivo enviado com melhorias e devolve o resultado (JSON).
 
     Se ``filename`` não for informado, usa a importação mais recente da pasta
     ``importacoes_usuario/`` (útil quando o usuário acabou de enviar o arquivo
     e não sabe o nome). O resultado inclui a lista de outros arquivos
     disponíveis para o agente sugerir alternativas.
+
+    Quando existir uma análise registrada para o mesmo arquivo e a mesma versão,
+    os apontamentos acionáveis dessa análise são injetados automaticamente (o
+    parâmetro ``apontamentos`` só sobrescreve se informado).
     """
+    if isinstance(apontamentos, str):
+        diretrizes = (
+            f"{diretrizes}\n{apontamentos}" if diretrizes else apontamentos
+        )
+        apontamentos = None
+
     disponiveis = _list_available_files()
     if not filename:
         filename = _ultimo_arquivo_importado()
@@ -1283,16 +1440,27 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
     try:
         destino = _resolve_file(filename)
         conteudo = extract_file_text(destino)
+        sha1_conteudo = hashlib.sha1(
+            conteudo.encode("utf-8", "ignore")
+        ).hexdigest()
+
+        # Análise registrada deste documento/versão: contexto da correção.
+        analise = analysis_registry.obter(
+            analysis_registry.sessao_atual(), destino.name, sha1_conteudo
+        )
+        analise_completa = (analise or {}).get("analise_completa") or ""
+        if apontamentos is None and analise:
+            apontamentos = analise.get("apontamentos") or []
 
         # Perguntas de acompanhamento sobre a melhoria já feita não devem gerar
         # um arquivo novo: se o mesmo arquivo, com o mesmo conteúdo, for
-        # pedido de novo sem novas diretrizes, reaproveita a comparação.
+        # pedido de novo sem novas diretrizes/apontamentos, reaproveita.
         if (
             not diretrizes
+            and not apontamentos
             and _ultima_comparacao
             and _ultima_comparacao.get("arquivo_original") == filename
-            and _ultima_comparacao.get("sha1")
-            == hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest()
+            and _ultima_comparacao.get("sha1") == sha1_conteudo
         ):
             return json.dumps(
                 {
@@ -1305,6 +1473,10 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
                     or [],
                     "lacunas": _ultima_comparacao.get("lacunas") or [],
                     "textos": _ultima_comparacao.get("textos") or [],
+                    "apontamentos_analise": _ultima_comparacao.get(
+                        "apontamentos_analise"
+                    )
+                    or [],
                     "outros": [f for f in disponiveis if f != filename],
                 },
                 ensure_ascii=False,
@@ -1330,6 +1502,8 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
             diretrizes,
             outros=[f for f in disponiveis if f != filename],
             precedente=precedente,
+            apontamentos=apontamentos,
+            analise_completa=analise_completa,
         )
     except UserFileError as error:
         return json.dumps({"status": "error", "error": str(error)}, ensure_ascii=False)

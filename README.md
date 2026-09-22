@@ -102,6 +102,30 @@ Para `.pdf`/`.txt`/`.md` (sem um DOCX original que sirva de base para a
 cópia), a melhoria é reconstruída sobre o template do tipo de ato, sem marcas
 de diferença.
 
+## Corrigir um documento depois da análise
+
+O fluxo de análise e o de melhoria são conectados: quando o usuário envia um
+documento, pede uma análise e em seguida pede para **corrigir e entregar o
+arquivo corrigido** (ex.: "consegue fazer a correção?", "me dê o arquivo
+corrigido"), o pedido vai **direto para a melhoria do documento enviado** — não
+abre o formulário de geração de um ato novo.
+
+- A análise completa do documento é preservada por **sessão e documento**,
+  versionada pelo hash do conteúdo. Só a versão efetivamente analisada é usada
+  na correção.
+- Dessa análise são extraídos, separadamente, os **apontamentos acionáveis**,
+  com IDs estáveis. Elogios e constatações de conformidade não são instruções
+  de alteração e não geram mudanças; se a análise não apontar nada a corrigir,
+  nenhuma correção é inventada.
+- A melhoria recebe esses apontamentos (além das instruções do usuário) e os
+  aplica ao original pelo mesmo motor de patch, com as marcas verde/tachado e a
+  comparação antes/depois.
+- A entrega inclui a **cobertura dos apontamentos**: cada apontamento é
+  classificado como aplicado ou não aplicado com justificativa. A declaração do
+  modelo não basta — o sistema confere se a mudança existe de fato no patch,
+  está ancorada no original e passou na validação de lastro; caso contrário, o
+  apontamento não aparece como aplicado.
+
 ## Executar na CLI (opcional)
 
 ```bash

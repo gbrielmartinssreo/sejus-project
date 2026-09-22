@@ -8,23 +8,25 @@ from sejus_project.agent.skills.loader import (
 from sejus_project.llm.ia import perguntar
 from sejus_project.tools.llm_tools.document_generation import (
     aceitar_proposta,
-    rejeitar_proposta,
-    listar_propostas,
+    analise_para_correcao,
     aplicar_alteracoes_selecionadas,
+    cancelar_pendencia,
     comparacao_definition,
     gerar_documento_normativo,
+    has_pending_document,
+    limpar_estado,
+    listar_propostas,
     melhorar_documento_usuario,
     obter_textos_comparacao,
-    has_pending_document,
-    cancelar_pendencia,
-    limpar_estado,
-    ESTADO_PENDENTE,
-    ESTADO_ACEITA,
-    ESTADO_REJEITADA,
+    pedido_de_correcao,
+    registrar_analise,
+    rejeitar_proposta,
 )
-from sejus_project.tools.llm_tools.document_improvement import MELHORIA_DEFINITION as melhoria_definition
 from sejus_project.tools.llm_tools.document_generation import (
     definition as document_generation_definition,
+)
+from sejus_project.tools.llm_tools.document_improvement import (
+    MELHORIA_DEFINITION as melhoria_definition,
 )
 from sejus_project.tools.llm_tools.more import definition as more_definition
 from sejus_project.tools.llm_tools.more import more_epic
@@ -95,7 +97,23 @@ SYSTEM_INSTRUCTIONS = (
     "ferramenta sem o argumento filename: ela usa a importacao mais recente "
     "e devolve a lista de outras arquivos importados para voce sugerir. "
     "O mesmo vale para analisar_arquivo_usuario: sem filename ela le a "
-    "importacao mais recente.\n"
+    "importacao mais recente. A leitura do arquivo e paginada: se a tool "
+    "devolver 'has_more': true, chame analisar_arquivo_usuario novamente com "
+    "'offset' = 'next_offset' e continue ate ler o documento inteiro antes de "
+    "concluir a analise; nao resuma nem ignore o restante do arquivo.\n"
+    "CORRECAO APOS ANALISE: se o usuario ja enviou um documento, voce o "
+    "analisou nesta conversa e agora ele pede para corrigir/ajustar/entregar "
+    "o arquivo corrigido (ex.: 'consegue fazer a correcao?', 'me de o arquivo "
+    "corrigido'), use a ferramenta melhorar_documento_usuario — NAO use "
+    "gerar_documento_normativo e NAO abra formulario de campos de um ato novo. "
+    "A melhoria recebe automaticamente os apontamentos acionaveis da analise "
+    "registrada para aquele documento: aplique-os ao original e, para cada "
+    "apontamento, garanta desfecho explicito (aplicado ou justificativa de "
+    "por que nao pode ser aplicado). Nao faca uma revisao independente que "
+    "descarte a analise nem invente correcoes que ela nao apontou.\n"
+    "Se gerar_documento_normativo retornar status 'melhoria_necessaria', "
+    "encaminhe para melhorar_documento_usuario com o arquivo e os "
+    "apontamentos indicados; nunca insista na geracao.\n"
     "Voce SOMENTE gera minutas normativas oficiais (portaria, instrucao "
     "normativa, portaria conjunta, decreto, retificacao) usando "
     "gerar_documento_normativo. Voce NAO gera documentos genericos — tabelas "
@@ -249,6 +267,29 @@ def _executar_tool(tool_call):
 # RESPOSTA DE MELHORIA
 # ============================================================================
 
+def _cobertura_para_texto(cobertura) -> str:
+    """Formata a cobertura dos apontamentos da análise (aplicados/não aplicados)."""
+    if not cobertura:
+        return ""
+    aplicados = [c for c in cobertura if c.get("status") == "aplicado"]
+    nao_aplicados = [c for c in cobertura if c.get("status") != "aplicado"]
+    linhas = ["Cobertura dos apontamentos da análise:"]
+    if aplicados:
+        linhas.append("Aplicados:")
+        for item in aplicados[:15]:
+            referencia = item.get("referencia")
+            sufixo = f" (mudança: {referencia})" if referencia else ""
+            linhas.append(f"- {str(item.get('apontamento') or '')[:160]}{sufixo}")
+    if nao_aplicados:
+        linhas.append("Não aplicados:")
+        for item in nao_aplicados[:15]:
+            motivo = item.get("motivo") or "sem justificativa"
+            linhas.append(
+                f"- {str(item.get('apontamento') or '')[:160]} — {motivo}"
+            )
+    return "\n".join(linhas)
+
+
 def _resposta_melhoria(result: dict) -> str:
     """Transforma o resultado da tool de melhoria em texto."""
 
@@ -276,6 +317,10 @@ def _resposta_melhoria(result: dict) -> str:
             "O que mudou:\n"
             f"{resumo}"
         )
+
+        cobertura = _cobertura_para_texto(result.get("apontamentos_analise"))
+        if cobertura:
+            resposta += f"\n\n{cobertura}"
 
         if result.get("textos"):
             resposta += (
@@ -315,6 +360,10 @@ def _resposta_melhoria(result: dict) -> str:
         "O que mudou:\n"
         f"{resumo}"
     )
+
+    cobertura = _cobertura_para_texto(result.get("apontamentos_analise"))
+    if cobertura:
+        resposta += f"\n\n{cobertura}"
 
     outros = result.get("outros") or []
 
@@ -409,13 +458,18 @@ def _tratar_cancelamento(question):
         cancelar_pendencia()
 
 
-def _executar_melhoria(filename=None):
+def _executar_melhoria(filename=None, diretrizes=None, apontamentos=None):
     """Executa a melhoria de um documento."""
 
+    argumentos = {}
     if filename:
-        result = melhorar_documento_usuario(filename)
-    else:
-        result = melhorar_documento_usuario()
+        argumentos["filename"] = filename
+    if diretrizes:
+        argumentos["diretrizes"] = diretrizes
+    if apontamentos:
+        argumentos["apontamentos"] = apontamentos
+
+    result = melhorar_documento_usuario(**argumentos)
 
     resposta = _resposta_melhoria(
         json.loads(result)
@@ -458,11 +512,58 @@ def _tratar_melhoria_direta(question):
     return None
 
 
+def _tratar_correcao_direta(question):
+    """Encaminha pedido de correção de um documento JÁ ANALISADO para a melhoria.
+
+    Diferente de ``_tratar_melhoria_direta`` (que é acionado por pedidos
+    explícitos de melhoria), aqui o gatilho é uma intenção de corrigir/entregar
+    o arquivo corrigido depois que o agente já o analisou. Passa os apontamentos
+    acionáveis da análise registrada para que a melhoria os aplique ao original
+    — sem abrir o formulário de geração de um ato novo."""
+
+    if not pedido_de_correcao(question):
+        return None
+
+    analise = analise_para_correcao()
+    if not analise:
+        return None
+
+    return _executar_melhoria(
+        filename=analise.get("filename"),
+        diretrizes=question,
+        apontamentos=analise.get("apontamentos"),
+    )
+
+
 # ============================================================================
 # LOOP PRINCIPAL DO AGENTE
 # ============================================================================
 
-def _executar_loop_agente():
+def _filename_do_resultado(resultado: str) -> str | None:
+    """Nome do arquivo lido por analisar_arquivo_usuario (ou None)."""
+    try:
+        dados = json.loads(resultado)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(dados, dict):
+        nome = dados.get("filename")
+        if isinstance(nome, str) and nome.strip():
+            return nome
+    return None
+
+
+def _resultado_melhoria_necessaria(resultado: str) -> dict | None:
+    """Interpreta o retorno da geração que pede encaminhamento para a melhoria."""
+    try:
+        dados = json.loads(resultado)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(dados, dict) and dados.get("status") == "melhoria_necessaria":
+        return dados
+    return None
+
+
+def _executar_loop_agente(question: str = ""):
     """
     Executa o ciclo:
 
@@ -472,8 +573,13 @@ def _executar_loop_agente():
     """
 
     ultimo_resultado_tool = None
+    arquivo_analisado = None
 
-    for _ in range(5):
+    # Teto de iterações do loop. Foi ampliado (5 -> 10) para acomodar a leitura
+    # PAGINADA de documentos grandes: cada janela de `analisar_arquivo_usuario`
+    # consome uma iteração, e o agente precisa ler o arquivo inteiro antes de
+    # concluir a análise.
+    for _ in range(10):
 
         _podar_tool_results_antigos()
         _podar_assistant_antigos()
@@ -502,13 +608,21 @@ def _executar_loop_agente():
         # O LLM respondeu normalmente.
         if not message.tool_calls:
 
+            conteudo = message.content
+
             messages.append({
                 "role": "assistant",
-                "content": message.content,
+                "content": conteudo,
             })
 
+            # Resposta que encerra o turno de leitura do documento: registra a
+            # análise vinculada ao arquivo REALMENTE analisado (pode acumular
+            # apontamentos ao longo de vários turnos).
+            if arquivo_analisado and (conteudo or "").strip():
+                registrar_analise(arquivo_analisado, conteudo)
+
             return (
-                message.content
+                conteudo
                 or "Não foi possível gerar uma resposta."
             )
 
@@ -528,6 +642,21 @@ def _executar_loop_agente():
                 "tool_call_id": tool_call.id,
                 "content": resultado,
             })
+
+            if tool_call.function.name == "analisar_arquivo_usuario":
+                nome = _filename_do_resultado(resultado)
+                if nome:
+                    arquivo_analisado = nome
+
+            # A geração recusou gerar um ato novo por se tratar de correção de
+            # documento analisado: encaminha para a melhoria sem novo formulário.
+            despacho = _resultado_melhoria_necessaria(resultado)
+            if despacho is not None:
+                return _executar_melhoria(
+                    filename=despacho.get("filename"),
+                    diretrizes=question,
+                    apontamentos=despacho.get("apontamentos"),
+                )
 
     if ultimo_resultado_tool:
         return (
@@ -570,9 +699,15 @@ def executar(question):
     if resposta is not None:
         return resposta
 
-    # 5. Caso nenhum fluxo especial tenha sido acionado,
+    # 5. Trata correção de documento já analisado (vai direto para a melhoria).
+    resposta = _tratar_correcao_direta(question)
+
+    if resposta is not None:
+        return resposta
+
+    # 6. Caso nenhum fluxo especial tenha sido acionado,
     #    executa o agente normalmente.
-    return _executar_loop_agente()
+    return _executar_loop_agente(question)
 
 
 # ============================================================================

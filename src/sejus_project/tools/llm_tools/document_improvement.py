@@ -248,6 +248,49 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["lacunas_identificad
         "required": ["tema"],
     },
 }
+MELHORIA_DEFINITION["function"]["parameters"]["properties"]["apontamentos_analise"] = {
+    "type": "array",
+    "description": (
+        "Cobertura dos APONTAMENTOS DA ANALISE quando eles forem informados. "
+        "Devolva UMA entrada por apontamento (usando o 'apontamento_id' "
+        "recebido). 'status' = 'aplicado' somente quando a mudanca "
+        "correspondente existir de fato em 'alteracoes'/'remocoes'/"
+        "'adicoes_estruturais' e estiver ancorada no documento; 'nao_aplicado' "
+        "quando nao for possivel aplicar. Em 'referencia', informe o rotulo "
+        "(ou 'o_que') da mudanca que executou o apontamento. 'motivo' e "
+        "obrigatorio no 'nao_aplicado'. Nao invente mudancas apenas para "
+        "cobrir apontamento: se a analise nao apontar alteracao, deixe as "
+        "listas de mudancas vazias."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "apontamento_id": {
+                "type": "string",
+                "description": "ID recebido no bloco APONTAMENTOS DA ANALISE (ex.: 'ap-1a2b3c4d').",
+            },
+            "status": {
+                "type": "string",
+                "description": "'aplicado' ou 'nao_aplicado'.",
+            },
+            "referencia": {
+                "type": "string",
+                "description": (
+                    "Rotulo/o_que da alteracao/remocao/adicao que executou o "
+                    "apontamento (ex.: 'Art. 3º', 'Art. 6º-A')."
+                ),
+            },
+            "motivo": {
+                "type": "string",
+                "description": (
+                    "Obrigatorio quando status='nao_aplicado': explique por que "
+                    "o apontamento nao pode ser aplicado."
+                ),
+            },
+        },
+        "required": ["apontamento_id", "status"],
+    },
+}
 MELHORIA_DEFINITION["function"]["parameters"]["required"] = [
     "numero",
     "ementa",
@@ -353,6 +396,16 @@ def _sistema_melhoria():
         "sistema destaca o paragrafo em amarelo e o sinaliza para validacao da "
         "equipe juridica antes da publicacao. Se o lastro cobrir integralmente "
         "o conteudo, marque false.\n"
+        "14. APONTAMENTOS DA ANALISE (quando informados): aplique ao documento "
+        "original as correcoes apontadas na analise anterior. Nao faca uma "
+        "revisao independente que ignore ou substitua esses apontamentos. Nao "
+        "invente correcoes alem deles e das diretrizes explicitas do usuario; "
+        "se a analise nao apontar nenhuma alteracao acionavel, devolva as "
+        "listas de mudancas vazias. Para CADA apontamento informado, devolva "
+        "uma entrada em 'apontamentos_analise' com o mesmo 'apontamento_id' e "
+        "'status' = 'aplicado' apenas quando a mudanca correspondente existir "
+        "de fato em 'alteracoes'/'remocoes'/'adicoes_estruturais'; caso "
+        "contrario 'status' = 'nao_aplicado' com 'motivo' explicito.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -363,15 +416,28 @@ def _usuario_melhoria(
     perfil: PerfilModelo,
     contexto: list[dict],
     valores: dict | None = None,
+    rotulo_janela: str = "",
 ) -> str:
-    partes = [
-        (
+    if rotulo_janela:
+        cabecalho = (
+            "DOCUMENTO ORIGINAL ENVIADO PELO USUARIO. Voce esta vendo o "
+            f"TRECHO {rotulo_janela} de um documento maior: liste apenas as "
+            "mudancas contidas NESTE trecho (nao reescreva o documento, apenas "
+            "aponte alteracoes, remocoes e adicoes, preservando numero, "
+            "ementa, objeto e assinaturas). Use 'trecho_original' copiado "
+            "EXATAMENTE deste trecho. O restante do documento sera tratado em "
+            "outra chamada."
+        )
+    else:
+        cabecalho = (
             "DOCUMENTO ORIGINAL ENVIADO PELO USUARIO (liste as mudancas contra "
             "ESTE texto: nao reescreva o documento, apenas aponte alteracoes, "
             "remocoes e adicoes, preservando numero, ementa, objeto e "
             "assinaturas):"
-        ),
-        str(conteudo)[:60_000],
+        )
+    partes = [
+        cabecalho,
+        str(conteudo),
         "",
         f"Tipo de ato: {tipo_ato}",
         f"Formato/modelo de referencia: {perfil.name}",
@@ -387,13 +453,45 @@ def _usuario_melhoria(
         _resumir_contexto(contexto),
     ]
     if valores:
-        partes.extend(
-            [
-                "",
-                "Diretrizes/pedido do usuario para esta melhoria (siga-as):",
-                json.dumps(valores, ensure_ascii=False, indent=2),
-            ]
-        )
+        apontamentos = valores.get("apontamentos") or []
+        analise_completa = valores.get("analise_completa") or ""
+        diretrizes = valores.get("diretrizes") or ""
+
+        if apontamentos:
+            partes.extend(
+                [
+                    "",
+                    (
+                        "APONTAMENTOS DA ANALISE (aplicar ao documento original; "
+                        "cada item tem ID e deve constar em 'apontamentos_analise'):"
+                    ),
+                ]
+            )
+            for apontamento in apontamentos:
+                partes.append(
+                    f"- [{apontamento.get('id')}] {apontamento.get('texto')}"
+                )
+        elif analise_completa:
+            partes.extend(
+                [
+                    "",
+                    (
+                        "ANALISE ANTERIOR DO PROPRIO DOCUMENTO (contexto; se nao "
+                        "houver apontamento acionavel, nao crie mudancas apenas "
+                        "para 'atende-la'):"
+                    ),
+                    str(analise_completa)[:20_000],
+                ]
+            )
+
+        if diretrizes:
+            partes.extend(
+                [
+                    "",
+                    "Diretrizes/pedido do usuario para esta melhoria (siga-as):",
+                    str(diretrizes),
+                ]
+            )
     return "\n".join(partes)
 
 
@@ -403,6 +501,100 @@ def _usuario_melhoria(
 # saída limitada, ex.: gpt-4o-mini). O padrão fica abaixo do teto para que
 # MELHORIA_MAX_TOKENS ainda tenha efeito em documentos grandes.
 _MELHORIA_MAX_TOKENS_DEFAULT = 8192
+
+# Tamanho da janela de documento enviada ao modelo em CADA chamada de patch.
+# Antes o documento era cortado em 60k caracteres (o que deixava de fora o
+# final de atos de 10+ páginas). Agora o documento é processado em janelas com
+# sobreposição, e todas as janelas cobrem o ato inteiro, acumulando as mudanças.
+_MELHORIA_JANELA_CHARS_DEFAULT = 60_000
+_MELHORIA_JANELA_OVERLAP_CHARS = 2_000
+
+
+def _tamanho_janela() -> int:
+    valor = os.getenv("MELHORIA_JANELA_CHARS")
+    try:
+        tamanho = int(valor) if valor else _MELHORIA_JANELA_CHARS_DEFAULT
+    except ValueError:
+        tamanho = _MELHORIA_JANELA_CHARS_DEFAULT
+    return max(10_000, tamanho)
+
+
+def _janelas_conteudo(conteudo: str) -> list[str]:
+    """Divide o documento em janelas (por linhas) com sobreposição.
+
+    Cada janela cabe em ``_MELHORIA_JANELA_CHARS_DEFAULT`` (ou no valor de
+    ``MELHORIA_JANELA_CHARS``). Não corta no meio de um parágrafo, para manter
+    as âncoras ('trecho_original') intactas. Documentos pequenos devolvem uma
+    única janela (comportamento de chamada única preservado)."""
+    conteudo = conteudo or ""
+    tamanho = _tamanho_janela()
+    if len(conteudo) <= tamanho:
+        return [conteudo]
+
+    janelas: list[str] = []
+    atual: list[str] = []
+    tam_atual = 0
+
+    for linha in conteudo.splitlines():
+        comp = len(linha) + 1
+        if atual and tam_atual + comp > tamanho:
+            janelas.append("\n".join(atual))
+            retidas: list[str] = []
+            tam_ret = 0
+            for anterior in reversed(atual):
+                comp_ant = len(anterior) + 1
+                if tam_ret + comp_ant > _MELHORIA_JANELA_OVERLAP_CHARS:
+                    break
+                retidas.insert(0, anterior)
+                tam_ret += comp_ant
+            atual = retidas
+            tam_atual = tam_ret
+        atual.append(linha)
+        tam_atual += comp
+
+    if atual:
+        janelas.append("\n".join(atual))
+    return janelas
+
+
+def _dedupe_mudancas(itens: list[dict]) -> list[dict]:
+    """Remove mudanças repetidas entre janelas sobrepostas, preservando a 1ª."""
+    vistos: set[str] = set()
+    unicos: list[dict] = []
+    for item in itens:
+        if not isinstance(item, dict):
+            continue
+        chave = _chave_linha(
+            item.get("o_que") or item.get("trecho_original") or item.get("rotulo") or ""
+        )
+        if not chave:
+            unicos.append(item)
+            continue
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        unicos.append(item)
+    return unicos
+
+
+def _dedupe_declarada(declarada: list[dict]) -> list[dict]:
+    """Consolida as declarações de cobertura por apontamento_id entre janelas,
+    preferindo a declaração 'aplicado' quando houver."""
+    por_id: dict[str, dict] = {}
+    for item in declarada:
+        if not isinstance(item, dict):
+            continue
+        identificador = str(item.get("apontamento_id") or "").strip()
+        atual = por_id.get(identificador)
+        if atual is None:
+            por_id[identificador] = item
+            continue
+        status = (item.get("status") or "").strip().casefold()
+        if status == "aplicado" and (
+            (atual.get("status") or "").strip().casefold() != "aplicado"
+        ):
+            por_id[identificador] = item
+    return list(por_id.values())
 
 
 def _remover_acentos(texto: str) -> str:
@@ -633,6 +825,27 @@ def _construir_estrutura(
     return estrutura
 
 
+def _item_tem_ancora(conteudo: str, item: dict) -> bool:
+    """Diz se o 'trecho_original'/'rotulo' de um item ancora no texto ORIGINAL.
+
+    Usado tanto pela sanidade do patch quanto pela validacao da cobertura dos
+    apontamentos: uma mudanca sem ancora resolvivel nao foi aplicada de fato."""
+    linhas = [linha for linha in (conteudo or "").splitlines() if linha.strip()]
+    chaves = [_chave_linha(linha) for linha in linhas]
+    alvos = [
+        _chave_linha(item.get(nome) or "")
+        for nome in ("trecho_original", "rotulo")
+    ]
+    alvos = [a for a in alvos if a]
+    if not alvos:
+        return False
+    return any(
+        chave == a or chave.startswith(a)
+        for chave in chaves
+        for a in alvos
+    )
+
+
 def _problemas_do_patch(
     conteudo: str,
     alteracoes: list[dict],
@@ -644,23 +857,7 @@ def _problemas_do_patch(
     ('trecho_original' ou 'rotulo') resolvível no texto ORIGINAL — sem âncora a
     mudança seria silenciosamente ignorada. Devolve a lista de problemas (vazia
     = patch saudável)."""
-    linhas = [linha for linha in (conteudo or "").splitlines() if linha.strip()]
-    chaves = [_chave_linha(linha) for linha in linhas]
     problemas: list[str] = []
-
-    def _ancora_ok(item: dict) -> bool:
-        alvos = [
-            _chave_linha(item.get(nome) or "")
-            for nome in ("trecho_original", "rotulo")
-        ]
-        alvos = [a for a in alvos if a]
-        if not alvos:
-            return False
-        return any(
-            chave == a or chave.startswith(a)
-            for chave in chaves
-            for a in alvos
-        )
 
     for a in alteracoes:
         if not isinstance(a, dict):
@@ -675,7 +872,7 @@ def _problemas_do_patch(
             problemas.append(f"novo_texto ausente: {a.get('rotulo') or '?'}")
         if not (a.get("trecho_original") or "").strip():
             problemas.append(f"trecho_original ausente: {a.get('rotulo') or '?'}")
-        elif not _ancora_ok(a):
+        elif not _item_tem_ancora(conteudo, a):
             problemas.append(
                 f"ancora nao encontrada no original: {a.get('rotulo') or '?'}"
             )
@@ -685,11 +882,202 @@ def _problemas_do_patch(
             continue
         if not (r.get("rotulo") or "").strip() or not (r.get("trecho_original") or "").strip():
             problemas.append("remocao sem rotulo/trecho_original")
-        elif not _ancora_ok(r):
+        elif not _item_tem_ancora(conteudo, r):
             problemas.append(
                 f"ancora nao encontrada para remocao: {r.get('rotulo') or '?'}"
             )
     return problemas
+
+
+# ---------------------------------------------------------------------------
+# Cobertura dos apontamentos da análise
+# ---------------------------------------------------------------------------
+
+
+def _mudanca_aplicada(conteudo: str, tipo: str, item: dict) -> tuple[bool, str]:
+    """Diz se a mudança foi de fato aplicada ao documento e, se não, por quê.
+
+    A declaração do modelo não basta: a mudança precisa existir no patch, estar
+    ancorada no original e, quando tiver lastro, ter passado na validação de
+    lastro/coerência. Falha de âncora ou de lastro implica NÃO aplicada."""
+    if (item.get("lastro_validado") is False) or item.get("coerencia_aviso"):
+        return (
+            False,
+            (
+                "a mudança foi inserida, mas o lastro não foi validado no "
+                "acervo (pendente de decisão jurídica) — não contabilizada "
+                "como aplicada"
+            ),
+        )
+    if tipo == "adicao":
+        if not (item.get("texto") or "").strip():
+            return False, "a adição não tem texto para inserir"
+        return True, ""
+    if not _item_tem_ancora(conteudo, item):
+        return False, "o trecho original não foi localizado no documento"
+    return True, ""
+
+
+def _localizar_mudanca(
+    referencia: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> tuple[str, dict, str] | None:
+    """Encontra a mudança do patch referida pelo modelo.
+
+    Compara a referência (normalizada) com o rótulo das alterações/remoções e
+    o ``o_que`` das adições. Devolve ``(tipo, item, rotulo)`` ou ``None``."""
+    alvo = _chave_linha(referencia or "")
+    if not alvo:
+        return None
+    candidatos: list[tuple[str, dict, str]] = []
+    for item in alteracoes or []:
+        if isinstance(item, dict):
+            candidatos.append(("alteracao", item, (item.get("rotulo") or "").strip()))
+    for item in remocoes or []:
+        if isinstance(item, dict):
+            candidatos.append(("remocao", item, (item.get("rotulo") or "").strip()))
+    for item in adicoes or []:
+        if isinstance(item, dict):
+            candidatos.append(("adicao", item, (item.get("o_que") or "").strip()))
+
+    melhor: tuple[str, dict, str] | None = None
+    for tipo, item, rotulo in candidatos:
+        chave = _chave_linha(rotulo)
+        if not chave:
+            continue
+        casou = (
+            chave == alvo
+            or chave.startswith(alvo)
+            or alvo.startswith(chave)
+        )
+        if casou:
+            if chave == alvo:
+                return (tipo, item, rotulo)
+            melhor = melhor or (tipo, item, rotulo)
+    return melhor
+
+
+def _validar_cobertura(
+    conteudo: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+    apontamentos: list[dict],
+    declarada: list[dict] | None,
+) -> list[dict]:
+    """Reconstrói a cobertura a partir dos IDs e das mudanças EFETIVAS.
+
+    Parte dos apontamentos (IDs estáveis) e verifica cada declaração do modelo
+    contra o patch realmente montado. Declaração de 'aplicado' só se mantém se a
+    mudança referida existe, está ancorada e passou no lastro; caso contrário
+    vira 'nao_aplicado' com motivo. Apontamento sem entrada declarada também
+    aparece como não aplicado."""
+    por_id = {
+        str(d.get("apontamento_id") or "").strip(): d
+        for d in (declarada or [])
+        if isinstance(d, dict)
+    }
+    cobertura: list[dict] = []
+    for apontamento in apontamentos or []:
+        if not isinstance(apontamento, dict):
+            continue
+        identificador = apontamento.get("id")
+        entrada = {
+            "apontamento_id": identificador,
+            "apontamento": apontamento.get("texto") or "",
+            "status": "nao_aplicado",
+            "referencia": "",
+            "motivo": "",
+        }
+        declaracao = por_id.get(str(identificador))
+        if declaracao is None:
+            entrada["motivo"] = (
+                "o apontamento não foi encaminhado pela melhoria"
+            )
+            cobertura.append(entrada)
+            continue
+
+        referencia = (declaracao.get("referencia") or "").strip()
+        motivo = (declaracao.get("motivo") or "").strip()
+        status_modelo = (declaracao.get("status") or "").strip().casefold()
+
+        if status_modelo != "aplicado":
+            entrada["referencia"] = referencia
+            entrada["motivo"] = motivo or (
+                "a melhoria não indicou como aplicar o apontamento"
+            )
+            cobertura.append(entrada)
+            continue
+
+        localizada = _localizar_mudanca(referencia, alteracoes, remocoes, adicoes)
+        if localizada is None:
+            entrada["referencia"] = referencia
+            entrada["motivo"] = (
+                "a referência informada não corresponde a nenhuma mudança "
+                "aplicada no patch"
+            )
+            cobertura.append(entrada)
+            continue
+
+        tipo, item, rotulo = localizada
+        aplicada, motivo_tecnico = _mudanca_aplicada(conteudo, tipo, item)
+        entrada["referencia"] = rotulo or referencia
+        if aplicada:
+            entrada["status"] = "aplicado"
+            entrada["motivo"] = ""
+        else:
+            entrada["motivo"] = motivo_tecnico
+        cobertura.append(entrada)
+    return cobertura
+
+
+def _problemas_cobertura(
+    apontamentos: list[dict],
+    declarada: list[dict] | None,
+) -> list[str]:
+    """Problemas que disparam retry: cobertura ausente/incompleta ou inválida."""
+    if not apontamentos:
+        return []
+    ids = {str(a.get("id")) for a in apontamentos if isinstance(a, dict)}
+    declarada = [d for d in (declarada or []) if isinstance(d, dict)]
+    if not declarada:
+        return ["cobertura dos apontamentos da analise ausente em 'apontamentos_analise'"]
+
+    problemas: list[str] = []
+    ids_declarados = {
+        str(d.get("apontamento_id") or "").strip() for d in declarada
+    }
+    faltantes = sorted(ids - ids_declarados)
+    if faltantes:
+        problemas.append(
+            "apontamento(s) sem entrada em 'apontamentos_analise': "
+            + ", ".join(faltantes)
+        )
+    for d in declarada:
+        status = (d.get("status") or "").strip().casefold()
+        if status not in ("aplicado", "nao_aplicado"):
+            problemas.append(
+                f"status invalido para {d.get('apontamento_id')!r}: use "
+                "'aplicado' ou 'nao_aplicado'"
+            )
+        if status == "nao_aplicado" and not (d.get("motivo") or "").strip():
+            problemas.append(
+                f"apontamento {d.get('apontamento_id')!r} 'nao_aplicado' sem motivo"
+            )
+    return problemas
+
+
+def _mensagem_retry_cobertura(problemas: list[str]) -> str:
+    detalhes = "; ".join(problemas)
+    return (
+        "A cobertura dos apontamentos da analise esta incompleta. Problemas: "
+        f"{detalhes}. Reenvie o JSON com 'apontamentos_analise' contendo UMA "
+        "entrada por apontamento_id recebido, com 'status' 'aplicado' (e "
+        "'referencia' = rótulo da mudança) ou 'nao_aplicado' com 'motivo'. "
+        "Devolva o JSON valido e encerrado."
+    )
 
 
 def _normalizar_referencia(texto: str) -> str:
@@ -927,15 +1315,12 @@ def gerar_estrutura_melhoria(
     resolvível. Se falhar, re-tenta uma vez com mensagem direcionada; se mesmo
     assim persistir, o melhor esforço é devolvido para que o arquivo sempre seja
     entregue.
-    """
-    mensagens = [
-        {"role": "system", "content": _sistema_melhoria()},
-        {
-            "role": "user",
-            "content": _usuario_melhoria(conteudo, tipo_ato, perfil, contexto, valores),
-        },
-    ]
 
+    Documentos maiores que a janela (``_MELHORIA_JANELA_CHARS_DEFAULT``) são
+    processados em blocos com sobreposição: o ato inteiro é coberto e as
+    mudanças de todas as janelas são acumuladas/consolidadas, em vez de o final
+    do documento ficar de fora como no antigo corte de 60k caracteres.
+    """
     valor_env = os.getenv("MELHORIA_MAX_TOKENS")
     max_tokens = max(
         _MELHORIA_MAX_TOKENS_DEFAULT,
@@ -943,11 +1328,102 @@ def gerar_estrutura_melhoria(
     )
     max_tokens = min(max_tokens, _TETO_TOKENS_MODELO)
 
-    estrutura: dict = _estruturar_original(conteudo)
+    apontamentos = [
+        a for a in ((valores or {}).get("apontamentos") or []) if isinstance(a, dict)
+    ]
+
+    janelas = _janelas_conteudo(conteudo)
+
+    if len(janelas) == 1:
+        dados, alteracoes, remocoes, adicoes, lacunas, declarada = _gerar_patch_janela(
+            janelas[0], tipo_ato, perfil, contexto, valores, apontamentos, max_tokens
+        )
+        numero = dados.get("numero") or ""
+        ementa = dados.get("ementa") or ""
+    else:
+        # Documento maior que a janela: processa em blocos com sobreposição e
+        # acumula as mudanças. Cada bloco é ancorado no próprio trecho, então as
+        # âncoras ('trecho_original') continuam válidas no documento inteiro.
+        numero = ""
+        ementa = ""
+        alteracoes = []
+        remocoes = []
+        adicoes = []
+        lacunas = []
+        declarada = []
+        total = len(janelas)
+        for indice, janela in enumerate(janelas, start=1):
+            dados, alts, rems, adds, lacs, decl = _gerar_patch_janela(
+                janela,
+                tipo_ato,
+                perfil,
+                contexto,
+                valores,
+                apontamentos,
+                max_tokens,
+                rotulo_janela=f"{indice}/{total}",
+            )
+            if not numero:
+                numero = dados.get("numero") or ""
+            if not ementa:
+                ementa = dados.get("ementa") or ""
+            alteracoes.extend(alts)
+            remocoes.extend(rems)
+            adicoes.extend(adds)
+            lacunas.extend(lacs)
+            declarada.extend(decl)
+        alteracoes = _dedupe_mudancas(alteracoes)
+        remocoes = _dedupe_mudancas(remocoes)
+        adicoes = _dedupe_mudancas(adicoes)
+
+    # Cobertura dos apontamentos validada UMA vez sobre o patch consolidado.
+    cobertura = _validar_cobertura(
+        conteudo,
+        alteracoes,
+        remocoes,
+        adicoes,
+        apontamentos,
+        _dedupe_declarada(declarada),
+    )
+    estrutura = _construir_estrutura(conteudo, alteracoes, remocoes, numero, ementa)
+    estrutura["_cobertura_analise"] = cobertura
+    return estrutura, alteracoes, remocoes, adicoes, lacunas
+
+
+def _gerar_patch_janela(
+    conteudo: str,
+    tipo_ato: str,
+    perfil: PerfilModelo,
+    contexto: list[dict],
+    valores: dict | None,
+    apontamentos: list[dict],
+    max_tokens: int,
+    rotulo_janela: str = "",
+) -> tuple[dict, list[dict], list[dict], list[dict], list[dict], list[dict]]:
+    """Executa o LLM em modo patch para UMA janela do documento.
+
+    Devolve (dados, alteracoes, remocoes, adicoes, lacunas, declarada). A
+    sanidade do patch (``_problemas_do_patch``) é validada contra o texto da
+    janela e, em caso de falha, re-tenta uma vez com a mensagem direcionada. A
+    cobertura dos apontamentos só é exigida em janela única (``rotulo_janela``
+    vazio): em documentos multi-janela ela é validada sobre o patch consolidado.
+    """
+    mensagens = [
+        {"role": "system", "content": _sistema_melhoria()},
+        {
+            "role": "user",
+            "content": _usuario_melhoria(
+                conteudo, tipo_ato, perfil, contexto, valores, rotulo_janela
+            ),
+        },
+    ]
+
+    dados: dict = {}
     alteracoes: list[dict] = []
     remocoes: list[dict] = []
     adicoes: list[dict] = []
     lacunas: list[dict] = []
+    declarada: list[dict] = []
 
     for tentativa in range(2):
         dados = _extrair_json_com_retry(
@@ -956,8 +1432,6 @@ def gerar_estrutura_melhoria(
             max_tokens,
             preservar_completo=True,
         )
-        numero = dados.get("numero") or ""
-        ementa = dados.get("ementa") or ""
         alteracoes = [a for a in (dados.get("alteracoes") or []) if isinstance(a, dict)]
         for a in alteracoes:
             a.setdefault("estado", ESTADO_PENDENTE)
@@ -979,18 +1453,27 @@ def gerar_estrutura_melhoria(
         lacunas = [
             l for l in (dados.get("lacunas_identificadas") or []) if isinstance(l, dict)
         ]
+        declarada = [
+            d for d in (dados.get("apontamentos_analise") or []) if isinstance(d, dict)
+        ]
 
         problemas = _problemas_do_patch(conteudo, alteracoes, remocoes)
-        estrutura = _construir_estrutura(conteudo, alteracoes, remocoes, numero, ementa)
-        if not problemas:
-            return estrutura, alteracoes, remocoes, adicoes, lacunas
+        problemas_cob = (
+            _problemas_cobertura(apontamentos, declarada) if not rotulo_janela else []
+        )
+        if not problemas and not problemas_cob:
+            break
 
         if tentativa == 0:
+            mensagens_retry = []
+            if problemas:
+                mensagens_retry.append(_mensagem_retry_especifica(problemas))
+            if problemas_cob:
+                mensagens_retry.append(_mensagem_retry_cobertura(problemas_cob))
             mensagens.append(
-                {"role": "user", "content": _mensagem_retry_especifica(problemas)}
+                {"role": "user", "content": "\n".join(mensagens_retry)}
             )
 
-    # As duas tentativas falharam: entrega o melhor esforço mesmo incompleto,
-    # para que o arquivo sempre seja gerado e entregue ao usuário. O conteúdo
-    # afetado é sinalizado à parte (aviso) quando possível.
-    return estrutura, alteracoes, remocoes, adicoes, lacunas
+    # As duas tentativas podem falhar: entrega o melhor esforço mesmo incompleto,
+    # para que o arquivo sempre seja gerado e entregue ao usuário.
+    return dados, alteracoes, remocoes, adicoes, lacunas, declarada

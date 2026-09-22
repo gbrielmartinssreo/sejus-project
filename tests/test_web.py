@@ -637,3 +637,53 @@ def test_enviar_modelo_rejeita_pdf(monkeypatch, tmp_path):
 
     assert resp.status_code == 400
     assert "docx" in resp.json()["detail"].casefold()
+
+
+def test_analisar_arquivo_usuario_pagina_documento_grande(monkeypatch, tmp_path):
+    """Documentos maiores que a janela sao lidos por partes: a tool devolve
+    next_offset/has_more e o agente continua de onde parou, sem perder o final
+    (o antigo MAX_CHARS de 20k cortava o documento na metade)."""
+    import json
+
+    from sejus_project.tools.llm_tools import user_files
+
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    monkeypatch.setattr(user_files, "MAX_CHARS", 100)
+
+    conteudo = "".join(f"{i:03d} " for i in range(60))  # 240 chars
+    (tmp_path / "grande.txt").write_text(conteudo, encoding="utf-8")
+
+    pagina1 = json.loads(user_files.analisar_arquivo_usuario("grande.txt"))
+    assert pagina1["n_chars"] == 100
+    assert pagina1["n_chars_total"] == len(conteudo)
+    assert pagina1["has_more"] is True
+    assert pagina1["next_offset"] == 100
+
+    pagina2 = json.loads(
+        user_files.analisar_arquivo_usuario("grande.txt", offset=pagina1["next_offset"])
+    )
+    assert pagina2["offset"] == 100
+    assert pagina2["has_more"] is True
+
+    pagina3 = json.loads(
+        user_files.analisar_arquivo_usuario("grande.txt", offset=pagina2["next_offset"])
+    )
+    assert pagina3["has_more"] is False
+    assert pagina3["next_offset"] is None
+
+    # As janelas, concatenadas, reconstroem o documento inteiro.
+    assert pagina1["text"] + pagina2["text"] + pagina3["text"] == conteudo
+
+
+def test_analisar_arquivo_usuario_pequeno_tem_uma_janela(monkeypatch, tmp_path):
+    import json
+
+    from sejus_project.tools.llm_tools import user_files
+
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "pequeno.txt").write_text("conteudo curto", encoding="utf-8")
+
+    resultado = json.loads(user_files.analisar_arquivo_usuario("pequeno.txt"))
+    assert resultado["text"] == "conteudo curto"
+    assert resultado["has_more"] is False
+    assert resultado["next_offset"] is None

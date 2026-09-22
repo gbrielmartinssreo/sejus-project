@@ -63,3 +63,19 @@ def test_skill_loader_is_outside_agent_module():
     assert not hasattr(agent, "SKILL_RULES")
     assert not hasattr(agent, "_load_skill")
     assert len(loader.SKILL_RULES) == 7
+
+
+def test_correcao_aciona_skill_melhorar_documento(monkeypatch):
+    loader._loaded_skills.clear()
+    monkeypatch.setattr(
+        agent,
+        "messages",
+        [{
+            "role": "user",
+            "content": "consegue fazer a correção e me dar o arquivo corrigido?",
+        }],
+    )
+
+    selected = loader.skills_for_messages(agent.messages)
+
+    assert "melhorar_documento" in selected

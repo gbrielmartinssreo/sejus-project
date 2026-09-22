@@ -18,6 +18,25 @@ antes/depois.
 - Um botão da interface envia a mensagem "Melhore e compare o arquivo '<nome>'".
 - Em linguagem natural o usuário pode pedir: "melhore o arquivo que enviei",
   "adapte esse documento", "atualiza a portaria", "revisa e compara".
+- **Correção depois de uma análise**: se o documento já foi analisado nesta
+  conversa e o usuário pede para corrigir/ajustar/entregar o arquivo corrigido
+  (ex.: "consegue fazer a correção?", "me dê o arquivo corrigido"), esta é a
+  ferramenta correta — **não** é geração de ato novo. A tool injeta
+  automaticamente os apontamentos acionáveis da análise registrada para o
+  mesmo documento/versão.
+
+## Apontamentos da análise (correção pós-análise)
+- A análise COMPLETA é preservada como contexto, mas só os **apontamentos
+  acionáveis** (com ID estável) viram instrução de alteração. Elogios e
+  constatações de conformidade não geram mudança.
+- A melhoria deve aplicar cada apontamento ao original e devolver, em
+  `apontamentos_analise`, uma entrada por ID com `status` (`aplicado` ou
+  `nao_aplicado`) e, no não aplicado, um `motivo` explícito.
+- Declarar `aplicado` só vale se a mudança existir de fato no patch, estiver
+  ancorada no original e tiver passado na validação de lastro. O sistema
+  confere isso e rebaixa para `nao_aplicado` quando falha.
+- Se a análise não apontar nenhuma alteração acionável, **não invente
+  correções** — devolva as listas de mudanças vazias.
 
 ## Fluxo
 1. Identifique o arquivo enviado (name exato em `importacoes_usuario/`).

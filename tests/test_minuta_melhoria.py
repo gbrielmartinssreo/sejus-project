@@ -474,3 +474,101 @@ def test_gerar_estrutura_melhoria_define_padrao_de_requer_decisao(monkeypatch):
     assert adicoes[0]["requer_decisao_juridica"] is False
     # Sem contexto nenhum, o lastro da adicao vira aviso (phantom).
     assert adicoes[0]["lastro_validado"] is False
+
+
+# ---------------------------------------------------------------------------
+# Opcao A: documentos de 10+ paginas por janelas (sem corte em 60k)
+# ---------------------------------------------------------------------------
+
+
+def _doc_grande(n_artigos: int = 6000) -> str:
+    linhas = [
+        f"Art. {i}º Conteúdo do artigo {i} com detalhamento suficiente para o teste."
+        for i in range(1, n_artigos + 1)
+    ]
+    return "PORTARIA Nº 1/2026\n" + "\n".join(linhas)
+
+
+def test_janelas_conteudo_cobre_documento_inteiro():
+    conteudo = _doc_grande()
+    assert len(conteudo) > minuta._MELHORIA_JANELA_CHARS_DEFAULT
+
+    janelas = minuta._janelas_conteudo(conteudo)
+
+    assert len(janelas) >= 2
+    # Nenhuma janela ultrapassa (muito) o limite configurado.
+    assert max(len(j) for j in janelas) <= minuta._MELHORIA_JANELA_CHARS_DEFAULT + 500
+    # O começo, o meio e o fim do documento aparecem em alguma janela.
+    for trecho in (
+        "Art. 1º Conteúdo",
+        "Art. 3000º Conteúdo",
+        "Art. 6000º Conteúdo",
+    ):
+        assert any(trecho in janela for janela in janelas)
+
+
+def test_janelas_conteudo_pequeno_devolve_uma_janela():
+    assert minuta._janelas_conteudo("Art. 1º Curto.") == ["Art. 1º Curto."]
+
+
+def test_dedupe_mudancas_remove_repeticao_entre_janelas():
+    itens = [
+        {"rotulo": "Art. 3º", "trecho_original": "Art. 3º Texto."},
+        {"rotulo": "Art. 3º", "trecho_original": "Art. 3º Texto."},
+        {"rotulo": "Art. 4º", "trecho_original": "Art. 4º Outro."},
+    ]
+    unicos = minuta._dedupe_mudancas(itens)
+    assert len(unicos) == 2
+
+
+def test_usuario_melhoria_inclui_documento_maior_que_60k():
+    conteudo = "CONSIDERANDO o disposto na legislação aplicável. " * 2000
+    assert len(conteudo) > 60_000
+
+    resultado = minuta._usuario_melhoria(conteudo, "portaria", _perfil(), [])
+
+    assert conteudo in resultado
+
+
+def test_gerar_estrutura_melhoria_processa_documento_grande_em_janelas(monkeypatch):
+    """Documento maior que a janela e processado em blocos: o LLM e chamado uma
+    vez por janela e as mudancas de todas sao acumuladas (o final do documento
+    nao fica de fora, como acontecia no corte de 60k)."""
+    conteudo = _doc_grande()
+    janelas = minuta._janelas_conteudo(conteudo)
+    assert len(janelas) >= 2
+
+    retornos = []
+    for janela in janelas:
+        primeira = janela.splitlines()[0]
+        retornos.append(
+            {
+                "numero": "PORTARIA Nº 1/2026",
+                "ementa": "Dispõe sobre teste.",
+                "alteracoes": [
+                    {
+                        "tipo": "corrigido",
+                        "rotulo": primeira.split()[1],
+                        "trecho_original": primeira,
+                        "novo_texto": primeira + " [melhorado]",
+                        "detalhe": "Ajuste.",
+                    }
+                ],
+                "remocoes": [],
+            }
+        )
+
+    fake = _FakeExtrai(retornos)
+    monkeypatch.setattr(minuta, "_extrair_json_com_retry", fake)
+
+    estrutura, alteracoes, remocoes, _, _ = minuta.gerar_estrutura_melhoria(
+        conteudo, "portaria", _perfil(), [], None
+    )
+
+    assert len(fake.chamadas) == len(janelas)
+    assert len(alteracoes) == len(janelas)
+    assert remocoes == []
+    texto = _texto_da_estrutura(estrutura)
+    assert "[melhorado]" in texto
+    # A cauda do documento continua presente e foi alcancada pelas janelas.
+    assert "Art. 6000º" in texto

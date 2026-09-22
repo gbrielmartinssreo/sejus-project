@@ -456,6 +456,49 @@ function anexarComparacao(bubble, dados) {
     painel.appendChild(listaLacunas);
   }
 
+  var apontamentos = dados.apontamentos_analise || [];
+  if (apontamentos.length) {
+    painel.appendChild(
+      _blocoComparacao(
+        "Apontamentos da análise",
+        "Cada apontamento da análise anterior: aplicado ao documento ou justificado."
+      )
+    );
+    var listaApontamentos = document.createElement("ul");
+    listaApontamentos.className = "lista-alteracoes";
+    apontamentos.forEach(function (ap) {
+      var li = document.createElement("li");
+      li.className = "alteracao-item";
+      var aplicado = ap.status === "aplicado";
+      var tipo = document.createElement("span");
+      tipo.className = "alteracao-tipo " + (aplicado ? "adicionado" : "sem-precedente");
+      tipo.textContent = aplicado ? "aplicado" : "não aplicado";
+      li.appendChild(tipo);
+      var corpo = document.createElement("div");
+      corpo.className = "item-body";
+      if (ap.apontamento) {
+        var h = document.createElement("h4");
+        h.textContent = ap.apontamento;
+        corpo.appendChild(h);
+      }
+      if (ap.referencia) {
+        var ref = document.createElement("p");
+        ref.className = "alteracao-detalhe";
+        ref.textContent = "Mudança: " + ap.referencia;
+        corpo.appendChild(ref);
+      }
+      if (!aplicado && ap.motivo) {
+        var mot = document.createElement("p");
+        mot.className = "alteracao-detalhe lastro-aviso";
+        mot.textContent = "Motivo: " + ap.motivo;
+        corpo.appendChild(mot);
+      }
+      li.appendChild(corpo);
+      listaApontamentos.appendChild(li);
+    });
+    painel.appendChild(listaApontamentos);
+  }
+
   if (dados.url_original) {
     var acoes = document.createElement("div");
     acoes.className = "acoes-minuta";

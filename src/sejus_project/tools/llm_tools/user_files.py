@@ -13,6 +13,7 @@ Formatos suportados: .txt, .md, .pdf, .docx
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -23,9 +24,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 # servidor for iniciado.
 IMPORTACOES_DIR = PROJECT_ROOT / "importacoes_usuario"
 
-# Limite de caracteres devolvidos ao agente, para não estourar o contexto
-# em arquivos muito grandes. Ajuste conforme necessário.
-MAX_CHARS = 20_000
+# Tamanho da janela de texto devolvida ao agente em CADA leitura. O limite
+# antigo (20k) cortava documentos de 10+ páginas na metade. Agora o padrão
+# cobre a maioria dos atos por inteiro e, quando o arquivo for maior, a leitura
+# é PAGINADA: a tool devolve `offset`/`next_offset`/`has_more` para o agente
+# continuar de onde parou (sem perder o restante do documento).
+MAX_CHARS = int(os.getenv("USER_FILES_MAX_CHARS", "60000"))
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 
@@ -143,25 +147,38 @@ def extract_file_text(path: Path) -> str:
     return extractor(path)
 
 
-def read_user_file(filename: str) -> dict:
+def read_user_file(filename: str, offset: int = 0) -> dict:
     """Lê e extrai o conteúdo de um arquivo em importacoes_usuario/.
 
-    Devolve um dict com metadados + texto extraído (truncado se muito
-    grande), pronto para o agente analisar."""
+    Devolve um dict com metadados + texto extraído. Para arquivos maiores que
+    ``MAX_CHARS`` a leitura é paginada: ``offset`` seleciona a janela e o
+    resultado traz ``next_offset``/``has_more`` para o agente continuar lendo o
+    restante do documento (sem truncar conteúdo)."""
     path = _resolve_file(filename)
     extension = path.suffix.lower()
 
     text = extract_file_text(path)
-    truncated = len(text) > MAX_CHARS
-    if truncated:
-        text = text[:MAX_CHARS]
+    total = len(text)
+
+    offset = max(0, int(offset or 0))
+    # Offset além do fim: devolve a última janela em vez de vazio.
+    if total and offset >= total:
+        offset = max(0, total - MAX_CHARS)
+
+    window = text[offset : offset + MAX_CHARS]
+    next_offset = offset + len(window)
+    has_more = next_offset < total
 
     return {
         "filename": path.name,
         "extension": extension,
-        "n_chars": len(text),
-        "truncated": truncated,
-        "text": text,
+        "n_chars": len(window),
+        "n_chars_total": total,
+        "offset": offset,
+        "next_offset": next_offset if has_more else None,
+        "has_more": has_more,
+        "truncated": has_more,
+        "text": window,
     }
 
 
@@ -177,7 +194,10 @@ definition = {
             "Lê um arquivo enviado pelo usuário (armazenado na pasta "
             "importacoes_usuario/) e devolve o conteúdo extraído em texto. "
             "Use esta ferramenta quando o usuário pedir para avaliar, revisar "
-            "ou verificar uma minuta/documento que ele enviou. Depois de ler "
+            "ou verificar uma minuta/documento que ele enviou. A leitura é "
+            "paginada: se o resultado trouxer 'has_more': true, chame a "
+            "ferramenta de novo passando 'offset' = 'next_offset' até ler o "
+            "documento inteiro antes de concluir a análise. Depois de ler "
             "o conteúdo, se for necessário comparar com as normas da SEJUS "
             "(ex: verificar o que está faltando), chame também a ferramenta "
             "consultar_atos_sejus."
@@ -195,19 +215,30 @@ definition = {
                         "e lista as alternativas."
                     ),
                 },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "OPCIONAL. Posição (em caracteres) de onde iniciar a "
+                        "leitura. Preencha com o 'next_offset' devolvido na "
+                        "chamada anterior quando 'has_more' for true, para "
+                        "continuar lendo um documento grande."
+                    ),
+                },
             },
         },
     },
 }
 
 
-def analisar_arquivo_usuario(filename: str | None = None) -> str:
+def analisar_arquivo_usuario(filename: str | None = None, offset: int = 0) -> str:
     """Função exposta ao agente. Sempre devolve uma string (JSON) --
     nunca lança exceção para o chamador, para o agente conseguir reagir
     ao erro (ex: pedir o nome certo do arquivo) em vez de quebrar.
 
     Sem ``filename``, usa a importação mais recente da pasta (útil quando
-    o usuário acabou de enviar o arquivo e não sabe o nome)."""
+    o usuário acabou de enviar o arquivo e não sabe o nome). A leitura é
+    paginada por ``offset`` para documentos maiores que a janela: o agente
+    continua a partir de ``next_offset`` enquanto ``has_more`` for true."""
     if not filename:
         filename = _ultimo_arquivo_importado()
         if not filename:
@@ -217,7 +248,7 @@ def analisar_arquivo_usuario(filename: str | None = None) -> str:
             }, ensure_ascii=False)
 
     try:
-        result = read_user_file(filename)
+        result = read_user_file(filename, offset=offset)
         return json.dumps(result, ensure_ascii=False)
     except UserFileError as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)

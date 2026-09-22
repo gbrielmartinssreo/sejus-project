@@ -58,6 +58,8 @@ SKILL_RULES = {
             "melhore", "melhorar", "melhoria", "adeque", "adequa", "atualiza",
             "atualizar", "reescreve", "reescrever", "compare", "comparar",
             "mesmo arquivo", "antes/depois", "antes e depois",
+            "corrija", "corrigir", "correção", "correcao", "consertar",
+            "arrumar", "ajustar", "refazer", "retificar",
         ),
     },
 }

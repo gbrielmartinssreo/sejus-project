@@ -73,3 +73,11 @@ Ao encontrar uma inconsistência, reporte no formato:
 Não reescreva o ato inteiro automaticamente — aponte os pontos e peça
 confirmação antes de gerar uma versão corrigida, pois alterações em atos
 normativos têm efeito jurídico.
+
+Quando o usuário confirmar e pedir o **arquivo corrigido**, encaminhe para a
+ferramenta `melhorar_documento_usuario` (fluxo "melhorar e comparar"): ela
+aplica os apontamentos desta análise ao documento original como um patch
+(mesmo ato — número, ementa, objeto e assinaturas preservados), marca as
+mudanças no próprio arquivo e apresenta a comparação antes/depois. A análise
+produzida permanece como contexto; não a substitua por uma revisão
+independente nem invente correções que ela não apontou.
