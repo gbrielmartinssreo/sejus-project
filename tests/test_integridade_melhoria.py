@@ -690,3 +690,82 @@ def test_validacao_de_lastro_cobre_adicao_estrutural_no_comentario():
     assert ancora.startswith("Art. 4º-A")
     assert "EDITAL DEFERIMENTO" in texto
     assert "nao identifica nenhum ato" in texto
+
+
+# ---------------------------------------------------------------------------
+# Regressão: DOCX com medidas float (margens/recuos) não quebra o python-docx
+# ---------------------------------------------------------------------------
+
+
+def _modelo_com_medidas_float(tmp_path):
+    """DOCX com medidas gravadas como float (como alguns editores fazem).
+
+    O python-docx falha em ``int()`` ao ler essas medidas (ex.: margem da
+    seção dentro de ``doc.add_table``), reproduzindo o erro
+    ``invalid literal for int() with base 10: '1285.866...'``."""
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    from sejus_project.tools.document_infra.modelos import PORTARIA, PerfilModelo
+
+    model_path = str(tmp_path / "ModeloFloat.docx")
+    doc = Document()
+    doc.add_paragraph("Art. 3º O artesão deverá manter registro.")
+    doc.add_paragraph("Art. 4º As unidades penais fornecerão materiais.")
+
+    sect_pr = doc.sections[0]._sectPr
+    pg_mar = sect_pr.find(qn("w:pgMar"))
+    assert pg_mar is not None
+    pg_mar.set(qn("w:right"), "1285.8661417322844")
+    pg_mar.set(qn("w:left"), "992.1259842519686")
+    for paragrafo in doc.paragraphs:
+        p_pr = paragrafo._p.get_or_add_pPr()
+        p_pr.append(
+            p_pr.makeelement(
+                qn("w:ind"), {qn("w:left"): "3400.3937007874015"}
+            )
+        )
+    doc.save(model_path)
+    return PerfilModelo(
+        name="IN_FLOAT",
+        file=model_path,
+        act_types=PORTARIA.act_types,
+        patterns=PORTARIA.patterns,
+        preservar_moldura=True,
+    )
+
+
+def test_normalizar_medidas_arredonda_floats(tmp_path):
+    from docx import Document
+
+    from sejus_project.tools.document_infra.docx_engine import normalizar_medidas
+
+    perfil = _modelo_com_medidas_float(tmp_path)
+    doc = Document(perfil.file)
+    normalizar_medidas(doc)
+
+    # Leitura de propriedades que antes estouravam int() agora funciona.
+    assert doc.sections[0].right_margin is not None
+    assert doc.paragraphs[0].paragraph_format.left_indent is not None
+
+
+def test_montar_docx_revisado_tolera_medidas_float(tmp_path):
+    """Regressão: a página de resumo usa ``doc.add_table``, que lê a margem da
+    seção — com medidas float o python-docx estourava int(). O arquivo deve ser
+    gerado normalmente."""
+    from sejus_project.tools.document_infra.docx_builder import montar_docx_revisado
+
+    perfil = _modelo_com_medidas_float(tmp_path)
+    alteracoes = [
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º O artesão deverá manter registro.",
+            "novo_texto": "Art. 3º O artesão deverá manter registro atualizado.",
+            "detalhe": "Ajuste.",
+        }
+    ]
+
+    output_path = montar_docx_revisado(perfil, alteracoes, [], [], tmp_path)
+
+    assert output_path.is_file()

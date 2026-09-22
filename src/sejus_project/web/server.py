@@ -94,6 +94,8 @@ def _resposta_chat(reply: str) -> dict:
                 "adicoes_estruturais": dados.get("adicoes_estruturais") or [],
                 "lacunas": dados.get("lacunas") or [],
                 "apontamentos_analise": dados.get("apontamentos_analise") or [],
+                "fallback": bool(dados.get("fallback")),
+                "descartados": dados.get("descartados") or [],
                 "url_original": (
                     f"/api/arquivo/{quote(original)}" if original else None
                 ),

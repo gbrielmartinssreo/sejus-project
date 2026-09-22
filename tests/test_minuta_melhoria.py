@@ -165,7 +165,7 @@ def test_melhoria_patch_problematico_retenta_com_mensagem_de_retry(monkeypatch):
     assert "Art. 3º Texto do artigo 3 melhorado e detalhado." in _texto_da_estrutura(estrutura)
 
 
-def test_melhoria_patch_problematico_apos_retry_entrega_melhor_esforco(monkeypatch):
+def test_melhoria_patch_problematico_apos_retry_descarta_mudanca_invalida(monkeypatch):
     fake = _FakeExtrai([_patch_com_problema(), _patch_com_problema()])
     monkeypatch.setattr(minuta, "_extrair_json_com_retry", fake)
 
@@ -174,9 +174,11 @@ def test_melhoria_patch_problematico_apos_retry_entrega_melhor_esforco(monkeypat
     )
 
     assert len(fake.chamadas) == 2
-    # Melhor esforço: o patch mesmo problemático é devolvido (arquivo sempre sai).
-    assert any("Art. 999º" in item["novo_texto"] for item in alteracoes)
-    # A estrutura continua completa (origem + patch); conteúdo não citado intacto.
+    # Patch inválido (âncora inexistente) NÃO é aplicado; fica registrado como
+    # descartado e o chamador entrega a cópia intacta do original.
+    assert alteracoes == []
+    assert estrutura["_descartados"]
+    # A estrutura continua completa (conteúdo não citado intacto).
     assert "Art. 5º Texto do artigo 5 com conteúdo suficiente e detalhado." in _texto_da_estrutura(estrutura)
 
 

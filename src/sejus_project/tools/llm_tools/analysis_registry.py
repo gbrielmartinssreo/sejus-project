@@ -111,7 +111,9 @@ _RE_CORRECAO_FORTE = re.compile(
     r"trocar|atualiz|complement|detalh|padroniz|uniformiz|recomend|suger|"
     r"sugest|falta|ausente|omiss|inconsist|diverg|incongru|redund|amb[íi]gu|"
     r"imprecis|equ[íi]voc|incorret|pendente|observ|garant|contempl|deve|"
-    r"devem|necess[áa]ri|n[ãa]o\s+consta|n[ãa]o\s+prev)\w*",
+    r"devem|necess[áa]ri|n[ãa]o\s+consta|n[ãa]o\s+prev|renumer|reorden|"
+    r"reorganiz|sequenci|esclarec|clarific|harmoniz|explicit|correlacion|"
+    r"reformul|reescrev|reelabor|reconstru|readequ)\w*",
     re.IGNORECASE,
 )
 
@@ -123,7 +125,31 @@ _RE_ACIONAVEL = re.compile(
     r"trocar|atualiz|complement|detalh|padroniz|uniformiz|recomend|suger|"
     r"sugest|falta|ausente|omiss|inconsist|diverg|incongru|redund|amb[íi]gu|"
     r"imprecis|equ[íi]voc|incorret|pendente|observ|garant|contempl|deve|"
-    r"devem|necess[áa]ri|n[ãa]o\s+consta|n[ãa]o\s+prev|adequ|alter|revis)\w*",
+    r"devem|necess[áa]ri|n[ãa]o\s+consta|n[ãa]o\s+prev|adequ|alter|revis|"
+    r"renumer|reorden|reorganiz|sequenci|esclarec|clarific|harmoniz|"
+    r"explicit|correlacion|reformul|reescrev|reelabor|reconstru|readequ)\w*",
+    re.IGNORECASE,
+)
+
+# Promessas de análise, ofertas e falas de processo NUNCA são apontamento:
+# não pedem alteração no documento (ex.: "vou proceder", "posso detalhar",
+# "se desejar", "relatório formal", "seguir com as correções").
+_RE_PROMESSA = re.compile(
+    r"(\b(vou|irei|farei|proceder|procederei|aguarde|aguardar|"
+    r"j[áa]\s+retorno|retorno\s+com|posso\s+(?:detalhar|preparar|produzir|"
+    r"fazer|gerar|aprofundar|seguir|comparar)|poderia\s+(?:detalhar|"
+    r"preparar|produzir|fazer|gerar)|gostaria\s+que|deseja\s+(?:que|"
+    r"seguir|prosseguir|detalhar|o\s+relat[óo]rio)|quer\s+que\s+eu|"
+    r"prefere\s+que|se\s+desejar|relat[óo]rio\s+formal|"
+    r"produzir\s+um\s+arquivo|sugest[õo]es\s+revisadas|"
+    r"seguir\s+com\s+as\s+corre[çc][õo]es|fico\s+no\s+aguardo|me\s+avise|"
+    r"posso\s+preparar|segue\s+a\s+an[áa]lise|segue\s+o\s+relat[óo]rio)\b)",
+    re.IGNORECASE,
+)
+
+_RE_PERGUNTA = re.compile(
+    r"^\s*(?:deseja|quer|gostaria|poderia|pode|posso|como\s+prefere|"
+    r"prefere|confirma|qual|quais|quando|onde)\b",
     re.IGNORECASE,
 )
 
@@ -168,13 +194,21 @@ def _agrupar_itens(analise: str) -> list[str]:
 
 
 def _e_acionavel(item: str) -> bool:
-    if any(padrao.search(item) for padrao in _RE_SEM_ACAO):
+    texto = (item or "").strip()
+    if not texto:
         return False
-    if any(padrao.search(item) for padrao in _RE_CONFORMIDADE) and not (
-        _RE_CORRECAO_FORTE.search(item)
+    # Perguntas, promessas de análise e ofertas não são instruções de alteração.
+    if texto.endswith("?") or _RE_PERGUNTA.search(texto):
+        return False
+    if _RE_PROMESSA.search(texto):
+        return False
+    if any(padrao.search(texto) for padrao in _RE_SEM_ACAO):
+        return False
+    if any(padrao.search(texto) for padrao in _RE_CONFORMIDADE) and not (
+        _RE_CORRECAO_FORTE.search(texto)
     ):
         return False
-    return bool(_RE_ACIONAVEL.search(item))
+    return bool(_RE_ACIONAVEL.search(texto))
 
 
 def _id_apontamento(item: str) -> str:
@@ -182,12 +216,13 @@ def _id_apontamento(item: str) -> str:
     return "ap-" + hashlib.sha1(base.encode("utf-8", "ignore")).hexdigest()[:8]
 
 
-def extrair_apontamentos(analise: str) -> list[dict]:
+def extrair_apontamentos(analise: str, origem: str | None = None) -> list[dict]:
     """Apontamentos acionáveis (com ID estável) contidos na análise.
 
-    Constatações de conformidade e elogios ficam de fora. Se a análise não
-    apontar nenhuma alteração, a lista vem vazia (não se inventa correção).
-    """
+    Constatações de conformidade, elogios, promessas de análise e perguntas
+    ficam de fora. Se a análise não apontar nenhuma alteração, a lista vem
+    vazia (não se inventa correção). ``origem`` identifica de qual análise/
+    aprofundamento o apontamento veio (preservada ao consolidar)."""
     apontamentos: list[dict] = []
     vistos: set[str] = set()
     for item in _agrupar_itens(analise):
@@ -197,7 +232,10 @@ def extrair_apontamentos(analise: str) -> list[dict]:
         if identificador in vistos:
             continue
         vistos.add(identificador)
-        apontamentos.append({"id": identificador, "texto": item})
+        apontamento = {"id": identificador, "texto": item}
+        if origem:
+            apontamento["origem"] = origem
+        apontamentos.append(apontamento)
     return apontamentos
 
 
@@ -212,15 +250,16 @@ def registrar(
     sha1: str,
     analise_completa: str,
     apontamentos: list[dict] | None = None,
+    origem: str | None = None,
 ) -> dict:
     """Registra/atualiza a análise de ``arquivo`` na ``sessao``.
 
     Mesmo documento e mesma versão (sha1): acumula apontamentos por ID, para
     preservar o vínculo em análises feitas ao longo de vários turnos. Versão
-    diferente (documento alterado): substitui pela análise nova.
-    """
+    diferente (documento alterado): substitui pela análise nova. ``origem``
+    marca de qual análise/aprofundamento cada apontamento veio."""
     if apontamentos is None:
-        apontamentos = extrair_apontamentos(analise_completa)
+        apontamentos = extrair_apontamentos(analise_completa, origem)
 
     chave = _chave(sessao, arquivo)
     entrada = _ANALISES.get(chave)

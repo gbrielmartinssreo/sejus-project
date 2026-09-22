@@ -27,14 +27,25 @@ antes/depois.
 
 ## Apontamentos da análise (correção pós-análise)
 - A análise COMPLETA é preservada como contexto, mas só os **apontamentos
-  acionáveis** (com ID estável) viram instrução de alteração. Elogios e
-  constatações de conformidade não geram mudança.
-- A melhoria deve aplicar cada apontamento ao original e devolver, em
-  `apontamentos_analise`, uma entrada por ID com `status` (`aplicado` ou
-  `nao_aplicado`) e, no não aplicado, um `motivo` explícito.
-- Declarar `aplicado` só vale se a mudança existir de fato no patch, estiver
-  ancorada no original e tiver passado na validação de lastro. O sistema
-  confere isso e rebaixa para `nao_aplicado` quando falha.
+  acionáveis** (com ID estável) viram instrução de alteração. Elogios,
+  constatações de conformidade, promessas de análise e perguntas não geram
+  mudança. Os apontamentos são **consolidados ao longo dos turnos**: um
+  aprofundamento (ex.: "e o que está ruim?") que não relê o arquivo continua
+  vinculado ao mesmo documento e entra na lista.
+- Cada apontamento é uma **tarefa a executar** no original. A melhoria deve
+  devolver, em `apontamentos_analise`, uma entrada por ID com `status`
+  (`aplicado` ou `nao_aplicado`).
+- Declarar `aplicado` só vale se a mudança existir de fato no patch e estiver
+  ancorada no original. O sistema confere e reclassifica:
+  - `pendente` — mudança inserida, mas com lastro não validado (decisão
+    jurídica);
+  - `falhou` — não encaminhado, referência inexistente, trecho não localizado
+    ou justificativa vaga;
+  - `nao_aplicado` — impedimento **concreto** informado no `motivo`.
+- "Não foi alterado"/"não se aplica" **não é justificativa**: informe um
+  impedimento concreto (depende de decisão jurídica, conflita com a norma X,
+  cria despesa sem previsão). Aplicar outras melhorias não substitui cumprir os
+  apontamentos anteriores.
 - Se a análise não apontar nenhuma alteração acionável, **não invente
   correções** — devolva as listas de mudanças vazias.
 

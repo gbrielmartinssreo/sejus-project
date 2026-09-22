@@ -401,6 +401,14 @@ function anexarComparacao(bubble, dados) {
   titulo.appendChild(contagem);
   painel.appendChild(titulo);
 
+  if (dados.fallback) {
+    var avisoFallback = document.createElement("p");
+    avisoFallback.className = "comparacao-bloco-sub";
+    avisoFallback.textContent =
+      "Não foi possível aplicar as correções. Este arquivo preserva o conteúdo original.";
+    painel.appendChild(avisoFallback);
+  }
+
   var correcoes = dados.alteracoes || [];
   if (correcoes.length) {
     painel.appendChild(_blocoComparacao("Correções"));
@@ -469,10 +477,17 @@ function anexarComparacao(bubble, dados) {
     apontamentos.forEach(function (ap) {
       var li = document.createElement("li");
       li.className = "alteracao-item";
-      var aplicado = ap.status === "aplicado";
+      var status = ap.status || "falhou";
+      var rotulos = {
+        aplicado: ["aplicado", "adicionado"],
+        pendente: ["pendente de decisão", "alterado"],
+        nao_aplicado: ["não aplicado", "sem-precedente"],
+        falhou: ["falhou", "sem-precedente"],
+      };
+      var par = rotulos[status] || [status, "sem-precedente"];
       var tipo = document.createElement("span");
-      tipo.className = "alteracao-tipo " + (aplicado ? "adicionado" : "sem-precedente");
-      tipo.textContent = aplicado ? "aplicado" : "não aplicado";
+      tipo.className = "alteracao-tipo " + par[1];
+      tipo.textContent = par[0];
       li.appendChild(tipo);
       var corpo = document.createElement("div");
       corpo.className = "item-body";
@@ -481,13 +496,19 @@ function anexarComparacao(bubble, dados) {
         h.textContent = ap.apontamento;
         corpo.appendChild(h);
       }
+      if (ap.origem) {
+        var org = document.createElement("p");
+        org.className = "alteracao-detalhe";
+        org.textContent = "Origem: " + ap.origem;
+        corpo.appendChild(org);
+      }
       if (ap.referencia) {
         var ref = document.createElement("p");
         ref.className = "alteracao-detalhe";
         ref.textContent = "Mudança: " + ap.referencia;
         corpo.appendChild(ref);
       }
-      if (!aplicado && ap.motivo) {
+      if (status !== "aplicado" && ap.motivo) {
         var mot = document.createElement("p");
         mot.className = "alteracao-detalhe lastro-aviso";
         mot.textContent = "Motivo: " + ap.motivo;

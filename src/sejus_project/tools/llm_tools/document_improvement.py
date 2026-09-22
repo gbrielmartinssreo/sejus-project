@@ -256,11 +256,12 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["apontamentos_analis
         "recebido). 'status' = 'aplicado' somente quando a mudanca "
         "correspondente existir de fato em 'alteracoes'/'remocoes'/"
         "'adicoes_estruturais' e estiver ancorada no documento; 'nao_aplicado' "
-        "quando nao for possivel aplicar. Em 'referencia', informe o rotulo "
-        "(ou 'o_que') da mudanca que executou o apontamento. 'motivo' e "
-        "obrigatorio no 'nao_aplicado'. Nao invente mudancas apenas para "
-        "cobrir apontamento: se a analise nao apontar alteracao, deixe as "
-        "listas de mudancas vazias."
+        "apenas com um IMPEDIMENTO CONCRETO (nao use 'nao foi alterado'/"
+        "'nao se aplica'). Em 'referencia', informe o rotulo (ou 'o_que') da "
+        "mudanca que executou o apontamento. 'motivo' e obrigatorio no "
+        "'nao_aplicado'. Nao invente mudancas apenas para cobrir apontamento: "
+        "se a analise nao apontar alteracao, deixe as listas de mudancas "
+        "vazias."
     ),
     "items": {
         "type": "object",
@@ -283,8 +284,10 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["apontamentos_analis
             "motivo": {
                 "type": "string",
                 "description": (
-                    "Obrigatorio quando status='nao_aplicado': explique por que "
-                    "o apontamento nao pode ser aplicado."
+                    "Obrigatorio quando status='nao_aplicado': impedimento "
+                    "CONCRETO (ex.: depende de decisão jurídica; conflita com "
+                    "a norma X; cria despesa sem previsão). Nao use 'nao foi "
+                    "alterado'/'nao se aplica'."
                 ),
             },
         },
@@ -396,16 +399,27 @@ def _sistema_melhoria():
         "sistema destaca o paragrafo em amarelo e o sinaliza para validacao da "
         "equipe juridica antes da publicacao. Se o lastro cobrir integralmente "
         "o conteudo, marque false.\n"
-        "14. APONTAMENTOS DA ANALISE (quando informados): aplique ao documento "
-        "original as correcoes apontadas na analise anterior. Nao faca uma "
-        "revisao independente que ignore ou substitua esses apontamentos. Nao "
-        "invente correcoes alem deles e das diretrizes explicitas do usuario; "
-        "se a analise nao apontar nenhuma alteracao acionavel, devolva as "
-        "listas de mudancas vazias. Para CADA apontamento informado, devolva "
-        "uma entrada em 'apontamentos_analise' com o mesmo 'apontamento_id' e "
-        "'status' = 'aplicado' apenas quando a mudanca correspondente existir "
-        "de fato em 'alteracoes'/'remocoes'/'adicoes_estruturais'; caso "
-        "contrario 'status' = 'nao_aplicado' com 'motivo' explicito.\n"
+        "14. APONTAMENTOS DA ANALISE (quando informados): trate cada apontamento "
+        "como uma TAREFA a executar no documento original. Aplique a alteracao "
+        "correspondente e registre-a em 'alteracoes'/'remocoes'/"
+        "'adicoes_estruturais'. Nao faca uma revisao independente que ignore ou "
+        "substitua esses apontamentos; nao invente correcoes alem deles e das "
+        "diretrizes explicitas do usuario. Se a analise nao apontar nenhuma "
+        "alteracao acionavel, devolva as listas de mudancas vazias. Para CADA "
+        "apontamento informado, devolva uma entrada em 'apontamentos_analise' "
+        "com o mesmo 'apontamento_id':\n"
+        "   - 'status' = 'aplicado' SOMENTE quando a mudanca existir de fato em "
+        "'alteracoes'/'remocoes'/'adicoes_estruturais' e estiver ancorada no "
+        "documento, com 'referencia' = rótulo da mudança;\n"
+        "   - 'status' = 'nao_aplicado' apenas com um IMPEDIMENTO CONCRETO no "
+        "'motivo' (ex.: depende de decisao juridica; conflita com a norma X; "
+        "cria despesa sem previsao legal; materia reservada a lei "
+        "complementar). NUNCA use 'nao foi alterado', 'nao se aplica' ou "
+        "'nao aplicavel' como justificativa;\n"
+        "   - se a execucao falhou (trecho nao localizado, por exemplo), deixe "
+        "claro o motivo tecnico no 'motivo' — o sistema marcara como falha.\n"
+        "Aplicar outras melhorias NAO substitui cumprir os apontamentos "
+        "anteriores.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -462,8 +476,10 @@ def _usuario_melhoria(
                 [
                     "",
                     (
-                        "APONTAMENTOS DA ANALISE (aplicar ao documento original; "
-                        "cada item tem ID e deve constar em 'apontamentos_analise'):"
+                        "APONTAMENTOS DA ANALISE (TAREFAS a executar no "
+                        "documento original; cada item tem ID e deve constar em "
+                        "'apontamentos_analise' com resultado ou impedimento "
+                        "concreto):"
                     ),
                 ]
             )
@@ -889,33 +905,159 @@ def _problemas_do_patch(
     return problemas
 
 
+def _filtrar_patch_valido(
+    conteudo: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+    """Descarta mudanças inválidas para NÃO aplicar patch quebrado.
+
+    Remove itens sem âncora/campos mínimos e itens que causariam duplicação no
+    texto final. Se não for possível resolver as duplicações, descarta TODAS as
+    mudanças (entrega a cópia intacta em vez de um patch inválido). Devolve
+    ``(alteracoes, remocoes, adicoes, descartados)`` com os rótulos descartados.
+    """
+
+    def _ok_alt(item) -> bool:
+        return (
+            isinstance(item, dict)
+            and item.get("tipo") in ("alterado", "corrigido")
+            and bool((item.get("novo_texto") or "").strip())
+            and _item_tem_ancora(conteudo, item)
+        )
+
+    def _ok_rem(item) -> bool:
+        return (
+            isinstance(item, dict)
+            and bool((item.get("rotulo") or "").strip())
+            and _item_tem_ancora(conteudo, item)
+        )
+
+    def _ok_add(item) -> bool:
+        return isinstance(item, dict) and bool((item.get("texto") or "").strip())
+
+    def _rotulo(item: dict) -> str:
+        return item.get("rotulo") or item.get("o_que") or item.get("tipo") or "?"
+
+    alt = [a for a in alteracoes if _ok_alt(a)]
+    rem = [r for r in remocoes if _ok_rem(r)]
+    adic = [a for a in adicoes if _ok_add(a)]
+    descartados = (
+        [_rotulo(a) for a in alteracoes if not _ok_alt(a)]
+        + [_rotulo(r) for r in remocoes if not _ok_rem(r)]
+        + [_rotulo(a) for a in adicoes if not _ok_add(a)]
+    )
+
+    while _duplicacoes_do_patch(conteudo, alt, rem, adic):
+        resolvido = False
+        for lista_nome in ("alt", "adic", "rem"):
+            lista = {"alt": alt, "adic": adic, "rem": rem}[lista_nome]
+            for i in range(len(lista)):
+                tentativa = lista[:i] + lista[i + 1 :]
+                if lista_nome == "alt":
+                    restante = _duplicacoes_do_patch(conteudo, tentativa, rem, adic)
+                elif lista_nome == "adic":
+                    restante = _duplicacoes_do_patch(conteudo, alt, rem, tentativa)
+                else:
+                    restante = _duplicacoes_do_patch(conteudo, alt, tentativa, adic)
+                if not restante:
+                    descartados.append(_rotulo(lista[i]))
+                    if lista_nome == "alt":
+                        alt = tentativa
+                    elif lista_nome == "adic":
+                        adic = tentativa
+                    else:
+                        rem = tentativa
+                    resolvido = True
+                    break
+            if resolvido:
+                break
+        if not resolvido:
+            # Não foi possível tornar o patch válido: descarta tudo (não aplica
+            # patch inválido; o chamador entrega a cópia intacta).
+            descartados.extend(_rotulo(a) for a in alt)
+            descartados.extend(_rotulo(r) for r in rem)
+            descartados.extend(_rotulo(a) for a in adic)
+            return [], [], [], descartados
+
+    return alt, rem, adic, descartados
+
+
 # ---------------------------------------------------------------------------
 # Cobertura dos apontamentos da análise
 # ---------------------------------------------------------------------------
 
 
-def _mudanca_aplicada(conteudo: str, tipo: str, item: dict) -> tuple[bool, str]:
-    """Diz se a mudança foi de fato aplicada ao documento e, se não, por quê.
+# Status possíveis de um apontamento da análise na cobertura.
+STATUS_APLICADO = "aplicado"
+STATUS_PENDENTE = "pendente"
+STATUS_NAO_APLICADO = "nao_aplicado"
+STATUS_FALHOU = "falhou"
+
+# Motivo genérico NÃO é impedimento: "não foi alterado" não justifica nada.
+_RE_MOTIVO_VAGO = re.compile(
+    r"^\s*(?:n[ãa]o\s+(?:foi|foram|é|seria|se|houve|p[ôo]de|deu|"
+    r"alterad|aplic|realizad|poss[íi]vel)|sem\s+(?:necessidade|altera|"
+    r"aplica|previs|efeito|pertin)|imposs[íi]vel|desnecess|"
+    r"nada\s+a\s+fazer|n[ãa]o\s+coube|n[ãa]o\s+h[áa]\s+como)",
+    re.IGNORECASE,
+)
+_RE_IMPEDIMENTO_CONCRETO = re.compile(
+    r"(decis[ãa]o\s+jur[íi]dica|aprova[çc][ãa]o|compet[êe]ncia|"
+    r"lei\s+complementar|or[çc]ament|depende\s+de|requer\s+|necessita\s+de|"
+    r"aguarda|pendente\s+de|conflit|incompat|vedad|contradiz|prejudicad|"
+    r"falta\s+de\s+base|sem\s+lastro|prazo\s+a\s+definir|norma\s+superior|"
+    r"ato\s+superior|revoga[çc]|vig[êe]ncia|indefer|inconstitucional|"
+    r"redund|sobrepos|duplic|j[áa]\s+prev|j[áa]\s+disciplin|"
+    r"mat[ée]ria\s+reservada|iniciativa|cria\s+despesa)",
+    re.IGNORECASE,
+)
+
+
+def _motivo_concreto(motivo: str) -> bool:
+    """Diz se o motivo é um impedimento concreto (não uma justificativa vaga).
+
+    Exige um motivo minimamente descritivo e que não seja apenas 'não foi
+    alterado'/'não se aplica'. Se apontar uma causa concreta, aceita."""
+    texto = (motivo or "").strip()
+    if len(texto) < 20:
+        return False
+    if _RE_IMPEDIMENTO_CONCRETO.search(texto):
+        return True
+    # Motivo descritivo, porém sem palavra-chave conhecida: só vale se não for
+    # claramente vago.
+    return len(texto) >= 40 and not _RE_MOTIVO_VAGO.search(texto)
+
+
+def _mudanca_aplicada(conteudo: str, tipo: str, item: dict) -> tuple[str, str]:
+    """Diz se a mudança foi de fato aplicada e, se não, o status/motivo.
 
     A declaração do modelo não basta: a mudança precisa existir no patch, estar
     ancorada no original e, quando tiver lastro, ter passado na validação de
-    lastro/coerência. Falha de âncora ou de lastro implica NÃO aplicada."""
+    lastro/coerência. Falha de âncora é FALHA de execução; lastro divergente é
+    PENDÊNCIA de decisão jurídica."""
     if (item.get("lastro_validado") is False) or item.get("coerencia_aviso"):
         return (
-            False,
+            STATUS_PENDENTE,
             (
                 "a mudança foi inserida, mas o lastro não foi validado no "
-                "acervo (pendente de decisão jurídica) — não contabilizada "
-                "como aplicada"
+                "acervo (requer decisão da equipe jurídica antes da publicação)"
             ),
         )
     if tipo == "adicao":
         if not (item.get("texto") or "").strip():
-            return False, "a adição não tem texto para inserir"
-        return True, ""
+            return STATUS_FALHOU, "a adição não tem texto para inserir"
+        return STATUS_APLICADO, ""
     if not _item_tem_ancora(conteudo, item):
-        return False, "o trecho original não foi localizado no documento"
-    return True, ""
+        return (
+            STATUS_FALHOU,
+            (
+                "o trecho original não foi localizado no documento "
+                "(falha de execução da alteração)"
+            ),
+        )
+    return STATUS_APLICADO, ""
 
 
 def _localizar_mudanca(
@@ -970,10 +1112,15 @@ def _validar_cobertura(
     """Reconstrói a cobertura a partir dos IDs e das mudanças EFETIVAS.
 
     Parte dos apontamentos (IDs estáveis) e verifica cada declaração do modelo
-    contra o patch realmente montado. Declaração de 'aplicado' só se mantém se a
-    mudança referida existe, está ancorada e passou no lastro; caso contrário
-    vira 'nao_aplicado' com motivo. Apontamento sem entrada declarada também
-    aparece como não aplicado."""
+    contra o patch realmente montado. O painel sai SEMPRE desta lista original:
+    o modelo não pode omitir apontamentos nem trocá-los por outras sugestões.
+
+    - ``aplicado``: mudança existe, está ancorada e sem pendência de lastro;
+    - ``pendente``: mudança inserida, mas requer decisão jurídica (lastro);
+    - ``falhou``: apontamento não encaminhado, referência inexistente, âncora
+      não localizada ou justificativa vaga ('não foi alterado' não justifica);
+    - ``nao_aplicado``: impedimento CONCRETO informado pela melhoria.
+    """
     por_id = {
         str(d.get("apontamento_id") or "").strip(): d
         for d in (declarada or [])
@@ -987,14 +1134,16 @@ def _validar_cobertura(
         entrada = {
             "apontamento_id": identificador,
             "apontamento": apontamento.get("texto") or "",
-            "status": "nao_aplicado",
+            "origem": apontamento.get("origem") or "",
+            "status": STATUS_FALHOU,
             "referencia": "",
             "motivo": "",
         }
         declaracao = por_id.get(str(identificador))
         if declaracao is None:
             entrada["motivo"] = (
-                "o apontamento não foi encaminhado pela melhoria"
+                "o apontamento não foi encaminhado pela melhoria "
+                "(falha de execução)"
             )
             cobertura.append(entrada)
             continue
@@ -1005,30 +1154,35 @@ def _validar_cobertura(
 
         if status_modelo != "aplicado":
             entrada["referencia"] = referencia
-            entrada["motivo"] = motivo or (
-                "a melhoria não indicou como aplicar o apontamento"
-            )
+            if _motivo_concreto(motivo):
+                entrada["status"] = STATUS_NAO_APLICADO
+                entrada["motivo"] = motivo
+            else:
+                entrada["status"] = STATUS_FALHOU
+                entrada["motivo"] = (
+                    "não aplicado sem impedimento concreto"
+                    + (f": '{motivo}'" if motivo else "")
+                    + " (falha de execução)"
+                )
             cobertura.append(entrada)
             continue
 
         localizada = _localizar_mudanca(referencia, alteracoes, remocoes, adicoes)
         if localizada is None:
             entrada["referencia"] = referencia
+            entrada["status"] = STATUS_FALHOU
             entrada["motivo"] = (
                 "a referência informada não corresponde a nenhuma mudança "
-                "aplicada no patch"
+                "aplicada no patch (falha de execução)"
             )
             cobertura.append(entrada)
             continue
 
         tipo, item, rotulo = localizada
-        aplicada, motivo_tecnico = _mudanca_aplicada(conteudo, tipo, item)
+        status, motivo_tecnico = _mudanca_aplicada(conteudo, tipo, item)
         entrada["referencia"] = rotulo or referencia
-        if aplicada:
-            entrada["status"] = "aplicado"
-            entrada["motivo"] = ""
-        else:
-            entrada["motivo"] = motivo_tecnico
+        entrada["status"] = status
+        entrada["motivo"] = motivo_tecnico
         cobertura.append(entrada)
     return cobertura
 
@@ -1037,7 +1191,7 @@ def _problemas_cobertura(
     apontamentos: list[dict],
     declarada: list[dict] | None,
 ) -> list[str]:
-    """Problemas que disparam retry: cobertura ausente/incompleta ou inválida."""
+    """Problemas que disparam retry: cobertura ausente/incompleta ou vaga."""
     if not apontamentos:
         return []
     ids = {str(a.get("id")) for a in apontamentos if isinstance(a, dict)}
@@ -1062,21 +1216,33 @@ def _problemas_cobertura(
                 f"status invalido para {d.get('apontamento_id')!r}: use "
                 "'aplicado' ou 'nao_aplicado'"
             )
-        if status == "nao_aplicado" and not (d.get("motivo") or "").strip():
-            problemas.append(
-                f"apontamento {d.get('apontamento_id')!r} 'nao_aplicado' sem motivo"
-            )
+            continue
+        if status == "nao_aplicado":
+            motivo = (d.get("motivo") or "").strip()
+            if not motivo:
+                problemas.append(
+                    f"apontamento {d.get('apontamento_id')!r} 'nao_aplicado' "
+                    "sem motivo"
+                )
+            elif not _motivo_concreto(motivo):
+                problemas.append(
+                    f"apontamento {d.get('apontamento_id')!r} com motivo vago "
+                    f"({motivo!r}): informe um impedimento concreto"
+                )
     return problemas
 
 
 def _mensagem_retry_cobertura(problemas: list[str]) -> str:
     detalhes = "; ".join(problemas)
     return (
-        "A cobertura dos apontamentos da analise esta incompleta. Problemas: "
-        f"{detalhes}. Reenvie o JSON com 'apontamentos_analise' contendo UMA "
-        "entrada por apontamento_id recebido, com 'status' 'aplicado' (e "
-        "'referencia' = rótulo da mudança) ou 'nao_aplicado' com 'motivo'. "
-        "Devolva o JSON valido e encerrado."
+        "A cobertura dos apontamentos da analise esta incompleta ou vaga. "
+        f"Problemas: {detalhes}. Reenvie o JSON com 'apontamentos_analise' "
+        "contendo UMA entrada por apontamento_id recebido. Para cada item: "
+        "EXECUTE a alteracao e marque 'aplicado' com 'referencia' = rótulo da "
+        "mudança; ou informe 'nao_aplicado' com um impedimento CONCRETO (ex.: "
+        "depende de decisão jurídica, conflita com a norma X, cria despesa sem "
+        "previsão). NUNCA use 'não foi alterado'/'não se aplica' como "
+        "justificativa. Devolva o JSON valido e encerrado."
     )
 
 
@@ -1376,6 +1542,12 @@ def gerar_estrutura_melhoria(
         remocoes = _dedupe_mudancas(remocoes)
         adicoes = _dedupe_mudancas(adicoes)
 
+    # Não aplica patch inválido: descarta itens sem âncora ou que causariam
+    # duplicação. Se nada sobrar, a entrega será a cópia intacta do original.
+    alteracoes, remocoes, adicoes, descartados = _filtrar_patch_valido(
+        conteudo, alteracoes, remocoes, adicoes
+    )
+
     # Cobertura dos apontamentos validada UMA vez sobre o patch consolidado.
     cobertura = _validar_cobertura(
         conteudo,
@@ -1387,6 +1559,7 @@ def gerar_estrutura_melhoria(
     )
     estrutura = _construir_estrutura(conteudo, alteracoes, remocoes, numero, ementa)
     estrutura["_cobertura_analise"] = cobertura
+    estrutura["_descartados"] = descartados
     return estrutura, alteracoes, remocoes, adicoes, lacunas
 
 

@@ -15,6 +15,8 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
+from sejus_project.tools.document_infra.docx_engine import normalizar_medidas
+
 _ALINHAMENTO = {
     WD_ALIGN_PARAGRAPH.LEFT: "left",
     WD_ALIGN_PARAGRAPH.CENTER: "center",
@@ -349,6 +351,7 @@ def _tabela_para_html(w_tbl, doc: Document) -> str:
 def docx_para_html(path) -> str:
     """Converte um DOCX em HTML com estilos inline, na ordem do corpo."""
     doc = Document(str(path))
+    normalizar_medidas(doc)
     estilo_base = _css(_doc_defaults_fonte(doc)) or "font-family:'Times New Roman', Georgia, serif"
     partes = []
     for child in doc.element.body.iterchildren():

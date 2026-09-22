@@ -10,8 +10,10 @@ from sejus_project.tools.llm_tools.document_generation import (
     aceitar_proposta,
     analise_para_correcao,
     aplicar_alteracoes_selecionadas,
+    arquivo_para_correcao_sem_analise,
     cancelar_pendencia,
     comparacao_definition,
+    documento_para_analise,
     gerar_documento_normativo,
     has_pending_document,
     limpar_estado,
@@ -268,25 +270,31 @@ def _executar_tool(tool_call):
 # ============================================================================
 
 def _cobertura_para_texto(cobertura) -> str:
-    """Formata a cobertura dos apontamentos da análise (aplicados/não aplicados)."""
+    """Formata a cobertura dos apontamentos da análise por status."""
     if not cobertura:
         return ""
-    aplicados = [c for c in cobertura if c.get("status") == "aplicado"]
-    nao_aplicados = [c for c in cobertura if c.get("status") != "aplicado"]
+    grupos = (
+        ("aplicado", "Aplicados"),
+        ("pendente", "Pendentes de decisão jurídica"),
+        ("nao_aplicado", "Não aplicados (impedimento)"),
+        ("falhou", "Falhas de execução"),
+    )
     linhas = ["Cobertura dos apontamentos da análise:"]
-    if aplicados:
-        linhas.append("Aplicados:")
-        for item in aplicados[:15]:
+    for status, rotulo in grupos:
+        itens = [c for c in cobertura if c.get("status") == status]
+        if not itens:
+            continue
+        linhas.append(f"{rotulo}:")
+        for item in itens[:15]:
+            texto = str(item.get("apontamento") or "")[:160]
             referencia = item.get("referencia")
-            sufixo = f" (mudança: {referencia})" if referencia else ""
-            linhas.append(f"- {str(item.get('apontamento') or '')[:160]}{sufixo}")
-    if nao_aplicados:
-        linhas.append("Não aplicados:")
-        for item in nao_aplicados[:15]:
-            motivo = item.get("motivo") or "sem justificativa"
-            linhas.append(
-                f"- {str(item.get('apontamento') or '')[:160]} — {motivo}"
-            )
+            motivo = item.get("motivo")
+            sufixo = ""
+            if status == "aplicado" and referencia:
+                sufixo = f" (mudança: {referencia})"
+            elif status != "aplicado" and motivo:
+                sufixo = f" — {motivo}"
+            linhas.append(f"- {texto}{sufixo}")
     return "\n".join(linhas)
 
 
@@ -338,6 +346,25 @@ def _resposta_melhoria(result: dict) -> str:
 
     filename = result.get("filename") or ""
     alteracoes = result.get("alteracoes") or []
+    fallback = bool(result.get("fallback"))
+    mensagem = result.get("mensagem")
+
+    if fallback and not alteracoes:
+        resposta = (
+            f"{mensagem or 'Não foi possível aplicar as correções. Este arquivo preserva o conteúdo original.'}\n"
+            f"Arquivo: **{filename}** — disponível para download no cartão "
+            "abaixo."
+        )
+        cobertura = _cobertura_para_texto(result.get("apontamentos_analise"))
+        if cobertura:
+            resposta += f"\n\n{cobertura}"
+        outros = result.get("outros") or []
+        if outros:
+            resposta += (
+                "\n\nOutros arquivos importados disponíveis:\n"
+                + "\n".join(f"- {nome}" for nome in outros)
+            )
+        return resposta
 
     linhas = [
         f"- ({a.get('tipo', 'alterado')}) "
@@ -364,6 +391,13 @@ def _resposta_melhoria(result: dict) -> str:
     cobertura = _cobertura_para_texto(result.get("apontamentos_analise"))
     if cobertura:
         resposta += f"\n\n{cobertura}"
+
+    if result.get("descartados"):
+        resposta += (
+            "\n\nMudanças inválidas descartadas: "
+            + ", ".join(dict.fromkeys(result.get("descartados")))
+            + "."
+        )
 
     outros = result.get("outros") or []
 
@@ -525,14 +559,20 @@ def _tratar_correcao_direta(question):
         return None
 
     analise = analise_para_correcao()
-    if not analise:
-        return None
+    if analise:
+        return _executar_melhoria(
+            filename=analise.get("filename"),
+            diretrizes=question,
+            apontamentos=analise.get("apontamentos"),
+        )
 
-    return _executar_melhoria(
-        filename=analise.get("filename"),
-        diretrizes=question,
-        apontamentos=analise.get("apontamentos"),
-    )
+    # Sem análise registrada: se há arquivo importado e o pedido é de correção
+    # do arquivo (não de um ato novo), ainda usa o motor de melhoria.
+    filename = arquivo_para_correcao_sem_analise(question)
+    if filename:
+        return _executar_melhoria(filename=filename, diretrizes=question)
+
+    return None
 
 
 # ============================================================================
@@ -574,6 +614,7 @@ def _executar_loop_agente(question: str = ""):
 
     ultimo_resultado_tool = None
     arquivo_analisado = None
+    fez_edicao = False
 
     # Teto de iterações do loop. Foi ampliado (5 -> 10) para acomodar a leitura
     # PAGINADA de documentos grandes: cada janela de `analisar_arquivo_usuario`
@@ -615,11 +656,14 @@ def _executar_loop_agente(question: str = ""):
                 "content": conteudo,
             })
 
-            # Resposta que encerra o turno de leitura do documento: registra a
-            # análise vinculada ao arquivo REALMENTE analisado (pode acumular
-            # apontamentos ao longo de vários turnos).
-            if arquivo_analisado and (conteudo or "").strip():
-                registrar_analise(arquivo_analisado, conteudo)
+            # Consolida os apontamentos do turno no documento em análise. Um
+            # APROFUNDAMENTO (ex.: "e o que está ruim?") não chama de novo a
+            # leitura, mas ainda é vinculado ao mesmo documento. Turnos de
+            # edição (melhoria/geração) não viram apontamento.
+            alvo = documento_para_analise(conteudo, arquivo_analisado)
+            if alvo and (conteudo or "").strip() and not fez_edicao:
+                origem = "aprofundamento" if not arquivo_analisado else "análise"
+                registrar_analise(alvo, conteudo, origem)
 
             return (
                 conteudo
@@ -633,6 +677,8 @@ def _executar_loop_agente(question: str = ""):
 
         for tool_call in message.tool_calls:
 
+            nome_tool = tool_call.function.name
+
             resultado = _executar_tool(tool_call)
 
             ultimo_resultado_tool = resultado
@@ -643,10 +689,16 @@ def _executar_loop_agente(question: str = ""):
                 "content": resultado,
             })
 
-            if tool_call.function.name == "analisar_arquivo_usuario":
+            if nome_tool == "analisar_arquivo_usuario":
                 nome = _filename_do_resultado(resultado)
                 if nome:
                     arquivo_analisado = nome
+
+            if nome_tool in (
+                "melhorar_documento_usuario",
+                "gerar_documento_normativo",
+            ):
+                fez_edicao = True
 
             # A geração recusou gerar um ato novo por se tratar de correção de
             # documento analisado: encaminha para a melhoria sem novo formulário.

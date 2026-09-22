@@ -23,6 +23,65 @@ def all_paragraphs(document: Document) -> list:
     return list(document.element.body.iter(qn("w:p")))
 
 
+# Medidas OOXML que precisam ser inteiras (twips, half-points, etc.). Alguns
+# editores/ferramentas gravam esses valores como float (ex.:
+# ``w:right="1285.8661417322844"``), o que faz o python-docx falhar com
+# "invalid literal for int()" ao ler a propriedade (margens da seção, recuos,
+# espaçamento, tamanho de fonte). Normalizamos para inteiro ao abrir o arquivo.
+_MEDIDAS_ATRIBUTOS = (
+    qn("w:w"),
+    qn("w:left"),
+    qn("w:right"),
+    qn("w:top"),
+    qn("w:bottom"),
+    qn("w:firstLine"),
+    qn("w:hanging"),
+    qn("w:start"),
+    qn("w:end"),
+    qn("w:before"),
+    qn("w:after"),
+    qn("w:line"),
+    qn("w:space"),
+    qn("w:gutter"),
+    qn("w:header"),
+    qn("w:footer"),
+)
+
+_MEDIDAS_TAGS_VAL = (qn("w:sz"), qn("w:szCs"))
+
+
+def _medida_inteira(valor: str) -> int | None:
+    try:
+        return round(float(valor))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalizar_medidas(document: Document) -> None:
+    """Arredonda medidas OOXML que vierem como float para inteiro.
+
+    Evita o erro do python-docx ``invalid literal for int()`` ao ler margens da
+    seção, recuos, espaçamento, larguras de tabela e tamanhos de fonte gravados
+    como decimal por outros editores."""
+    for elemento in document.element.iter():
+        for atributo in _MEDIDAS_ATRIBUTOS:
+            valor = elemento.get(atributo)
+            if valor is None or "." not in valor:
+                continue
+            normalizado = _medida_inteira(valor)
+            if normalizado is not None:
+                elemento.set(atributo, str(normalizado))
+
+    for tag in _MEDIDAS_TAGS_VAL:
+        for elemento in document.element.iter(tag):
+            valor = elemento.get(qn("w:val"))
+            if valor is None or "." not in valor:
+                continue
+            normalizado = _medida_inteira(valor)
+            if normalizado is not None:
+                elemento.set(qn("w:val"), str(normalizado))
+
+
 def paragraph_text(w_p) -> str:
     """Texto completo de um elemento ``w:p``."""
     # Normaliza: se for CT_P com _element, usa o _element subjacente
@@ -158,6 +217,25 @@ def tachar(w_p) -> None:
     for run in w_p.findall(qn("w:r")):
         rPr = run.get_or_add_rPr()
         rPr.get_or_add_strike().val = True
+
+
+def destachar(w_p) -> None:
+    """Remove tachado/cor de revisão herdados ao clonar um parágrafo.
+
+    ``build_paragraph`` copia a formatação do parágrafo de referência; se essa
+    referência já tiver sido tachada (alteração anterior no mesmo laço), o
+    parágrafo NOVO sairia tachado — parecendo conteúdo removido. Aqui limpamos
+    as marcas de comparação para o texto novo nascer sem tachado."""
+    for run in w_p.findall(qn("w:r")):
+        rPr = run.find(qn("w:rPr"))
+        if rPr is None:
+            continue
+        strike = rPr.find(qn("w:strike"))
+        if strike is not None:
+            rPr.remove(strike)
+        color = rPr.find(qn("w:color"))
+        if color is not None:
+            rPr.remove(color)
 
 
 def sombrear(w_p, fill: str = "FFF3B0") -> None:

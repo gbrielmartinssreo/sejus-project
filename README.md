@@ -114,17 +114,32 @@ abre o formulário de geração de um ato novo.
   versionada pelo hash do conteúdo. Só a versão efetivamente analisada é usada
   na correção.
 - Dessa análise são extraídos, separadamente, os **apontamentos acionáveis**,
-  com IDs estáveis. Elogios e constatações de conformidade não são instruções
-  de alteração e não geram mudanças; se a análise não apontar nada a corrigir,
-  nenhuma correção é inventada.
-- A melhoria recebe esses apontamentos (além das instruções do usuário) e os
-  aplica ao original pelo mesmo motor de patch, com as marcas verde/tachado e a
-  comparação antes/depois.
-- A entrega inclui a **cobertura dos apontamentos**: cada apontamento é
-  classificado como aplicado ou não aplicado com justificativa. A declaração do
-  modelo não basta — o sistema confere se a mudança existe de fato no patch,
-  está ancorada no original e passou na validação de lastro; caso contrário, o
-  apontamento não aparece como aplicado.
+  com IDs estáveis. Elogios, constatações de conformidade, promessas de análise
+  e perguntas não são instruções de alteração e não geram mudanças; se a análise
+  não apontar nada a corrigir, nenhuma correção é inventada.
+- Os apontamentos são **consolidados ao longo dos turnos**: aprofundamentos da
+  análise (ex.: "e o que está ruim?") que não releem o arquivo continuam
+  vinculados ao mesmo documento e entram na lista, cada um com sua origem.
+- A melhoria recebe essa lista como **tarefas a executar** (além das instruções
+  do usuário) e aplica ao original pelo mesmo motor de patch, com as marcas
+  verde/tachado e a comparação antes/depois.
+- A entrega inclui a **cobertura dos apontamentos**, sempre montada a partir da
+  lista original (o modelo não pode omitir itens nem trocá-los por outras
+  sugestões). A declaração do modelo não basta — o sistema confere se a mudança
+  existe de fato no patch e está ancorada. Cada item recebe um status:
+  - **aplicado**: alteração executada e verificada no documento;
+  - **pendente**: alteração inserida, mas requer decisão jurídica (lastro);
+  - **falhou**: não encaminhado, referência inexistente, trecho não localizado
+    ou justificativa vaga ("não foi alterado" não justifica);
+  - **não aplicado**: impedimento concreto informado (ex.: depende de decisão
+    jurídica, conflita com norma superior, cria despesa sem previsão).
+- **A entrega nunca fica sem arquivo**: se todas as correções funcionarem, sai o
+  DOCX corrigido; se só algumas, sai o DOCX parcialmente corrigido com as
+  pendências listadas; se nenhuma, sai uma **cópia intacta** do original com o
+  aviso "Não foi possível aplicar as correções. Este arquivo preserva o conteúdo
+  original.". Mudanças inválidas (sem âncora ou que duplicariam texto) são
+  descartadas — nunca se aplica um patch inválido para forçar alteração, nem se
+  apresenta a cópia original como corrigida.
 
 ## Executar na CLI (opcional)
 

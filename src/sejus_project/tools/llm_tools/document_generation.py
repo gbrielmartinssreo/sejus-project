@@ -309,7 +309,7 @@ def limpar_estado():
 # Verbos fortes de correção bastam; 'ajustar' é ambíguo e exige referência ao
 # documento para não capturar um pedido de ato novo ("ajuste o fluxo...").
 _RE_CORRECAO = re.compile(
-    r"(corri[gj]|corre[çc][ãa]o|consert|arrum|refa[çz]|retific)",
+    r"(corri[gj]|corre[çc][ãõ]e?s?|consert|arrum|refa[çz]|retific)",
     re.IGNORECASE,
 )
 _RE_CORRECAO_CONTEXTO = re.compile(
@@ -336,7 +336,9 @@ def pedido_de_correcao(request: str) -> bool:
     )
 
 
-def registrar_analise(filename: str, analise_completa: str) -> dict | None:
+def registrar_analise(
+    filename: str, analise_completa: str, origem: str | None = None
+) -> dict | None:
     """Guarda a análise do documento na sessão corrente (com a versão).
 
     Vincula os apontamentos ao arquivo REALMENTE analisado e à sua versão
@@ -353,7 +355,51 @@ def registrar_analise(filename: str, analise_completa: str) -> dict | None:
         caminho.name,
         analysis_registry.hash_conteudo(texto),
         analise_completa or "",
+        origem=origem,
     )
+
+
+def documento_em_analise() -> str | None:
+    """Nome do documento cuja análise foi registrada mais recentemente.
+
+    Usado para vincular o APROFUNDAMENTO (turno sem nova leitura) ao mesmo
+    documento já analisado, mantendo os apontamentos atualizados."""
+    entrada = analysis_registry.mais_recente(analysis_registry.sessao_atual())
+    if not entrada:
+        return None
+    return entrada.get("arquivo") or None
+
+
+def documento_para_analise(
+    analise_completa: str, arquivo_lido: str | None = None
+) -> str | None:
+    """Documento ao qual o turno de análise se refere.
+
+    Prioriza o arquivo lido no turno; depois o documento já em análise. Se o
+    agente produziu apontamentos acionáveis sem (re)ler o arquivo, vincula à
+    importação mais recente — assim a análise não se perde quando o modelo
+    responde a partir do histórico."""
+    if arquivo_lido:
+        return arquivo_lido
+    em_analise = documento_em_analise()
+    if em_analise:
+        return em_analise
+    if analysis_registry.extrair_apontamentos(analise_completa or ""):
+        return _ultimo_arquivo_importado()
+    return None
+
+
+def arquivo_para_correcao_sem_analise(request: str) -> str | None:
+    """Arquivo a corrigir quando NÃO há análise registrada.
+
+    Ainda usa o motor de melhoria (não a geração de ato novo) para pedidos de
+    correção do arquivo enviado que não sejam de um ato normativo novo, como
+    "me gera o arquivo com as correções"."""
+    if not pedido_de_correcao(request):
+        return None
+    if _intencao_normativa(request):
+        return None
+    return _ultimo_arquivo_importado()
 
 
 def analise_para_correcao(filename: str | None = None) -> dict | None:
@@ -1247,15 +1293,27 @@ def _melhorar_e_relatar(
     if analise_completa:
         valores["analise_completa"] = analise_completa
     valores = valores or None
-    estrutura, alteracoes, remocoes, adicoes, lacunas = document_improvement.gerar_estrutura_melhoria(
-        conteudo,
-        tipo_ato,
-        perfil,
-        contexto,
-        valores,
-    )
-    # Cobertura dos apontamentos da análise (validada contra o patch efetivo).
-    cobertura = estrutura.pop("_cobertura_analise", None) or []
+    # Uma falha de geração/validação do patch NÃO pode barrar a entrega: cai no
+    # fallback (cópia intacta) com os apontamentos marcados como falha.
+    try:
+        estrutura, alteracoes, remocoes, adicoes, lacunas = (
+            document_improvement.gerar_estrutura_melhoria(
+                conteudo,
+                tipo_ato,
+                perfil,
+                contexto,
+                valores,
+            )
+        )
+        # Cobertura dos apontamentos da análise (validada contra o patch efetivo).
+        cobertura = estrutura.pop("_cobertura_analise", None) or []
+        descartados = estrutura.pop("_descartados", None) or []
+    except Exception:  # noqa: BLE001 - entrega a cópia intacta em vez de falhar
+        estrutura = document_improvement._estruturar_original(conteudo)
+        alteracoes, remocoes, adicoes, lacunas, descartados = [], [], [], [], []
+        cobertura = document_improvement._validar_cobertura(
+            conteudo, [], [], [], apontamentos or [], []
+        )
     # Identifica o documento especifico do RAG referenciado pelo 'lastro' de
     # cada mudanca e sinaliza divergencias no relatorio (sem bloquear); em
     # seguida, verifica a coerencia TEMATICA (item 3): lastro de outro assunto
@@ -1263,15 +1321,19 @@ def _melhorar_e_relatar(
     for grupo in (alteracoes, remocoes, adicoes):
         document_improvement._validar_lastros(grupo, contexto)
     document_improvement._checar_coerencia_lastros(alteracoes, remocoes, adicoes, contexto)
-    # Rede de seguranca do patch (bug 1b): se um paragrafo original nao afetado
-    # reaparecer entre os textos novos, o .docx final sairia duplicado. Falha
-    # com antecedencia, em vez de emitir um arquivo inconsistente.
-    duplicacoes = document_improvement._duplicacoes_do_patch(
+    # Rede de seguranca: o filtro do patch ja removeu itens que duplicariam
+    # texto; se ainda houver, NAO aplica o patch invalido (entrega a copia).
+    if document_improvement._duplicacoes_do_patch(
         conteudo, alteracoes, remocoes, adicoes
-    )
-    if duplicacoes:
-        raise document_improvement.PatchIntegrityError(
-            "; ".join(duplicacoes)
+    ):
+        descartados = list(descartados) + [
+            a.get("rotulo") or a.get("o_que") or "?"
+            for grupo in (alteracoes, remocoes, adicoes)
+            for a in grupo
+        ]
+        alteracoes, remocoes, adicoes = [], [], []
+        cobertura = document_improvement._validar_cobertura(
+            conteudo, [], [], [], apontamentos or [], []
         )
     # Persistir propostas com estado pendente
     doc_hash = _hash_documento(filename)
@@ -1297,21 +1359,42 @@ def _melhorar_e_relatar(
     # Adições estruturais viram artigos de verdade no corpo (posição correta),
     # tanto para o arquivo quanto para a prévia antes/depois.
     insercoes |= _integrar_adicoes_estruturais(estrutura, adicoes)
-    if destino.suffix.lower() == ".docx":
-        # Nova abordagem: o resultado é uma cópia do DOCX original com as
-        # mudanças (patch) marcadas (alterado/removido tachado, adicionado e
-        # novo texto em verde). Parágrafos não citados permanecem intactos.
-        output_path = docx_builder.montar_docx_revisado(
-            perfil,
-            alteracoes,
-            remocoes,
-            adicoes,
-            OUTPUTS_DIR,
-        )
+    # Entrega SEMPRE um arquivo: com correções, parcial ou a cópia intacta.
+    sem_correcao = not (alteracoes or remocoes or adicoes)
+    fallback = False
+
+    def _copia_intacta():
+        if destino.suffix.lower() == ".docx":
+            return docx_builder.copiar_docx(perfil, OUTPUTS_DIR)
+        return docx_builder.montar_docx(perfil, estrutura, OUTPUTS_DIR)
+
+    if sem_correcao:
+        output_path = _copia_intacta()
+        fallback = True
     else:
-        output_path = docx_builder.montar_docx(
-            perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
-        )
+        try:
+            if destino.suffix.lower() == ".docx":
+                # Cópia do DOCX original com as mudanças marcadas
+                # (tachado/verde). Parágrafos não citados permanecem intactos.
+                output_path = docx_builder.montar_docx_revisado(
+                    perfil, alteracoes, remocoes, adicoes, OUTPUTS_DIR
+                )
+            else:
+                output_path = docx_builder.montar_docx(
+                    perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
+                )
+        except Exception:  # noqa: BLE001 - falha de montagem não pode barrar a entrega
+            output_path = _copia_intacta()
+            fallback = True
+            descartados = list(descartados) + [
+                a.get("rotulo") or a.get("o_que") or "?"
+                for grupo in (alteracoes, remocoes, adicoes)
+                for a in grupo
+            ]
+            alteracoes, remocoes, adicoes = [], [], []
+            cobertura = document_improvement._validar_cobertura(
+                conteudo, [], [], [], apontamentos or [], []
+            )
     depois = minuta_para_texto(estrutura)
     textos = _textos_antes_depois(conteudo, depois)
     lacunas_sem = _filtrar_lacunas_sem_precedente(lacunas, precedente or {})
@@ -1332,6 +1415,8 @@ def _melhorar_e_relatar(
         "lacunas": lacunas_sem,
         "textos": textos,
         "apontamentos_analise": cobertura,
+        "fallback": fallback,
+        "descartados": descartados,
         "sha1": hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest(),
     }
     resposta = {
@@ -1345,18 +1430,37 @@ def _melhorar_e_relatar(
         "lacunas": lacunas_sem,
         "textos": textos,
         "apontamentos_analise": cobertura,
+        "fallback": fallback,
+        "descartados": descartados,
         "outros": outros or [],
         "sources": _source_summary(contexto),
     }
+    if fallback and sem_correcao:
+        resposta["mensagem"] = (
+            "Não foi possível aplicar as correções. "
+            "Este arquivo preserva o conteúdo original."
+        )
     avisos: list[str] = []
     nao_aplicados = [
-        c for c in cobertura if c.get("status") == "nao_aplicado"
+        c
+        for c in cobertura
+        if c.get("status") in ("nao_aplicado", "falhou", "pendente")
     ]
     if apontamentos and nao_aplicados:
         avisos.append(
             f"{len(nao_aplicados)} apontamento(s) da análise não foram "
-            "aplicados ao documento — confira a justificativa na cobertura "
+            "aplicados ao documento — confira o status e o motivo na cobertura "
             "dos apontamentos."
+        )
+    if descartados:
+        avisos.append(
+            "Mudanças inválidas foram descartadas para não corromper o "
+            "documento: " + ", ".join(dict.fromkeys(descartados)) + "."
+        )
+    if fallback:
+        avisos.append(
+            "Não foi possível aplicar as correções; o arquivo entregue é a "
+            "cópia do documento original."
         )
     if document_improvement._problemas_do_patch(conteudo, alteracoes, remocoes):
         avisos.append(

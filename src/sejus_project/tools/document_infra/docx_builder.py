@@ -9,6 +9,7 @@ normalizada e devolve o caminho do arquivo gerado.
 from __future__ import annotations
 
 import re
+import shutil
 import uuid
 from pathlib import Path
 
@@ -22,7 +23,9 @@ from sejus_project.tools.document_infra.docx_engine import (
     assinalar_insercao,
     build_paragraph,
     clear_body,
+    destachar,
     find_reference,
+    normalizar_medidas,
     paragraph_text,
     sombrear,
     tachar,
@@ -295,11 +298,16 @@ _RE_SUBITEM_PAR = re.compile(
 
 def _marca_inicial(texto: str) -> str | None:
     """Marca/abertura de um parágrafo-subitem (§ 2º, Parágrafo único, II -)
-    normalizada para comparação case e acento-insensível."""
+    normalizada para comparação.
+
+    Usa a MESMA normalização de ``_chave_linha`` (inclui a troca de travessões/
+    hífens por '-'), senão a marca do original ('II –') não casa com a linha do
+    novo texto ('ii - ...') e o parágrafo substituído não é reconhecido como
+    absorvido — deixando o conteúdo antigo ativo no DOCX."""
     m = _RE_SUBITEM_PAR.match(texto or "")
     if not m:
         return None
-    return _SIMPLES.sub(" ", m.group(0).strip().casefold().rstrip("."))
+    return _chave_linha(m.group(0))
 
 
 def _proximos_subitens_texto(
@@ -622,6 +630,9 @@ def montar_docx_revisado(
             return None
         ref = _referencia_para(refs, papel)
         w_p = build_paragraph(ref, rotulo, texto)
+        # O parágrafo de referência pode já ter sido tachado neste laço; o texto
+        # NOVO não pode herdar tachado/cor (senão pareceria conteúdo removido).
+        destachar(w_p)
         verde(w_p)
         return w_p
 
@@ -715,6 +726,21 @@ def montar_docx_revisado(
     return output_path
 
 
+def copiar_docx(perfil: PerfilModelo, output_dir: Path) -> Path:
+    """Entrega uma cópia INTACTA do documento original.
+
+    Usado como fallback quando nenhuma correção pôde ser aplicada: o arquivo
+    preserva o conteúdo original (sem marcas nem página de resumo) para o
+    usuário não ficar sem download."""
+    origem = Path(perfil.file)
+    if not origem.is_file():
+        raise FileNotFoundError(f"Documento original nao encontrado: {origem}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{perfil.name}_{uuid.uuid4().hex[:8]}.docx"
+    shutil.copyfile(origem, output_path)
+    return output_path
+
+
 def _abrir_ou_criar(path: str):
     """Abre o DOCX do modelo.
 
@@ -726,4 +752,8 @@ def _abrir_ou_criar(path: str):
         raise FileNotFoundError(f"Modelo de documento nao encontrado: {caminho}")
     from docx import Document
 
-    return Document(str(caminho))
+    doc = Document(str(caminho))
+    # Corrige medidas gravadas como float (ex.: margens 1285.866...) que
+    # fazem o python-docx falhar em int() ao ler secao/recuos.
+    normalizar_medidas(doc)
+    return doc

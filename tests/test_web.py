@@ -687,3 +687,66 @@ def test_analisar_arquivo_usuario_pequeno_tem_uma_janela(monkeypatch, tmp_path):
     assert resultado["text"] == "conteudo curto"
     assert resultado["has_more"] is False
     assert resultado["next_offset"] is None
+
+
+def test_chat_exibe_anexo_quando_melhoria_falha(monkeypatch, tmp_path):
+    """Fallback: mesmo sem correção aplicada, o DOCX (cópia intacta) sai no
+    cartão e o download funciona."""
+    from docx import Document
+
+    output = tmp_path / "copia_intacta.docx"
+    documento = Document()
+    documento.add_paragraph("conteudo original preservado")
+    documento.save(str(output))
+
+    monkeypatch.setattr(
+        agent,
+        "executar",
+        lambda msg: (
+            "Nao foi possivel aplicar as correcoes. "
+            "Este arquivo preserva o conteudo original."
+        ),
+    )
+    monkeypatch.setattr(generation, "consumir_geracao_do_turno", lambda: True)
+    monkeypatch.setattr(generation, "consumir_melhoria_do_turno", lambda: True)
+    monkeypatch.setattr(
+        generation,
+        "ultima_minuta",
+        lambda: {
+            "estructura": ESTRUTURA,
+            "modelo": "PORTARIA",
+            "output_path": str(output),
+        },
+    )
+    monkeypatch.setattr(
+        generation,
+        "ultima_comparacao",
+        lambda: {
+            "arquivo_original": "USUARIO.docx",
+            "alteracoes": [],
+            "adicoes_estruturais": [],
+            "lacunas": [],
+            "fallback": True,
+            "apontamentos_analise": [
+                {
+                    "apontamento_id": "ap-1",
+                    "apontamento": "Renumerar capitulos",
+                    "status": "falhou",
+                    "referencia": "",
+                    "motivo": "trecho nao localizado",
+                }
+            ],
+        },
+    )
+
+    client = TestClient(app)
+    dados = client.post("/api/chat", json={"message": "corrija"}).json()
+
+    assert dados["minuta_docx"] == "/api/minuta/docx"
+    assert dados["minuta_nome"] == "copia_intacta.docx"
+    assert dados["comparacao"]["fallback"] is True
+    assert dados["comparacao"]["apontamentos_analise"][0]["status"] == "falhou"
+
+    download = client.get("/api/minuta/docx")
+    assert download.status_code == 200
+    assert download.content[:2] == b"PK"  # DOCX e um arquivo ZIP
