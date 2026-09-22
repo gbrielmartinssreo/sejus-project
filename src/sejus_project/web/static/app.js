@@ -353,6 +353,18 @@ function _liAdicao(adicao) {
     lst.textContent = "Lastro: " + adicao.lastro;
     corpo.appendChild(lst);
   }
+  if (adicao.lastro_fonte) {
+    var fte = document.createElement("p");
+    fte.className = "alteracao-detalhe lastro-fonte";
+    fte.textContent = "Documento identificado: " + adicao.lastro_fonte;
+    corpo.appendChild(fte);
+  }
+  if (adicao.lastro_aviso) {
+    var av = document.createElement("p");
+    av.className = "alteracao-detalhe lastro-aviso";
+    av.textContent = "Atenção: " + adicao.lastro_aviso;
+    corpo.appendChild(av);
+  }
   li.appendChild(corpo);
   return li;
 }

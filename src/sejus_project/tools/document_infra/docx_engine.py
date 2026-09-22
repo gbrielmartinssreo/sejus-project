@@ -158,3 +158,17 @@ def tachar(w_p) -> None:
     for run in w_p.findall(qn("w:r")):
         rPr = run.get_or_add_rPr()
         rPr.get_or_add_strike().val = True
+
+
+def sombrear(w_p, fill: str = "FFF3B0") -> None:
+    """Aplica sombreamento de parágrafo (``w:pPr/w:shd``, fill em hex).
+
+    Usado para destacar trechos pendentes de decisão jurídica — além da cor de
+    fonte verde, o parágrafo inteiro ganha fundo amarelo (4.2)."""
+    pPr = w_p.get_or_add_pPr()
+    shd = pPr.find(qn("w:shd"))
+    if shd is None:
+        shd = pPr.makeelement(qn("w:shd"), {})
+        pPr.append(shd)
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:fill"), fill)

@@ -269,6 +269,74 @@ def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_me
     assert capturado["tipo"] in ("portaria", "instrução normativa", "decreto", "retificação")
 
 
+def test_melhoria_identifica_documento_do_lastro(fake_melhoria, monkeypatch, tmp_path):
+    """Quando o lastro de uma adição casa com um ato recuperado do RAG, a
+    melhoria identifica o documento específico (lastro_fonte/source_file). O
+    documento é identificado, porém sem sobreposição temática com o artigo novo
+    (item 3): a adição fica marcada para decisão jurídica sem bloquear."""
+    from sejus_project.tools.llm_tools import user_files
+
+    generation._ultima_minuta = None
+    generation._ultima_comparacao = None
+    generation._melhoria_no_turno = False
+
+    def retrieve(query, limit=5, collection_name="sejus_atos", act_type=None, source_file=None):
+        return [
+            _chunk(
+                0.91,
+                "Art. 13 O registro terá validade de 02 (dois) anos.",
+                fonte="IN_07-2026.docx",
+                numero="07/2026",
+                tipo="IN",
+            )
+        ]
+
+    monkeypatch.setattr(generation, "retrieve", retrieve)
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato_limpeza.txt").write_text(
+        "INSTRUÇÃO NORMATIVA Nº 2/2026/GAB-SEJUS/MT\n"
+        "O Secretário de Estado de Justiça, no uso de suas atribuições, resolve:\n"
+        "Dispõe sobre limpeza das unidades.\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(generation.melhorar_documento_usuario("ato_limpeza.txt"))
+
+    assert result["status"] == "improved"
+    adicao = result["adicoes_estruturais"][0]
+    assert adicao["lastro"] == "IN 07/2026, art. 13."
+    assert adicao["lastro_validado"] is True
+    assert adicao["lastro_fonte"] == "IN_07-2026.docx"
+    assert adicao["requer_decisao_juridica"] is True
+    assert "coerencia_aviso" in adicao
+    assert "tema diferente" in result["aviso"]
+
+
+def test_melhoria_lastro_fantasma_sinaliza_aviso_sem_bloquear(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
+    """Lastro que não casa com nenhum ato do RAG é sinalizado no relatório
+    (aviso) sem bloquear a geração do arquivo."""
+    from sejus_project.tools.llm_tools import user_files
+
+    generation._ultima_comparacao = None
+    generation._melhoria_no_turno = False
+    monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)
+    (tmp_path / "ato_limpeza.txt").write_text(
+        "PORTARIA Nº 45/2026/GAB-SEJUS/MT\nDispõe sobre limpeza das unidades.\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(generation.melhorar_documento_usuario("ato_limpeza.txt"))
+
+    assert result["status"] == "improved"
+    assert Path(result["output_path"]).is_file()
+    assert result["adicoes_estruturais"][0]["lastro_validado"] is False
+    assert result["aviso"]
+    assert "lastro" in result["aviso"].casefold()
+
+    comparacao = generation.ultima_comparacao()
+    assert comparacao["adicoes_estruturais"][0]["lastro_validado"] is False
+
+
 def test_melhoria_txt_usa_template_padrao(fake_retrieval, fake_melhoria, monkeypatch, tmp_path):
     """Arquivos sem formatação (txt/pdf/md) caem no template oficial do tipo."""
     from sejus_project.tools.llm_tools import user_files

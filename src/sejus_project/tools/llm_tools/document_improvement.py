@@ -18,6 +18,10 @@ import re
 from sejus_project.tools.document_infra.docx_builder import (
     _chave_linha as _chave_texto,
 )
+from sejus_project.tools.document_infra.docx_builder import (
+    _paragrafos_absorvidos,
+    _proximos_subitens_texto,
+)
 from sejus_project.tools.document_infra.modelos import PerfilModelo
 from sejus_project.tools.llm_tools.minuta_generation import (
     _TETO_TOKENS_MODELO,
@@ -101,8 +105,28 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                 "type": "string",
                 "description": "Explicacao curta da mudanca e do motivo.",
             },
+            "lastro": {
+                "type": "string",
+                "description": (
+                    "Opcional. Ato recuperado no RAG que embasa a mudanca, ex.: "
+                    "'IN 07/2026, art. 13'. Obrigatorio quando a alteracao "
+                    "alinha o texto a uma norma do acervo ou corrige "
+                    "prazo/percentual; obrigatorio em toda alteracao que "
+                    "introduzir exigencia nova. Ausente em correcoes puramente "
+                    "redacionais. Nao e citacao no corpo do dispositivo."
+                ),
+            },
+            "requer_decisao_juridica": {
+                "type": "boolean",
+                "description": (
+                    "Obrigatorio. True quando a mudanca altera exigencia, "
+                    "prazo, percentual ou alcance inovando em relacao ao "
+                    "original e o lastro nao esta garantido pelo sistema -- "
+                    "sinaliza revisao da equipe juridica antes da publicacao."
+                ),
+            },
         },
-        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe"],
+        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe", "requer_decisao_juridica"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
@@ -127,6 +151,14 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
             "detalhe": {
                 "type": "string",
                 "description": "Motivo da remocao.",
+            },
+            "lastro": {
+                "type": "string",
+                "description": (
+                    "Opcional. Ato recuperado no RAG que sustenta a exclusao, "
+                    "ex.: 'Decreto 2.541/2008, art. 16' (norma posterior que "
+                    "revogou o dispositivo)."
+                ),
             },
         },
         "required": ["rotulo", "trecho_original", "detalhe"],
@@ -180,6 +212,15 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
                     "'IN 07/2026, art. 13 (validade de 02 anos)'. Transparencia "
                     "de processo para o relatorio -- nao e citacao normativa no "
                     "texto do artigo."
+                ),
+            },
+            "requer_decisao_juridica": {
+                "type": "boolean",
+                "description": (
+                    "Obrigatorio. True quando a adicao amplia exigencia, prazo, "
+                    "percentual ou alcance alem do que o lastro garante "
+                    "textualmente -- sinaliza revisao da equipe juridica antes "
+                    "da publicacao."
                 ),
             },
         },
@@ -287,6 +328,31 @@ def _sistema_melhoria():
         "apenas tipografia (travessao por hifen, aspas, espacos). 'trecho_original' "
         "DEVE casar com o texto do documento recebido -- copie fielmente, sem "
         "reescrever, sem encurtar alem do paragrafo exato.\n"
+        "10. SEM SUGESTOES VAGAS OU COSMETICAS: nao proponha mudancas por "
+        "estilo, sinonimo ou preferencia pessoal; nao troque acentuacao, "
+        "pontuacao ou termo equivalente quando o sentido nao muda. Se a "
+        "'detalhe' nao aponta beneficio normativo concreto (clareza de "
+        "exigencia, prazo, competencia, alcance), DESCARTE a sugestao.\n"
+        "11. LASTRO EM TODA MUDANCA QUE INOVE: toda alteracao, remocao ou "
+        "adiccao que introduz prazo, percentual, exigencia ou penalidade nova "
+        "deve informar em 'lastro' o ato do RAG que embasa (ex.: 'IN 07/2026, "
+        "art. 13'). Quando o acervo nao sustentar um numero concreto, use o "
+        "marcador literal [PRAZO A DEFINIR PELA SECRETARIA] no lugar do valor "
+        "no 'novo_texto'/'texto' e NUNCA invente o numero. Correcoes puramente "
+        "redacionais nao precisam de lastro.\n"
+        "12. REVOGACAO SO COM NORMA ESPECIFICA: proponha revogacao (em "
+        "'remocoes' ou 'alteracoes') apenas quando indicar a norma concreta a "
+        "ser revogada, citando nome, tipo, numero e ano (ex.: 'Decreto "
+        "2.541/2008'). NUNCA proponha clausula generica do tipo 'ficam "
+        "revogadas as disposicoes em contrario' ou revogacao implicita sem essa "
+        "citacao.\n"
+        "13. REQUER_DECISAO_JURIDICA: marque 'requer_decisao_juridica' = true "
+        "em qualquer alteracao ou adicao que INOVE em relacao ao original (novo "
+        "prazo, nova exigencia, novo percentual, ampliacao de alcance) ou "
+        "quando o lastro nao estiver explicito no acervo; nesses casos o "
+        "sistema destaca o paragrafo em amarelo e o sinaliza para validacao da "
+        "equipe juridica antes da publicacao. Se o lastro cobrir integralmente "
+        "o conteudo, marque false.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -383,7 +449,8 @@ def _aplicar_patch_no_texto(
 
     Cada mudança é ancorada ao primeiro parágrafo do original cuja chave casing
     com 'trecho_original' ou 'rotulo'. Alterações substituem o parágrafo por
-    'novo_texto'; remoções apagam o parágrafo. Tudo o que não foi citado
+    'novo_texto' (e "engolem" os parágrafos-subitem absorvidos, marcando-os
+    como removidos); remoções apagam o parágrafo. Tudo o que não foi citado
     permanece intacto — o original nunca é encolhido por omissão do modelo.
     """
     linhas: list[str | None] = list((conteudo or "").splitlines())
@@ -407,7 +474,14 @@ def _aplicar_patch_no_texto(
             continue
         i = _encontrar(a)
         if i is not None:
-            linhas[i] = (a.get("novo_texto") or "").strip()
+            novo_texto = (a.get("novo_texto") or "").strip()
+            linhas[i] = novo_texto
+            # Alterações que fundem caput + parágrafo/inciso num único bloco
+            # também "engolir" os parágrafos originais cobertos: eles precisam
+            # sair do 'depois', senão o conteúdo fica duplicado no resultado.
+            itens = _proximos_subitens_texto(linhas, i, limite=8)
+            for j in _paragrafos_absorvidos(novo_texto, itens):
+                linhas[j] = None
     for r in remocoes:
         if not isinstance(r, dict):
             continue
@@ -415,6 +489,96 @@ def _aplicar_patch_no_texto(
         if i is not None:
             linhas[i] = None
     return "\n".join(linha for linha in linhas if linha is not None)
+
+
+class PatchIntegrityError(Exception):
+    """Erro de integridade do patch: aplicar as mudanças devolveria um texto
+    com parágrafos duplicados (conteúdo novo repetindo trecho que continua no
+    original). Em vez de emitir um .docx inconsistente, o fluxo falha com
+    antecedência para o usuário corrigir a sugestão."""
+
+
+def _linhas_novas_de(item: dict) -> list[str]:
+    textos: list[str] = []
+    for campo in ("novo_texto", "texto"):
+        valor = (item.get(campo) or "").strip()
+        if valor:
+            textos.extend(l for l in valor.splitlines() if l.strip())
+    return textos
+
+
+def _duplicacoes_do_patch(
+    conteudo: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> list[str]:
+    """Detecta parágrafos que ficariam DUPLICADOS no texto final.
+
+    Rede de segurança além da marcação de parágrafos absorvidos: simula o patch
+    ("depois" com aceitação vs. rejeição) e compara. Se um parágrafo original
+    não afetado pelas mudanças reaparecer (chave normalizada) entre os textos
+    novos — do novo_texto de uma alteração ou do texto de uma adição — o patch
+    está inconsistente. Devolve mensagens legíveis (integra a ``PatchIntegrityError``)."""
+    linhas: list[str | None] = list((conteudo or "").splitlines())
+
+    def _encontrar(item: dict, usados: set[int]) -> int | None:
+        alvos = [
+            _chave_linha(item.get(nome) or "")
+            for nome in ("trecho_original", "rotulo")
+        ]
+        alvos = [a for a in alvos if a]
+        for i, linha in enumerate(linhas):
+            if i in usados or not linha:
+                continue
+            chave = _chave_linha(linha)
+            if any(chave == a or chave.startswith(a) for a in alvos):
+                return i
+        return None
+
+    afetados: set[int] = set()
+    for a in alteracoes:
+        if not isinstance(a, dict):
+            continue
+        i = _encontrar(a, afetados)
+        if i is None:
+            continue
+        novo_texto = (a.get("novo_texto") or "").strip()
+        linhas[i] = novo_texto
+        afetados.add(i)
+        for j in _paragrafos_absorvidos(
+            novo_texto, _proximos_subitens_texto(linhas, i, limite=8)
+        ):
+            linhas[j] = None
+            afetados.add(j)
+    for r in remocoes:
+        if not isinstance(r, dict):
+            continue
+        i = _encontrar(r, afetados)
+        if i is None:
+            continue
+        linhas[i] = None
+        afetados.add(i)
+
+    novos: set[str] = set()
+    for grupo in (alteracoes, adicoes):
+        for item in grupo:
+            if not isinstance(item, dict):
+                continue
+            for linha in _linhas_novas_de(item):
+                chave = _chave_linha(linha)
+                if chave:
+                    novos.add(chave)
+
+    duplicados: list[str] = []
+    for i, linha in enumerate(linhas):
+        if i in afetados or not linha:
+            continue
+        chave = _chave_linha(linha)
+        if chave and chave in novos:
+            trecho = next((l.strip() for l in linha.splitlines() if l.strip()), "")
+            duplicados.append(f"parágrafo '{trecho[:90]}' duplicado após aplicar a alteração")
+    return duplicados
 
 
 def _estruturar_original(conteudo: str) -> dict:
@@ -528,6 +692,212 @@ def _problemas_do_patch(
     return problemas
 
 
+def _normalizar_referencia(texto: str) -> str:
+    """Normaliza um identificador de ato (act_type/act_number/fonte) para a
+    comparacao de lastro case e acento-insensivel."""
+    return _remover_acentos((texto or "").strip().casefold())
+
+
+def _documentos_do_contexto(contexto: list[dict]) -> list[dict]:
+    """Reune os atos reais recuperados no RAG (item 1: extracao de metadados).
+
+    Cada item do contexto carrega ``source_file``, ``act_type`` e
+    ``act_number`` (os metadados do chunk no indice). Deduplica por fonte e
+    normaliza os identificadores para a validacao do ``lastro``."""
+    vistos: set[str] = set()
+    documentos: list[dict] = []
+    for item in contexto or []:
+        fonte = (item.get("source_file") or "").strip()
+        chave = _normalizar_referencia(fonte)
+        if not chave:
+            chave = _normalizar_referencia(
+                f"{item.get('act_type') or ''} {item.get('act_number') or ''}"
+            )
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        documentos.append(
+            {
+                "source_file": fonte,
+                "act_type": item.get("act_type") or "",
+                "act_number": item.get("act_number") or "",
+            }
+        )
+    return documentos
+
+
+def _identificar_lastro(lastro: str, documentos: list[dict]) -> dict | None:
+    """Tenta identificar o documento especifico do RAG citado no ``lastro``.
+
+    O ``lastro`` e texto livre gerado pelo modelo (ex.: 'IN 07/2026, art. 13
+    (validade de 02 anos)'). Considera casado quando o numero do ato aparece
+    no lastro E (o tipo do ato OU a fonte) tambem aparece. Se apenas o numero
+    casar, aceita somente quando for unico no contexto (evita afirmar um
+    documento errado quando ha numeros repetidos)."""
+    texto = _normalizar_referencia(lastro)
+    if not texto:
+        return None
+    candidatos = []
+    for doc in documentos:
+        numero = _normalizar_referencia(doc["act_number"])
+        if not numero or numero not in texto:
+            continue
+        tipo = _normalizar_referencia(doc["act_type"])
+        fonte = _normalizar_referencia(doc["source_file"])
+        if (tipo and tipo in texto) or (fonte and fonte in texto):
+            return doc
+        candidatos.append(doc)
+    if len(candidatos) == 1:
+        return candidatos[0]
+    return None
+
+
+def _validar_lastros(itens: list[dict], contexto: list[dict]) -> None:
+    """Valida o ``lastro`` de cada mudança contra os atos do RAG (item 2).
+
+    Nao bloqueia a melhoria: apenas anota cada item para sinalizacao no
+    relatorio quando o lastro nao identificar nenhum documento real.
+      - ``lastro_validado``: True quando casa com um ato do contexto.
+      - ``lastro_fonte``: source_file do ato identificado (vazio se nao casou).
+      - ``lastro_aviso``: mensagem legivel quando o lastro nao casa.
+    """
+    documentos = _documentos_do_contexto(contexto)
+    for item in itens:
+        if not isinstance(item, dict):
+            continue
+        lastro = (item.get("lastro") or "").strip()
+        if not lastro:
+            continue
+        ato = _identificar_lastro(lastro, documentos)
+        if ato:
+            item["lastro_validado"] = True
+            item["lastro_fonte"] = ato["source_file"]
+        else:
+            item["lastro_validado"] = False
+            item["lastro_fonte"] = ""
+            item["lastro_aviso"] = (
+                f"Lastro '{lastro}' nao identifica nenhum ato recuperado no "
+                "acervo (a referencia pode ter sido inventada)."
+            )
+
+
+_STOPWORDS_TEMA = {
+    "para",
+    "tambem",
+    "mediante",
+    "disposicoes",
+    "normativos",
+    "quando",
+    "sendo",
+    "sobre",
+    "todas",
+    "todos",
+    "toda",
+    "todo",
+    "aos",
+    "das",
+    "dos",
+    "nas",
+    "nos",
+    "pelas",
+    "pelos",
+    "qualquer",
+    "entre",
+    "apos",
+    "antes",
+    "durante",
+    "esta",
+    "este",
+    "essa",
+    "esse",
+    "pode",
+    "podem",
+    "podera",
+    "ser",
+    "sera",
+    "seja",
+    "faca",
+    "fazer",
+    "tendo",
+    "devera",
+    "deverao",
+}
+
+
+def _tema_do_texto(texto: str) -> set[str]:
+    """Conjunto de termos tematicos (nao-gramaticais) de um texto.
+
+    Alimenta a checagem de coerencia tematica: tokens de 3+ caracteres, sem
+    acento, sem palavras gramaticais/vazias. Palavras como 'prazo', 'validade',
+    'autorização', 'fiscalização' ficam e sao exatamente o que queremos
+    comparar entre o dispositivo e a fonte do lastro."""
+    palavras = re.findall(r"[a-z0-9]{3,}", _remover_acentos(texto or ""))
+    return {p for p in palavras if p not in _STOPWORDS_TEMA}
+
+
+def _textos_dos_documentos(contexto: list[dict]) -> dict[str, str]:
+    """Concatena o texto dos chunks do RAG por ``source_file``."""
+    textos: dict[str, str] = {}
+    for item in contexto or []:
+        fonte = (item.get("source_file") or "").strip()
+        if not fonte:
+            continue
+        trecho = (item.get("text") or "").strip()
+        if trecho:
+            textos[fonte] = f"{textos.get(fonte, '')}\n{trecho}".strip()
+    return textos
+
+
+def _checar_coerencia_lastros(
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+    contexto: list[dict],
+) -> None:
+    """Checagem de coerencia TEMATICA do lastro (item 3).
+
+    Alem de a referencia existir no acervo (``_validar_lastros``), o conteudo
+    do dispositivo alterado/adicionado precisa ser do mesmo assunto do ato
+    citado como lastro. Compara os termos tematicos (keywords nao-gramaticais)
+    do texto-alvo com o texto completo do ato de origem no RAG. Se nao houver
+    termo compartilhado, o lastro e tematicamente divergente:
+      - ``requer_decisao_juridica`` = True (o generative DOCX vai sombrear em
+        amarelo e nao publicar sem validacao da equipe juridica);
+      - ``coerencia_aviso`` legivel, que tambem vai no comentario/docx.
+    """
+    documentos = _documentos_do_contexto(contexto)
+    textos = _textos_dos_documentos(contexto)
+    for item in (*alteracoes, *remocoes, *adicoes):
+        if not isinstance(item, dict):
+            continue
+        lastro = (item.get("lastro") or "").strip()
+        if not lastro:
+            continue
+        ato = _identificar_lastro(lastro, documentos)
+        if not ato:
+            continue
+        texto_fonte = textos.get(ato["source_file"])
+        if not texto_fonte:
+            continue
+        alvo = (
+            item.get("novo_texto")
+            or item.get("texto")
+            or item.get("trecho_original")
+            or ""
+        )
+        tema_alvo = _tema_do_texto(alvo)
+        if len(tema_alvo) < 3:
+            continue
+        if tema_alvo & _tema_do_texto(texto_fonte):
+            continue
+        item["requer_decisao_juridica"] = True
+        item["coerencia_aviso"] = (
+            f"Coerência temática fraca: o lastro '{lastro}' não compartilha "
+            "termos temáticos com o dispositivo tocado pela mudança — requer "
+            "confirmação jurídica da equipe antes da publicação."
+        )
+
+
 def _mensagem_retry_especifica(problemas: list[str]) -> str:
     """Mensagem de retry apontando exatamente os problemas de sanidade do patch."""
     detalhes = "; ".join(problemas)
@@ -591,12 +961,21 @@ def gerar_estrutura_melhoria(
         alteracoes = [a for a in (dados.get("alteracoes") or []) if isinstance(a, dict)]
         for a in alteracoes:
             a.setdefault("estado", ESTADO_PENDENTE)
+            a.setdefault("requer_decisao_juridica", False)
         remocoes = [r for r in (dados.get("remocoes") or []) if isinstance(r, dict)]
         for r in remocoes:
             r.setdefault("estado", ESTADO_PENDENTE)
         adicoes = [a for a in (dados.get("adicoes_estruturais") or []) if isinstance(a, dict)]
         for a in adicoes:
             a.setdefault("estado", ESTADO_PENDENTE)
+            a.setdefault("requer_decisao_juridica", False)
+        # Identifica o documento especifico do RAG referenciado pelo 'lastro'
+        # de cada mudanca (sinaliza divergencias sem bloquear a melhoria) e
+        # verifica a coerencia TEMATICA entre o dispositivo e a fonte citada
+        # (lastro de outro assunto -> requer_decisao_juridica).
+        for grupo in (alteracoes, remocoes, adicoes):
+            _validar_lastros(grupo, contexto)
+        _checar_coerencia_lastros(alteracoes, remocoes, adicoes, contexto)
         lacunas = [
             l for l in (dados.get("lacunas_identificadas") or []) if isinstance(l, dict)
         ]

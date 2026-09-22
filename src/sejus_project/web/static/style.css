@@ -468,6 +468,19 @@ body {
   font-size: 12px;
   color: var(--text-low);
 }
+.lastro-fonte {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ok);
+}
+.lastro-aviso {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--warn);
+  background: var(--warn-bg);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+}
 .alteracao-tipo.sem-precedente {
   background: rgba(180, 160, 255, 0.12);
   color: #b39bff;

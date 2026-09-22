@@ -367,3 +367,326 @@ def test_arquivo_real_aceita_patch_de_texto_do_proprio_arquivo():
 
     conteudo = extract_file_text(_ENTRADA_REAL)
     assert minuta._problemas_do_patch(conteudo, [], []) == []
+
+
+# ---------------------------------------------------------------------------
+# Regressão: fusão de caput + parágrafo/inciso não duplica o texto
+# ---------------------------------------------------------------------------
+
+_CONTEUDO_FUSAO = (
+    "INSTRUÇÃO NORMATIVA Nº XX/XX/2026\n"
+    "Dispõe sobre a atividade artesanal.\n"
+    "CAPÍTULO I\n"
+    "DAS DISPOSIÇÕES INICIAIS\n"
+    "Art. 3º O artesão deverá manter registro de suas atividades.\n"
+    "Parágrafo único. O registro conterá a descrição do produto e do valor.\n"
+    "Art. 4º As unidades penais fornecerão materiais.\n"
+    "Art. 33 Esta Instrução Normativa entra em vigor na data de sua publicação."
+)
+
+_ALTERACAO_FUSAO = [
+    {
+        "tipo": "alterado",
+        "rotulo": "Art. 3º",
+        "trecho_original": (
+            "Art. 3º O artesão deverá manter registro de suas atividades."
+        ),
+        "novo_texto": (
+            "Art. 3º O artesão deverá manter registro de suas atividades e do "
+            "produto, incluindo a descrição e o valor, sob responsabilidade da "
+            "unidade penal.\n"
+            "Parágrafo único. O registro conterá a descrição do produto e do valor."
+        ),
+        "detalhe": "Fusão de caput e parágrafo único em um único bloco.",
+    }
+]
+
+_TEXTO_PARAGRAFO_UNICO = (
+    "Parágrafo único. O registro conterá a descrição do produto e do valor."
+)
+
+
+def test_aplicar_patch_no_texto_remove_paragrafo_absorvido_na_fusao():
+    """Alteração que funde caput + parágrafo único num único bloco deve
+    remover o parágrafo original coberto — senão o texto fica duplicado."""
+    depois = minuta._aplicar_patch_no_texto(
+        _CONTEUDO_FUSAO, _ALTERACAO_FUSAO, []
+    )
+    assert depois.count(_TEXTO_PARAGRAFO_UNICO) == 1
+    assert depois.count("Parágrafo único.") == 1
+
+
+def test_duplicacoes_do_patch_aceita_fusao_caput_paragrafo():
+    """A fusão correta (parágrafo absorvido sai do original) não dispara a
+    rede de segurança de duplicação."""
+    duplicados = minuta._duplicacoes_do_patch(
+        _CONTEUDO_FUSAO, _ALTERACAO_FUSAO, [], []
+    )
+    assert duplicados == []
+
+
+def test_duplicacoes_do_patch_detecta_repeticao_de_paragrafo_intacto():
+    """Rede de segurança: novo_texto que repete VERBATIM um parágrafo que
+    continua no original é detectado como duplicação antecipada."""
+    alteracoes = [
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 3º",
+            "trecho_original": (
+                "Art. 3º O artesão deverá manter registro de suas atividades."
+            ),
+            "novo_texto": (
+                "Art. 3º O artesão deverá manter registro de suas atividades e "
+                "do produto.\n"
+                "Art. 4º As unidades penais fornecerão materiais."
+            ),
+            "detalhe": "Repetição intencional de outro artigo (cenário de erro).",
+        }
+    ]
+    duplicados = minuta._duplicacoes_do_patch(_CONTEUDO_FUSAO, alteracoes, [], [])
+    assert any("Art. 4º As unidades penais fornecerão materiais" in d for d in duplicados)
+
+
+def _modelo_fusao(tmp_path):
+    from docx import Document
+
+    from sejus_project.tools.document_infra.modelos import PORTARIA, PerfilModelo
+
+    model_path = str(tmp_path / "Modelo.docx")
+    doc = Document()
+    doc.add_paragraph("CAPÍTULO I")
+    doc.add_paragraph(
+        "Art. 3º O artesão deverá manter registro de suas atividades."
+    )
+    doc.add_paragraph(_TEXTO_PARAGRAFO_UNICO)
+    doc.add_paragraph("Art. 4º As unidades penais fornecerão materiais.")
+    doc.add_paragraph(
+        "Art. 33 Esta Instrução Normativa entra em vigor na data de sua publicação."
+    )
+    doc.save(model_path)
+    return PerfilModelo(
+        name="IN_FUSAO",
+        file=model_path,
+        act_types=PORTARIA.act_types,
+        patterns=PORTARIA.patterns,
+        preservar_moldura=True,
+    )
+
+
+def test_montar_docx_revisado_nao_duplica_paragrafo_fundido(tmp_path):
+    """REGRESSÃO (bug 1): ao fundir caput + parágrafo único num único novo
+    bloco, TODOS os parágrafos originais cobertos precisam sair tachados —
+    antes, só o caput era marcado e o parágrafo coberto virava duplicação
+    visual no .docx."""
+    from docx import Document
+
+    from sejus_project.tools.document_infra.docx_builder import montar_docx_revisado
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    output_path = montar_docx_revisado(
+        _modelo_fusao(tmp_path), _ALTERACAO_FUSAO, [], [], tmp_path
+    )
+
+    doc = Document(str(output_path))
+    textos = [paragraph_text(p) for p in doc.element.body.iter(ns + "p")]
+
+    # O texto absorvido aparece uma única vez (uma vez que os parágrafos
+    # originais cobertos foram tachados e o novo bloco em verde o reemite).
+    assert textos.count(_TEXTO_PARAGRAFO_UNICO) == 1
+
+    for p in doc.element.body.iter(ns + "p"):
+        if paragraph_text(p).strip() == _TEXTO_PARAGRAFO_UNICO and p.find(
+            ns + "r/" + ns + "rPr/" + ns + "strike"
+        ) is not None:
+            break
+    else:
+        raise AssertionError("parágrafo fundido deveria ter sido tachado (absorvido)")
+
+
+def _modelo_simples(tmp_path):
+    from docx import Document
+
+    from sejus_project.tools.document_infra.modelos import PORTARIA, PerfilModelo
+
+    model_path = str(tmp_path / "Modelo.docx")
+    doc = Document()
+    doc.add_paragraph("Art. 3º O artesão deverá manter registro.")
+    doc.add_paragraph("Art. 4º As unidades penais fornecerão materiais.")
+    doc.save(model_path)
+    return PerfilModelo(
+        name="IN_DOCX",
+        file=model_path,
+        act_types=PORTARIA.act_types,
+        patterns=PORTARIA.patterns,
+        preservar_moldura=True,
+    )
+
+
+def test_montar_docx_revisado_insere_resumo_no_inicio_em_ordem(tmp_path):
+    """(4.1/4.5) A página de resumo entra ANTES de tudo (primeiro parágrafo do
+    corpo), com título, legenda e quebra de página — inserido antes de body[0]
+    na ordem de exibição, sem inverter a sequência."""
+    from docx import Document
+
+    from sejus_project.tools.document_infra.docx_builder import (
+        montar_docx_revisado,
+    )
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+    alteracoes = [
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º O artesão deverá manter registro.",
+            "novo_texto": "Art. 3º O artesão deverá manter registro atualizado.",
+            "detalhe": "Ajuste.",
+        }
+    ]
+    output_path = montar_docx_revisado(
+        _modelo_simples(tmp_path), alteracoes, [], [], tmp_path
+    )
+    doc = Document(str(output_path))
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    textos = [paragraph_text(p) for p in doc.element.body.iter(ns + "p")]
+
+    assert textos[0] == "RESUMO DAS ALTERAÇÕES PROPOSTAS"
+    # A legenda e os demais parágrafos do resumo vêm antes do primeiro artigo.
+    idx_resumo = textos.index("RESUMO DAS ALTERAÇÕES PROPOSTAS")
+    idx_artigo = next(
+        i for i, t in enumerate(textos) if t.startswith("Art. 3º O artesão")
+    )
+    assert idx_artigo > idx_resumo
+    assert any("Legenda" in t for t in textos[idx_resumo:idx_artigo])
+    # Quebra de página depois do resumo: um w:br type="page" está presente.
+    tem_quebra = any(
+        br.get(ns + "type") == "page"
+        for br in doc.element.body.iter(ns + "br")
+    )
+    assert tem_quebra
+
+
+def test_montar_docx_revisado_sombreia_e_marca_pendencia_juridica(tmp_path):
+    """(4.2/4.3) Adição com requer_decisao_juridica ganha fundo amarelo
+    (FFF3B0) e o aviso em itálico 'Pendente de validação...' logo abaixo."""
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    from sejus_project.tools.document_infra.docx_builder import (
+        _TEXTO_PENDENCIA,
+        montar_docx_revisado,
+    )
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+    adicoes = [
+        {
+            "tipo": "adicionado",
+            "o_que": "Art. 4º-A",
+            "texto": "Art. 4º-A As unidades penais manterão as informações atualizadas.",
+            "posicao": "após o art. 4º",
+            "detalhe": "Prestação de contas.",
+            "requer_decisao_juridica": True,
+        }
+    ]
+    output_path = montar_docx_revisado(
+        _modelo_simples(tmp_path), [], [], adicoes, tmp_path
+    )
+    doc = Document(str(output_path))
+    textos = [paragraph_text(p) for p in doc.element.body.iter(qn("w:p"))]
+    assert _TEXTO_PENDENCIA in textos
+
+    sombreado = False
+    for p in doc.element.body.iter(qn("w:p")):
+        if paragraph_text(p).startswith("Art. 4º-A As unidades"):
+            shd = p.find(qn("w:pPr") + "/" + qn("w:shd"))
+            if shd is not None and shd.get(qn("w:fill")) == "FFF3B0":
+                sombreado = True
+    assert sombreado
+
+
+def test_montar_docx_revisado_gera_comentarios_nativos_com_lastro(tmp_path):
+    """(4.4) Mudanças com lastro viram comentários nativos do Word: partes
+    comments.xml + auxiliares criadas, conteúdo registrado em
+    [Content_Types].xml, e o documento ancora commentRangeStart/End/Reference."""
+    import zipfile
+
+    from docx.oxml.ns import qn
+
+    from sejus_project.tools.document_infra.docx_builder import montar_docx_revisado
+
+    adicoes = [
+        {
+            "tipo": "adicionado",
+            "o_que": "Art. 4º-A",
+            "texto": "Art. 4º-A Independentemente de consulta, recurso tempestivo.",
+            "posicao": "após o art. 4º",
+            "detalhe": "Recurso.",
+            "lastro": "IN 07/2026, art. 13",
+            "requer_decisao_juridica": False,
+        },
+        {
+            "tipo": "adicionado",
+            "o_que": "Art. 4º-B",
+            "texto": "Art. 4º-B A autorização terá validade de 02 anos.",
+            "posicao": "após o art. 4º",
+            "detalhe": "Validade.",
+            "lastro": "IN 07/2026, art. 15",
+            "requer_decisao_juridica": False,
+        },
+    ]
+    output_path = montar_docx_revisado(
+        _modelo_simples(tmp_path), [], [], adicoes, tmp_path
+    )
+
+    with zipfile.ZipFile(str(output_path)) as arquivo:
+        for part in (
+            "word/comments.xml",
+            "word/commentsExtended.xml",
+            "word/commentsIds.xml",
+            "word/commentsExtensible.xml",
+        ):
+            assert part in arquivo.namelist()
+        content_types = arquivo.read("[Content_Types].xml").decode()
+        assert "comments" in content_types
+        doc_xml = arquivo.read("word/document.xml")
+
+    ns = qn("w:commentRangeStart").split("}")[0] + "}"
+    from lxml import etree
+
+    tree = etree.fromstring(doc_xml)
+    ids = [c.get(ns + "id") for c in tree.iter(qn("w:commentRangeStart"))]
+    refs = [c.get(ns + "id") for c in tree.iter(qn("w:commentReference"))]
+    assert ids
+    assert ids == refs
+
+
+def test_validacao_de_lastro_cobre_adicao_estrutural_no_comentario():
+    """(2) Adição estrutural com lastro fantasma (só rótulo, sem número de ato)
+    também é sinalizada: _validar_lastros anota lastro_aviso e o comentário do
+    .docx o reproduz — mesmo comportamento das alterações/remoções."""
+    contexto = [
+        {
+            "source_file": "IN_07-2026.docx",
+            "act_type": "IN",
+            "act_number": "07/2026",
+            "text": "O registro terá validade de 02 anos, renovável por igual período.",
+        }
+    ]
+    adicoes = [
+        {
+            "o_que": "Art. 4º-A",
+            "texto": "Art. 4º-A Independentemente de consulta, recurso tempestivo.",
+            "lastro": "EDITAL DEFERIMENTO [tema: recurso_administrativo]",
+        }
+    ]
+
+    minuta._validar_lastros(adicoes, contexto)
+    assert adicoes[0]["lastro_validado"] is False
+    assert "nao identifica nenhum ato" in adicoes[0]["lastro_aviso"]
+
+    comentarios = docx_builder._comentarios_das_mudancas([], [], adicoes)
+    assert len(comentarios) == 1
+    ancora, texto = comentarios[0]
+    assert ancora.startswith("Art. 4º-A")
+    assert "EDITAL DEFERIMENTO" in texto
+    assert "nao identifica nenhum ato" in texto

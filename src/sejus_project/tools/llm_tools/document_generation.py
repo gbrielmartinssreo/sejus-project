@@ -1124,6 +1124,23 @@ def _melhorar_e_relatar(
         contexto,
         valores,
     )
+    # Identifica o documento especifico do RAG referenciado pelo 'lastro' de
+    # cada mudanca e sinaliza divergencias no relatorio (sem bloquear); em
+    # seguida, verifica a coerencia TEMATICA (item 3): lastro de outro assunto
+    # marca 'requer_decisao_juridica' nas alteracoes/adicoes.
+    for grupo in (alteracoes, remocoes, adicoes):
+        document_improvement._validar_lastros(grupo, contexto)
+    document_improvement._checar_coerencia_lastros(alteracoes, remocoes, adicoes, contexto)
+    # Rede de seguranca do patch (bug 1b): se um paragrafo original nao afetado
+    # reaparecer entre os textos novos, o .docx final sairia duplicado. Falha
+    # com antecedencia, em vez de emitir um arquivo inconsistente.
+    duplicacoes = document_improvement._duplicacoes_do_patch(
+        conteudo, alteracoes, remocoes, adicoes
+    )
+    if duplicacoes:
+        raise document_improvement.PatchIntegrityError(
+            "; ".join(duplicacoes)
+        )
     # Persistir propostas com estado pendente
     doc_hash = _hash_documento(filename)
     for a in alteracoes:
@@ -1197,12 +1214,45 @@ def _melhorar_e_relatar(
         "outros": outros or [],
         "sources": _source_summary(contexto),
     }
+    avisos: list[str] = []
     if document_improvement._problemas_do_patch(conteudo, alteracoes, remocoes):
-        resposta["aviso"] = (
+        avisos.append(
             "O arquivo foi gerado e entregue, mas o patch de melhoria ficou com "
             "itens sem âncora no documento original (alguns trechos podem não "
             "ter sido alterados como pedido). Revise o arquivo gerado."
         )
+    lastros_divergentes = [
+        a
+        for grupo in (alteracoes, remocoes, adicoes)
+        for a in grupo
+        if (a.get("lastro") or "").strip() and a.get("lastro_validado") is not True
+    ]
+    if lastros_divergentes:
+        labels = []
+        for a in lastros_divergentes:
+            labels.append(a.get("o_que") or a.get("rotulo") or "?")
+        avisos.append(
+            "Nenhum ato recuperado no acervo foi identificado para o 'lastro' "
+            "de " + ", ".join(labels) + " — a referência pode ter sido "
+            "inventada. Revise antes de incluir."
+        )
+    incoerentes = [
+        a
+        for grupo in (alteracoes, adicoes)
+        for a in grupo
+        if a.get("coerencia_aviso")
+    ]
+    if incoerentes:
+        labels = ", ".join(
+            a.get("o_que") or a.get("rotulo") or "?" for a in incoerentes
+        )
+        avisos.append(
+            "O 'lastro' de " + labels + " trata de tema diferente do "
+            "dispositivo tocado pela mudança — marcado como pendente de "
+            "decisão jurídica no arquivo gerado."
+        )
+    if avisos:
+        resposta["aviso"] = " ".join(avisos)
     return json.dumps(resposta, ensure_ascii=False)
 
 
@@ -1283,6 +1333,22 @@ def melhorar_documento_usuario(filename: str | None = None, diretrizes: str | No
         )
     except UserFileError as error:
         return json.dumps({"status": "error", "error": str(error)}, ensure_ascii=False)
+    except document_improvement.PatchIntegrityError as error:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": (
+                    "A sugestão de melhoria resultaria em parágrafos duplicados "
+                    "no documento"
+                ),
+                "detail": str(error),
+                "hint": (
+                    "Revise as alterações que fundem caput com parágrafo/inciso "
+                    "e que acrescentam texto novo."
+                ),
+            },
+            ensure_ascii=False,
+        )
     except (ValueError, OSError) as error:
         return json.dumps(
             {"status": "error", "error": str(error)}, ensure_ascii=False

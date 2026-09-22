@@ -12,8 +12,11 @@ import re
 import uuid
 from pathlib import Path
 
+from docx.enum.text import WD_BREAK
 from docx.oxml.ns import qn
+from docx.shared import Pt, RGBColor
 
+from sejus_project.tools.document_infra.docx_comments import adicionar_comentario
 from sejus_project.tools.document_infra.docx_engine import (
     all_paragraphs,
     assinalar_insercao,
@@ -21,6 +24,7 @@ from sejus_project.tools.document_infra.docx_engine import (
     clear_body,
     find_reference,
     paragraph_text,
+    sombrear,
     tachar,
     verde,
 )
@@ -289,6 +293,72 @@ _RE_SUBITEM_PAR = re.compile(
 )
 
 
+def _marca_inicial(texto: str) -> str | None:
+    """Marca/abertura de um parágrafo-subitem (§ 2º, Parágrafo único, II -)
+    normalizada para comparação case e acento-insensível."""
+    m = _RE_SUBITEM_PAR.match(texto or "")
+    if not m:
+        return None
+    return _SIMPLES.sub(" ", m.group(0).strip().casefold().rstrip("."))
+
+
+def _proximos_subitens_texto(
+    textos: list[str | None],
+    idx: int,
+    limite: int = 8,
+) -> list[tuple[int, str]]:
+    """(índice, texto) dos parágrafos-subitem (§/inciso) logo após ``idx``.
+
+    Pára ao cruzar um novo artigo; parágrafos anulados (None, já removidos)
+    são pulados. Devolve apenas subitens — a base para detectar parágrafos
+    absorvidos por um ``novo_texto`` que funde caput + parágrafo/inciso."""
+    itens: list[tuple[int, str]] = []
+    for j in range(idx + 1, min(len(textos), idx + 1 + limite)):
+        texto = textos[j]
+        if not texto:
+            continue
+        if not (texto or "").strip():
+            continue
+        if _RE_ARTIGO_PAR.match(texto):
+            break
+        if _RE_SUBITEM_PAR.match(texto):
+            itens.append((j, texto))
+        else:
+            break
+    return itens
+
+
+def _paragrafos_absorvidos(
+    novo_texto: str,
+    itens: list[tuple[int, str]],
+) -> list[int]:
+    """Índices absolutos (dentro de ``itens``) dos parágrafos originais que um
+    ``novo_texto`` absorve ao fundir caput + parágrafo/inciso num único bloco.
+
+    Um parágrafo seguinte é considerado absorvido quando o novo texto
+    (a) reproduz literalmente o conteúdo completo do parágrafo, ou
+    (b) com mais de uma linha, reemite a abertura (marca §/Parágrafo
+    único/inciso) do parágrafo — reformulação que guarda o dispositivo.
+    Estes parágrafos precisam ser marcados como removidos também, senão o
+    conteúdo antigo fica DUPLICADO no .docx final."""
+    linhas = [
+        _chave_linha(x)
+        for x in (novo_texto or "").splitlines()
+        if (x or "").strip()
+    ]
+    if len(linhas) < 2:
+        return []
+    absorvidos: list[int] = []
+    for j, texto in itens:
+        if _chave_linha(texto) in linhas:
+            absorvidos.append(j)
+            continue
+        marca = _marca_inicial(texto)
+        if marca and any(l.startswith(marca) for l in linhas):
+            absorvidos.append(j)
+    return absorvidos
+
+
 def _numero_artigo_de(texto: str) -> str | None:
     """Número-base de um parágrafo de artigo ('Art. 6º-A ...' -> '6')."""
     m = _RE_ARTIGO_PAR.match(texto or "")
@@ -324,6 +394,187 @@ def _indice_ancora_adicao(miolo_pars: list, rotulo: str, posicao: str) -> int | 
     return idx
 
 
+_TEXTO_PENDENCIA = "[Pendente de validação da equipe jurídica antes da publicação]"
+
+
+def _primeira_linha(texto: str) -> str:
+    for linha in (texto or "").splitlines():
+        if linha.strip():
+            return linha.strip()
+    return (texto or "").strip()
+
+
+def _marcar_absorvidos(
+    acoes: dict[int, dict],
+    i: int,
+    novo_texto: str,
+    miolo_pars: list,
+) -> None:
+    """Marca como "absorvido" os parágrafos-originals que o ``novo_texto`` de
+    uma alteração funde (caput + parágrafo/inciso num único bloco). Sem isso o
+    texto antigo dos subitens permaneceria DUPLICADO no .docx final."""
+    textos = [paragraph_text(wp) for wp in miolo_pars]
+    itens = _proximos_subitens_texto(textos, i, limite=8)
+    for j in _paragrafos_absorvidos(novo_texto, itens):
+        acoes.setdefault(j, {"tipo": "absorvido"})
+
+
+def _ancora_para_comentario(item: dict) -> str:
+    """Trecho do documento onde ancorar o comentário de uma mudança: prioriza
+    o texto novo (único), senão o trecho original citado."""
+    for campo in ("novo_texto", "texto", "trecho_original"):
+        valor = (item.get(campo) or "").strip()
+        if valor:
+            return _primeira_linha(valor)[:80]
+    return ""
+
+
+def _comentarios_das_mudancas(
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> list[tuple[str, str]]:
+    """(âncora, texto do comentário) para cada mudança com ``lastro``.
+
+    O comentário nativo do Word carrega o lastro identificado (e a ressalva,
+    quando houver), para a equipe jurídica conferir a fonte antes da publicação."""
+    comentarios: list[tuple[str, str]] = []
+    for item in (*alteracoes, *remocoes, *adicoes):
+        if not isinstance(item, dict):
+            continue
+        lastro = (item.get("lastro") or "").strip()
+        if not lastro:
+            continue
+        ancora = _ancora_para_comentario(item)
+        if not ancora:
+            continue
+        texto = f"Lastro: {lastro}."
+        ressalvas = [
+            (item.get("lastro_aviso") or "").strip(),
+            (item.get("coerencia_aviso") or "").strip(),
+        ]
+        for ressalva in ressalvas:
+            if ressalva:
+                texto += f" {ressalva}"
+        comentarios.append((ancora, texto))
+    return comentarios
+
+
+def _inserir_pendencias(doc, pendentes: list) -> None:
+    """(4.2) Sombra o parágrafo com fundo amarelo e (4.3) insere logo abaixo o
+    aviso em itálico de pendência de validação jurídica."""
+    for w_p in pendentes:
+        sombrear(w_p, "FFF3B0")
+        marca = doc.add_paragraph()
+        run = marca.add_run(_TEXTO_PENDENCIA)
+        run.italic = True
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+        w_p.addnext(marca._p)
+
+
+def _inserir_comentarios(doc, comentarios: list[tuple[str, str]]) -> None:
+    """(4.4) Comentários nativos do Word ancorados ao texto das mudanças."""
+    for ancora, texto in comentarios:
+        adicionar_comentario(doc, ancora, texto)
+
+
+def _tentar_estilo_tabela(tabela, nome: str) -> None:
+    try:
+        tabela.style = nome
+    except KeyError:
+        pass
+
+
+def _linha_do_resumo(
+    tabela,
+    rotulo: str,
+    tipo: str,
+    mudanca: str,
+    motivo: str,
+) -> None:
+    celulas = tabela.add_row().cells
+    valores = (rotulo, tipo, _primeira_linha(mudanca), (motivo or "").strip())
+    for celula, valor in zip(celulas, valores):
+        celula.text = valor
+
+
+def _inserir_resumo(doc, alteracoes, remocoes, adicoes) -> None:
+    """(4.1) Página de resumo no início do arquivo: título, legenda das cores,
+    tabela com uma linha por mudança e quebra de página. Cada bloco é inserido
+    imediatamente antes do primeiro elemento original de ``body``, na ordem de
+    exibição desejada (4.5)."""
+    body = doc.element.body
+    if not len(body):
+        return
+    ref = body[0]
+
+    titulo = doc.add_paragraph()
+    run_titulo = titulo.add_run("RESUMO DAS ALTERAÇÕES PROPOSTAS")
+    run_titulo.bold = True
+    run_titulo.font.size = Pt(14)
+    ref.addprevious(titulo._p)
+
+    legenda = doc.add_paragraph()
+    run_legenda = legenda.add_run(
+        "Legenda: (verde) texto proposto; (tachado) texto removido; "
+        "(fundo amarelo) trecho pendente de decisão jurídica; "
+        "(comentário) lastro identificado. Alterações em amarelo e os "
+        "comentários exigem validação da equipe jurídica antes da publicação."
+    )
+    run_legenda.italic = True
+    run_legenda.font.size = Pt(9)
+    ref.addprevious(legenda._p)
+
+    if alteracoes or remocoes or adicoes:
+        tabela = doc.add_table(rows=1, cols=4)
+        _tentar_estilo_tabela(tabela, "Table Grid")
+        celulas = tabela.rows[0].cells
+        for celula, nome in zip(celulas, ("Artigo", "Tipo", "Mudança", "Motivo")):
+            celula.text = nome
+            for paragrafo in celula.paragraphs:
+                for run in paragrafo.runs:
+                    run.bold = True
+        for item in alteracoes:
+            if not isinstance(item, dict):
+                continue
+            _linha_do_resumo(
+                tabela,
+                item.get("rotulo")
+                or _primeira_linha(item.get("trecho_original") or "")[:60],
+                "Correção",
+                item.get("novo_texto") or "",
+                item.get("motivo") or item.get("detalhe") or "",
+            )
+        for item in remocoes:
+            if not isinstance(item, dict):
+                continue
+            _linha_do_resumo(
+                tabela,
+                item.get("rotulo")
+                or _primeira_linha(item.get("trecho_original") or "")[:60],
+                "Remoção",
+                item.get("trecho_original") or "",
+                item.get("motivo") or item.get("detalhe") or "",
+            )
+        for item in adicoes:
+            if not isinstance(item, dict):
+                continue
+            _linha_do_resumo(
+                tabela,
+                item.get("o_que") or "novo artigo",
+                "Adição estrutural",
+                item.get("texto") or "",
+                item.get("motivo") or item.get("detalhe") or "",
+            )
+        ref.addprevious(tabela._tbl)
+
+    quebra = doc.add_paragraph()
+    run_quebra = quebra.add_run()
+    run_quebra.add_break(WD_BREAK.PAGE)
+    ref.addprevious(quebra._p)
+
+
 def montar_docx_revisado(
     perfil: PerfilModelo,
     alteracoes: list[dict],
@@ -341,11 +592,19 @@ def montar_docx_revisado(
 
     * alterado → o antigo sai tachado seguido do novo em verde;
     * removido → fica visível com tachado;
+    * absorvido → parágrafo coberto por um novo texto que funde caput +
+      parágrafo/inciso também sai tachado (sem reposição, evita duplicação);
     * adicionado (``adicoes_estruturais``) → novo artigo em verde, após o
       artigo-base (seus incisos/§) ou no fim do miolo;
     * não citado → fica intacto (o original nunca some por truncamento).
 
     Cabeçalho, rodapé de imprensa e demais partes do original são preservados.
+
+    No topo do arquivo é inserida uma página de resumo (4.1): título, legenda
+    das cores, tabela com uma linha por mudança e quebra de página. Parágrafos
+    com ``requer_decisao_juridica=True`` ganham fundo amarelo (4.2) e um aviso
+    em destaque em itálico logo abaixo (4.3). Alterações/adições com ``lastro``
+    viram comentários nativos do Word ancorados no texto (4.4).
     """
     doc = _abrir_ou_criar(perfil.file)
     refs = _referencias(doc, perfil)
@@ -388,7 +647,13 @@ def montar_docx_revisado(
             continue
         i = _encontrar(item, set(acoes))
         if i is not None:
-            acoes[i] = {"tipo": "alterado", "novo_texto": item.get("novo_texto") or ""}
+            acoes[i] = {
+                "tipo": "alterado",
+                "novo_texto": item.get("novo_texto") or "",
+                "rotulo": item.get("rotulo") or "",
+                "requer_decisao_juridica": bool(item.get("requer_decisao_juridica")),
+            }
+            _marcar_absorvidos(acoes, i, item.get("novo_texto") or "", miolo_pars)
     for item in remocoes:
         if not isinstance(item, dict):
             continue
@@ -396,15 +661,19 @@ def montar_docx_revisado(
         if i is not None:
             acoes[i] = {"tipo": "removido"}
 
+    pendentes: list[object] = []
     for i in sorted(acoes):
         wp = miolo_pars[i]
         acao = acoes[i]
-        if acao["tipo"] in ("alterado", "removido"):
+        if acao["tipo"] in ("alterado", "removido", "absorvido"):
             tachar(wp)
         if acao["tipo"] == "alterado":
+            # O 'novo_texto' já inclui o rótulo, exatamente como o original.
             novo = paragrafo_novo(acao["novo_texto"])
             if novo is not None:
                 wp.addnext(novo)
+                if acao.get("requer_decisao_juridica"):
+                    pendentes.append(novo)
 
     insercoes: dict[int | None, list] = {}
     for ad in adicoes:
@@ -419,7 +688,9 @@ def montar_docx_revisado(
         if w_p is None:
             continue
         alvo = _indice_ancora_adicao(miolo_pars, ad.get("o_que") or "", ad.get("posicao") or "")
-        insercoes.setdefault(alvo, []).append(w_p)
+        insercoes.setdefault(alvo, []).append(
+            (w_p, bool(ad.get("requer_decisao_juridica")))
+        )
 
     for alvo in sorted(insercoes, key=lambda x: -1 if x is None else x):
         if alvo is not None:
@@ -428,9 +699,15 @@ def montar_docx_revisado(
             no = miolo_pars[-1]
         else:
             no = ancora
-        for w_p in insercoes[alvo]:
+        for w_p, requer_pendente in insercoes[alvo]:
             no.addnext(w_p)
             no = w_p
+            if requer_pendente:
+                pendentes.append(w_p)
+
+    _inserir_pendencias(doc, pendentes)
+    _inserir_comentarios(doc, _comentarios_das_mudancas(alteracoes, remocoes, adicoes))
+    _inserir_resumo(doc, alteracoes, remocoes, adicoes)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{perfil.name}_{uuid.uuid4().hex[:8]}.docx"

@@ -74,7 +74,25 @@ Para entradas `.docx`, o resultado servido por `GET /api/minuta/docx` é uma
 
 - texto alterado/adicionado sai em verde;
 - texto alterado/removido fica visível com tachado;
+- um parágrafo coberto por um novo texto que **funde** caput + subitem sai
+  tachado, sem o subitem ser reinserido (evita duplicação);
 - parágrafos iguais permanecem intactos.
+
+A melhoria também inclui:
+
+- **Página de resumo** no início do `.docx`: título, legenda das cores e uma
+  tabela com uma linha por mudança (artigo, tipo, mudança, motivo).
+- **Fundo amarelo + aviso** em itálico logo abaixo para itens marcados com
+  `requer_decisao_juridica: true` (pendentes de decisão da equipe jurídica
+  antes da publicação).
+- **Comentários nativos do Word** ancorados ao texto para toda mudança com
+  `lastro` identificado (conteúdo do lastro e avisos de divergência).
+
+O schema do patch exige o **lastro** em toda alteração/remoção/adição que
+inova (o modelo usa `[PRAZO A DEFINIR PELA SECRETARIA]` quando o prazo ainda
+não foi fixado) e não permite revogação genérica sem citar a norma. Um `lastro`
+cujo assunto não coincida com o do texto alterado também marca o item com
+`requer_decisao_juridica` e adiciona um aviso de divergência temática.
 
 `GET /api/minuta/pdf` converte essa cópia marcada em PDF (via LibreOffice),
 então as marcas verdes/tachado aparecem também no PDF. O arquivo original
@@ -188,4 +206,9 @@ uv run pytest tests/ -q
 - `tests/test_minuta_melhoria.py` e `tests/test_integridade_melhoria.py` —
   fluxo de melhoria em modo patch: teto de tokens com clamp, sanidade do
   patch (âncoras/campos), retry e construção da estrutura a partir do
-  original + patch sem perda de capítulos/incisos.
+  original + patch sem perda de capítulos/incisos. Em `test_integridade`: a
+  cópia marcada (`montar_docx_revisado`) com página de resumo, sombreamento
+  amarelo + aviso de pendência, comentários nativos do Word (4 partes OOXML)
+  e a não duplicação de parágrafo fundido; em `test_minuta_melhoria`: o lastro
+  estendido a `alteracoes`/`remocoes`, o `requer_decisao_juridica` e a
+  checagem de coerência temática.

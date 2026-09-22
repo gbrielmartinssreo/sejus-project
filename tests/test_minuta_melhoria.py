@@ -197,6 +197,113 @@ def test_problemas_do_patch_detecta_campos_ausentes():
     assert any("novo_texto" in p for p in problemas)
 
 
+def _contexto_com_ato():
+    return [
+        {
+            "source_file": "IN_07-2026.docx",
+            "act_type": "IN",
+            "act_number": "07/2026",
+            "text": "Art. 13 A autorização terá validade de 02 (dois) anos.",
+        },
+        {
+            "source_file": "PORTARIA_12-2026.docx",
+            "act_type": "PORTARIA",
+            "act_number": "12/2026",
+            "text": "Outro ato do acervo.",
+        },
+    ]
+
+
+def test_documentos_do_contexto_dedup_por_fonte():
+    contexto = [
+        {
+            "source_file": "IN_07-2026.docx",
+            "act_type": "IN",
+            "act_number": "07/2026",
+            "text": "...",
+        },
+        {
+            "source_file": "IN_07-2026.docx",
+            "act_type": "IN",
+            "act_number": "07/2026",
+            "text": "trecho repetido da mesma fonte",
+        },
+        {
+            "source_file": "",
+            "act_type": "PORTARIA",
+            "act_number": "12/2026",
+            "text": "...",
+        },
+    ]
+    docs = minuta._documentos_do_contexto(contexto)
+    assert len(docs) == 2
+    assert docs[0]["source_file"] == "IN_07-2026.docx"
+    assert docs[1]["act_number"] == "12/2026"
+
+
+def test_identificar_lastro_casa_com_ato_do_contexto():
+    docs = minuta._documentos_do_contexto(_contexto_com_ato())
+    ato = minuta._identificar_lastro("IN 07/2026, art. 13 (validade de 02 anos).", docs)
+    assert ato is not None
+    assert ato["source_file"] == "IN_07-2026.docx"
+
+
+def test_identificar_lastro_sem_numero_nao_afirma_documento():
+    docs = minuta._documentos_do_contexto(_contexto_com_ato())
+    assert minuta._identificar_lastro("conforme modelo do acervo", docs) is None
+
+
+def test_identificar_lastro_numero_ambiguo_nao_afirma_documento():
+    docs = minuta._documentos_do_contexto(
+        [
+            {"source_file": "A.docx", "act_type": "IN", "act_number": "07/2026", "text": "..."},
+            {"source_file": "B.docx", "act_type": "PORTARIA", "act_number": "07/2026", "text": "..."},
+        ]
+    )
+    assert minuta._identificar_lastro("art. 13, validade de 02 anos", docs) is None
+
+
+def test_validar_lastros_anota_adicoes_sem_bloquear():
+    adicoes = [
+        {"o_que": "Art. 6º-A", "lastro": "IN 07/2026, art. 13."},
+        {"o_que": "Art. 7º-A", "lastro": "PORTARIA fantasma 99/9999."},
+        {"o_que": "Art. 8º-A"},  # sem lastro: nada a validar
+    ]
+    minuta._validar_lastros(adicoes, _contexto_com_ato())
+    assert adicoes[0]["lastro_validado"] is True
+    assert adicoes[0]["lastro_fonte"] == "IN_07-2026.docx"
+    assert "lastro_aviso" not in adicoes[0]
+    assert adicoes[1]["lastro_validado"] is False
+    assert adicoes[1]["lastro_fonte"] == ""
+    assert "lastro_aviso" in adicoes[1]
+    assert "lastro_validado" not in adicoes[2]
+
+
+def test_gerar_estrutura_melhoria_identifica_lastro_no_contexto(monkeypatch):
+    fake = _FakeExtrai([_patch_saudavel()])
+    monkeypatch.setattr(minuta, "_extrair_json_com_retry", fake)
+
+    _, _, _, adicoes, _ = minuta.gerar_estrutura_melhoria(
+        _doc_completude(), "portaria", _perfil(), _contexto_com_ato(), None
+    )
+
+    assert adicoes[0]["lastro"] == "IN 07/2026, art. 13."
+    assert adicoes[0]["lastro_validado"] is True
+    assert adicoes[0]["lastro_fonte"] == "IN_07-2026.docx"
+
+
+def test_gerar_estrutura_melhoria_sinaliza_lastro_fantasma(monkeypatch):
+    fake = _FakeExtrai([_patch_saudavel()])
+    monkeypatch.setattr(minuta, "_extrair_json_com_retry", fake)
+
+    _, _, _, adicoes, _ = minuta.gerar_estrutura_melhoria(
+        _doc_completude(), "portaria", _perfil(), [], None
+    )
+
+    assert adicoes[0]["lastro_validado"] is False
+    assert "lastro_aviso" in adicoes[0]
+
+
 def test_melhoria_nao_corta_entrada_em_20k():
     conteudo = ("CONSIDERANDO o disposto na legislação aplicável " * 900)  # ~40k chars
     assert len(conteudo) > 20_000
@@ -281,3 +388,89 @@ def test_chave_rotulo_normaliza_para_comparacao():
     assert docx_builder._chave_rotulo("Art. 6º-A") == "art. 6º-a"
     assert docx_builder._chave_rotulo(" art. 6°a ") == "art. 6°a"
     assert docx_builder._chave_rotulo("Art. 6º-A.") == "art. 6º-a"
+
+
+# ---------------------------------------------------------------------------
+# Item 2/3: lastro estendido a alteracoes/remocoes + coerencia tematica
+# ---------------------------------------------------------------------------
+
+
+def test_schema_estende_lastro_e_requer_decisao_juridica():
+    props = minuta.MELHORIA_DEFINITION["function"]["parameters"]["properties"]
+    alteracoes = props["alteracoes"]["items"]["properties"]
+    remocoes = props["remocoes"]["items"]["properties"]
+    adicoes = props["adicoes_estruturais"]["items"]["properties"]
+    assert "lastro" in alteracoes
+    assert "requer_decisao_juridica" in alteracoes
+    assert "lastro" in remocoes
+    assert "requer_decisao_juridica" in adicoes
+    assert "[PRAZO A DEFINIR PELA SECRETARIA]" in minuta._sistema_melhoria()
+
+
+def test_validar_lastros_tambem_anota_alteracoes_e_remocoes():
+    alteracoes = [{"rotulo": "Art. 3º", "lastro": "IN 07/2026, art. 13."}]
+    remocoes = [{"rotulo": "Art. 9º", "lastro": "Decreto 2.541/2008"}]
+    minuta._validar_lastros(alteracoes, _contexto_com_ato())
+    minuta._validar_lastros(remocoes, _contexto_com_ato())
+    assert alteracoes[0]["lastro_validado"] is True
+    assert alteracoes[0]["lastro_fonte"] == "IN_07-2026.docx"
+    # Remocao com lastro que nao casa -> aviso (sem bloquear).
+    assert remocoes[0]["lastro_validado"] is False
+    assert "lastro_aviso" in remocoes[0]
+
+
+def test_checar_coerencia_lastros_marca_requer_sem_sobreposicao_tematica():
+    """Lastro identificado, mas de outro assunto: item marcado para decisão
+    jurídica (requer_decisao_juridica + coerencia_aviso)."""
+    alteracoes = [
+        {
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º Cabe recurso em caso de negativa.",
+            "novo_texto": "Art. 3º Cabe recurso em caso de negativa administrativa.",
+            "lastro": "IN 07/2026, art. 13",
+            "requer_decisao_juridica": False,
+        }
+    ]
+    minuta._checar_coerencia_lastros(alteracoes, [], [], _contexto_com_ato())
+    assert alteracoes[0]["requer_decisao_juridica"] is True
+    assert "coerencia_aviso" in alteracoes[0]
+
+
+def test_checar_coerencia_lastros_nao_marca_quando_temas_concordam():
+    """Lastro do MESMO assunto (ambos falam de autorização/validade) não é
+    sinalizado como incoerente."""
+    contexto = [
+        {
+            "source_file": "IN_07-2026.docx",
+            "act_type": "IN",
+            "act_number": "07/2026",
+            "text": "O registro terá validade de 02 anos, renovável por igual período.",
+        }
+    ]
+    adicoes = [
+        {
+            "o_que": "Art. 4º-A",
+            "texto": "Art. 4º-A A autorização terá validade de 02 anos e poderá ser renovada.",
+            "lastro": "IN 07/2026, art. 13",
+            "requer_decisao_juridica": False,
+        }
+    ]
+    minuta._checar_coerencia_lastros([], [], adicoes, contexto)
+    assert adicoes[0].get("requer_decisao_juridica") is False
+    assert "coerencia_aviso" not in adicoes[0]
+
+
+def test_gerar_estrutura_melhoria_define_padrao_de_requer_decisao(monkeypatch):
+    patch = dict(_patch_saudavel())
+    fake = _FakeExtrai([patch])
+    monkeypatch.setattr(minuta, "_extrair_json_com_retry", fake)
+
+    _, alteracoes, _remocoes, adicoes, _ = minuta.gerar_estrutura_melhoria(
+        _doc_completude(), "portaria", _perfil(), [], None
+    )
+
+    # Schema obriga 'requer_decisao_juridica'; itens antigos ficam False.
+    assert alteracoes[0]["requer_decisao_juridica"] is False
+    assert adicoes[0]["requer_decisao_juridica"] is False
+    # Sem contexto nenhum, o lastro da adicao vira aviso (phantom).
+    assert adicoes[0]["lastro_validado"] is False
