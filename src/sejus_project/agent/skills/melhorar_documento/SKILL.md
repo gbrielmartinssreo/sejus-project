@@ -24,6 +24,12 @@ antes/depois.
   ferramenta correta — **não** é geração de ato novo. A tool injeta
   automaticamente os apontamentos acionáveis da análise registrada para o
   mesmo documento/versão.
+- **Confirmação curta depois da análise**: se o usuário responde só "sim",
+  "pode", "pode gerar" (ou equivalente) depois que o agente ofereceu aplicar
+  as correções, isso autoriza a melhoria do documento analisado — chame
+  `melhorar_documento_usuario`. Prepare o oferecimento em termos de melhoria
+  ("aplicar as correções e gerar o arquivo corrigido"), **nunca** como
+  "gerar arquivo" de um ato novo.
 
 ## Apontamentos da análise (correção pós-análise)
 - A análise COMPLETA é preservada como contexto, mas só os **apontamentos

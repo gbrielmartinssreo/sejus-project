@@ -5,9 +5,12 @@ import difflib
 import hashlib
 import json
 import re
+import shutil
+import traceback
+import uuid
 from pathlib import Path
 
-from sejus_project.tools.document_infra import docx_builder, modelos
+from sejus_project.tools.document_infra import analise_validacao, docx_builder, docx_validacao, modelos
 from sejus_project.tools.document_infra.docx_templates import OUTPUTS_DIR
 from sejus_project.tools.llm_tools import (
     analysis_registry,
@@ -437,6 +440,20 @@ def analise_para_correcao(filename: str | None = None) -> dict | None:
     }
 
 
+def _pendencia_de_correcao(pendente: dict | None) -> dict | None:
+    """Análise do documento a corrigir quando a geração pendente é, na verdade,
+    a entrega da correção de um ato já analisado (e não a geração de um ato novo).
+
+    A confirmação da pendência ("sim"/"pode gerar") após uma análise registrada
+    do arquivo enviado só faz sentido como aplicação dos apontamentos ao
+    original. Com análise registrada na sessão, a pendência é desviada para a
+    melhoria — desvio deliberado para não entregar um ato novo criado a partir
+    de template no lugar do documento corrigido. Sem análise, a geração segue."""
+    if not pendente:
+        return None
+    return analise_para_correcao()
+
+
 def set_modelo_usuario(filename: str, importacoes_dir: Path) -> dict:
     """Define um DOCX enviado pelo usuário como modelo de formatação ativo.
 
@@ -814,18 +831,25 @@ def gerar_documento_normativo(
             ensure_ascii=False,
         )
 
-    # Correção de um documento já analisado NÃO é geração de ato novo: sinaliza
+    # Correção de um documento enviado NÃO é geração de ato novo: sinaliza
     # para o agente encaminhar a melhoria do documento com os apontamentos.
+    # Vale também sem análise registrada (arquivo importado) — nunca entregar
+    # a "correção" como um ato novo criado a partir de template.
     if pedido_de_correcao(request):
         analise = analise_para_correcao()
-        if analise:
+        filename = (
+            analise["filename"]
+            if analise
+            else arquivo_para_correcao_sem_analise(request)
+        )
+        if analise or filename:
             return json.dumps(
                 {
                     "status": "melhoria_necessaria",
-                    "filename": analise["filename"],
-                    "apontamentos": analise["apontamentos"],
+                    "filename": filename,
+                    "apontamentos": (analise or {}).get("apontamentos") or [],
                     "message": (
-                        "O pedido é uma correção do documento já analisado. "
+                        "O pedido é uma correção do documento enviado. "
                         "Use melhorar_documento_usuario com este arquivo e os "
                         "apontamentos da análise — não gere um ato novo."
                     ),
@@ -836,7 +860,28 @@ def gerar_documento_normativo(
     try:
         if not values and _pending_document and _is_generation_confirmation(request):
             pendente = _pending_document
+            # A confirmação pode estar completando a CORREÇÃO de um documento
+            # analisado (ex.: o LLM criou a pendência com "gere a IN sobre..."
+            # e o usuário respondeu "sim"). Nesse caso NÃO completa um ato novo
+            # a partir de template: devolve o mesmo despacho de
+            # "melhoria_necessaria" que o loop do agente reencaminha.
+            despacho = _pendencia_de_correcao(pendente)
             _pending_document = None
+            if despacho:
+                return json.dumps(
+                    {
+                        "status": "melhoria_necessaria",
+                        "filename": despacho["filename"],
+                        "apontamentos": despacho["apontamentos"],
+                        "message": (
+                            "A confirmação completa a correção de um documento "
+                            "já analisado. Use melhorar_documento_usuario com "
+                            "este arquivo e os apontamentos da análise — não "
+                            "gere um ato novo."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
             return _gerar_e_relatar(
                 pendente["request"],
                 pendente["perfil"],
@@ -1274,6 +1319,40 @@ def _integrar_adicoes_estruturais(estrutura: dict, adicoes: list) -> set[str]:
     return inseridos
 
 
+def _descartar_itens_por_rotulo(
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+    rotulos: set[str],
+    descartados: list[str],
+) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+    """Remove itens cujo rótulo está no conjunto; rótulos removidos entram em
+    ``descartados`` para constar no relatório da entrega."""
+    descartados_novos = list(descartados)
+
+    def _filtrar(grupo: list[dict], chave_main: str, chave_alt: str | None):
+        novos: list[dict] = []
+        for a in grupo:
+            label = a.get(chave_main) or (a.get(chave_alt) if chave_alt else None) or "?"
+            if label in rotulos:
+                descartados_novos.append(label)
+            else:
+                novos.append(a)
+        return novos
+
+    alteracoes = _filtrar(alteracoes, "rotulo", "o_que")
+    remocoes = _filtrar(remocoes, "rotulo", None)
+    adicoes = _filtrar(adicoes, "o_que", "rotulo")
+    return alteracoes, remocoes, adicoes, descartados_novos
+
+
+class _SemSaidaDeValidacao(Exception):
+    """Validação pós-geração sem saída válida após descartar responsáveis.
+
+    Faz a entrega recair na cópia intacta (fallback), nao em erro — o arquivo
+    sempre deve ser entregue."""
+
+
 def _melhorar_e_relatar(
     filename: str,
     destino,
@@ -1288,6 +1367,18 @@ def _melhorar_e_relatar(
     analise_completa: str | None = None,
 ) -> str:
     global _ultima_minuta, _melhoria_no_turno, _ultima_comparacao, _gerada_no_turno
+    # Passagens de ANÁLISE (distintas das pós-geração): ortografia, estrutura,
+    # clareza, fundamentação e conferência dos achados — cada uma registra a
+    # chamada, o resultado e a duração. A conferência valida cada achado contra
+    # o ORIGINAL (trecho/localização verificáveis) e descarta o que o contradiz
+    # ANTES da melhoria; só os achados confirmados vão ao patch, ao painel de
+    # cobertura e à lista de tarefas (elogios/duplicatas ficam de fora).
+    resultado_analise = analise_validacao.rodar_passagens_analise(
+        conteudo, apontamentos or []
+    )
+    passagens_analise = resultado_analise["passagens"]
+    achados_descartados = resultado_analise["achados_descartados"]
+    apontamentos = resultado_analise["apontamentos_validos"] or None
     valores: dict = {}
     if diretrizes:
         valores["diretrizes"] = diretrizes
@@ -1296,6 +1387,9 @@ def _melhorar_e_relatar(
     if analise_completa:
         valores["analise_completa"] = analise_completa
     valores = valores or None
+    # Declarações de cobertura do modelo (ID -> status/referência) preservadas
+    # para recomputar a cobertura quando o patch for parcialmente descartado.
+    declarada_modelo: list[dict] = []
     # Uma falha de geração/validação do patch NÃO pode barrar a entrega: cai no
     # fallback (cópia intacta) com os apontamentos marcados como falha.
     try:
@@ -1310,6 +1404,7 @@ def _melhorar_e_relatar(
         )
         # Cobertura dos apontamentos da análise (validada contra o patch efetivo).
         cobertura = estrutura.pop("_cobertura_analise", None) or []
+        declarada_modelo = estrutura.pop("_declarada", None) or []
         descartados = estrutura.pop("_descartados", None) or []
         # Marca as mudanças que vieram de um apontamento aprovado da análise,
         # para o comentário do .docx indicar a origem quando não houver lastro.
@@ -1317,10 +1412,12 @@ def _melhorar_e_relatar(
             alteracoes, remocoes, adicoes, cobertura
         )
     except Exception:  # noqa: BLE001 - entrega a cópia intacta em vez de falhar
+        traceback.print_exc()
         estrutura = document_improvement._estruturar_original(conteudo)
         alteracoes, remocoes, adicoes, lacunas, descartados = [], [], [], [], []
         cobertura = document_improvement._validar_cobertura(
-            conteudo, [], [], [], apontamentos or [], []
+            conteudo, [], [], [], apontamentos or [], declarada_modelo,
+            patch_descartado=True,
         )
     # Identifica o documento especifico do RAG referenciado pelo 'lastro' de
     # cada mudanca e sinaliza divergencias no relatorio (sem bloquear); em
@@ -1341,7 +1438,8 @@ def _melhorar_e_relatar(
         ]
         alteracoes, remocoes, adicoes = [], [], []
         cobertura = document_improvement._validar_cobertura(
-            conteudo, [], [], [], apontamentos or [], []
+            conteudo, [], [], [], apontamentos or [], declarada_modelo,
+            patch_descartado=True,
         )
     # Persistir propostas com estado pendente
     doc_hash = _hash_documento(filename)
@@ -1370,28 +1468,66 @@ def _melhorar_e_relatar(
     # Entrega SEMPRE um arquivo: com correções, parcial ou a cópia intacta.
     sem_correcao = not (alteracoes or remocoes or adicoes)
     fallback = False
+    is_docx = destino.suffix.lower() == ".docx"
+    passagens: list[dict] | None = None
 
     def _copia_intacta():
-        if destino.suffix.lower() == ".docx":
+        if is_docx:
             return docx_builder.copiar_docx(perfil, OUTPUTS_DIR)
         return docx_builder.montar_docx(perfil, estrutura, OUTPUTS_DIR)
 
     if sem_correcao:
         output_path = _copia_intacta()
         fallback = True
+        passagens = docx_validacao.validar_docx_gerado(
+            conteudo, output_path, [], [], [], aplicado=False
+        )
     else:
         try:
-            if destino.suffix.lower() == ".docx":
+            if is_docx:
                 # Cópia do DOCX original com as mudanças marcadas
                 # (tachado/verde). Parágrafos não citados permanecem intactos.
                 output_path = docx_builder.montar_docx_revisado(
                     perfil, alteracoes, remocoes, adicoes, OUTPUTS_DIR
                 )
+                # Validação pós-geração (5 passagens) do arquivo recém-feito.
+                # Passagem com falha descarta os itens RESPONSÁVEIS e remonta
+                # (aplicação parcial); sem responsáveis identificados ou após
+                # algumas tentativas, recai na cópia intacta.
+                tentativas = 0
+                while tentativas < 3:
+                    passagens = docx_validacao.validar_docx_gerado(
+                        conteudo, output_path, alteracoes, remocoes, adicoes
+                    )
+                    if all(p.get("ok") for p in passagens):
+                        break
+                    rotulos = docx_validacao.responsaveis(passagens)
+                    if not rotulos or not (alteracoes or remocoes or adicoes):
+                        break
+                    alteracoes, remocoes, adicoes, descartados = _descartar_itens_por_rotulo(
+                        alteracoes, remocoes, adicoes, set(rotulos), descartados
+                    )
+                    if not (alteracoes or remocoes or adicoes):
+                        break
+                    cobertura = document_improvement._validar_cobertura(
+                        conteudo, alteracoes, remocoes, adicoes,
+                        apontamentos or [], declarada_modelo,
+                        patch_descartado=True,
+                    )
+                    output_path = docx_builder.montar_docx_revisado(
+                        perfil, alteracoes, remocoes, adicoes, OUTPUTS_DIR
+                    )
+                    tentativas += 1
+                if passagens and not all(p.get("ok") for p in passagens):
+                    passagens = None
+                    raise _SemSaidaDeValidacao()
             else:
                 output_path = docx_builder.montar_docx(
                     perfil, estrutura, OUTPUTS_DIR, insercoes_rastreadas=insercoes
                 )
-        except Exception:  # noqa: BLE001 - falha de montagem não pode barrar a entrega
+        except _SemSaidaDeValidacao:
+            # Validação sem saída: entrega a cópia intacta (fallback), nunca um
+            # arquivo com alterações não confirmadas.
             output_path = _copia_intacta()
             fallback = True
             descartados = list(descartados) + [
@@ -1401,7 +1537,28 @@ def _melhorar_e_relatar(
             ]
             alteracoes, remocoes, adicoes = [], [], []
             cobertura = document_improvement._validar_cobertura(
-                conteudo, [], [], [], apontamentos or [], []
+                conteudo, [], [], [], apontamentos or [], declarada_modelo,
+                patch_descartado=True,
+            )
+            passagens = docx_validacao.validar_docx_gerado(
+                conteudo, output_path, [], [], [], aplicado=False
+            )
+        except Exception:  # noqa: BLE001 - falha de montagem não pode barrar a entrega
+            traceback.print_exc()
+            output_path = _copia_intacta()
+            fallback = True
+            descartados = list(descartados) + [
+                a.get("rotulo") or a.get("o_que") or "?"
+                for grupo in (alteracoes, remocoes, adicoes)
+                for a in grupo
+            ]
+            alteracoes, remocoes, adicoes = [], [], []
+            cobertura = document_improvement._validar_cobertura(
+                conteudo, [], [], [], apontamentos or [], declarada_modelo,
+                patch_descartado=True,
+            )
+            passagens = docx_validacao.validar_docx_gerado(
+                conteudo, output_path, [], [], [], aplicado=False
             )
     depois = minuta_para_texto(estrutura)
     textos = _textos_antes_depois(conteudo, depois)
@@ -1425,6 +1582,9 @@ def _melhorar_e_relatar(
         "apontamentos_analise": cobertura,
         "fallback": fallback,
         "descartados": descartados,
+        "passagens": passagens,
+        "passagens_analise": passagens_analise,
+        "achados_descartados": achados_descartados,
         "sha1": hashlib.sha1(conteudo.encode("utf-8", "ignore")).hexdigest(),
     }
     resposta = {
@@ -1440,6 +1600,9 @@ def _melhorar_e_relatar(
         "apontamentos_analise": cobertura,
         "fallback": fallback,
         "descartados": descartados,
+        "passagens": passagens,
+        "passagens_analise": passagens_analise,
+        "achados_descartados": achados_descartados,
         "outros": outros or [],
         "sources": _source_summary(contexto),
     }
@@ -1452,7 +1615,7 @@ def _melhorar_e_relatar(
     nao_aplicados = [
         c
         for c in cobertura
-        if c.get("status") in ("nao_aplicado", "falhou", "pendente")
+        if c.get("status") in ("nao_aplicado", "falhou", "pendente", "descartado")
     ]
     if apontamentos and nao_aplicados:
         avisos.append(
@@ -1538,23 +1701,26 @@ def melhorar_documento_usuario(
         )
         apontamentos = None
 
-    disponiveis = _list_available_files()
-    if not filename:
-        filename = _ultimo_arquivo_importado()
-        if not filename:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "error": (
-                        "Nenhum arquivo importado ainda. Envie um documento "
-                        "pelos botões da interface (📎 análise / ✨ melhoria)."
-                    ),
-                    "available_files": [],
-                },
-                ensure_ascii=False,
-            )
-
+    disponiveis: list[str] = []
+    destino: Path | None = None
+    conteudo = ""
+    perfil: modelos.PerfilModelo | None = None
     try:
+        disponiveis = _list_available_files()
+        if not filename:
+            filename = _ultimo_arquivo_importado()
+            if not filename:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": (
+                            "Nenhum arquivo importado ainda. Envie um documento "
+                            "pelos botões da interface (📎 análise / ✨ melhoria)."
+                        ),
+                        "available_files": [],
+                    },
+                    ensure_ascii=False,
+                )
         destino = _resolve_file(filename)
         conteudo = extract_file_text(destino)
         sha1_conteudo = hashlib.sha1(
@@ -1640,16 +1806,61 @@ def melhorar_documento_usuario(
             },
             ensure_ascii=False,
         )
-    except (ValueError, OSError) as error:
-        return json.dumps(
-            {"status": "error", "error": str(error)}, ensure_ascii=False
-        )
-    except Exception as error:  # noqa: BLE001 - falha vira resultado de tool
-        return json.dumps(
-            {
-                "status": "error",
-                "error": "Falha ao melhorar o documento.",
-                "detail": str(error),
-            },
-            ensure_ascii=False,
-        )
+    except Exception as error:  # noqa: BLE001 - falha inesperada nao vira "limitacao tecnica"
+        traceback.print_exc()
+        # Falha inesperada NAO pode virar a mensagem genérica de erro técnico:
+        # entrega a cópia intacta do original sempre que possível (apontamentos
+        # marcados como falha), só devolvendo status de erro se nem a cópia der.
+        try:
+            cobertura_falha = document_improvement._validar_cobertura(
+                conteudo, [], [], [], apontamentos or [], []
+            )
+        except Exception:  # noqa: BLE001
+            cobertura_falha = []
+        try:
+            saida: Path | None = None
+            if (
+                perfil is not None
+                and destino is not None
+                and destino.suffix.lower() == ".docx"
+            ):
+                saida = docx_builder.copiar_docx(perfil, OUTPUTS_DIR)
+            elif destino is not None and destino.is_file():
+                OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+                saida = OUTPUTS_DIR / (
+                    f"{Path(destino).stem}_{uuid.uuid4().hex[:8]}"
+                    f"{Path(destino).suffix}"
+                )
+                shutil.copyfile(Path(destino), saida)
+            if saida is None:
+                raise ValueError("origens insuficientes para a copia intacta")
+            return json.dumps(
+                {
+                    "status": "improved",
+                    "filename": filename,
+                    "output_path": str(saida),
+                    "alteracoes": [],
+                    "remocoes": [],
+                    "adicoes_estruturais": [],
+                    "lacunas": [],
+                    "apontamentos_analise": cobertura_falha,
+                    "textos": [],
+                    "fallback": True,
+                    "mensagem": (
+                        "Não foi possível aplicar as correções; o arquivo "
+                        "original foi preservado para você não ficar sem o "
+                        "documento."
+                    ),
+                    "outros": [f for f in disponiveis if f != filename],
+                },
+                ensure_ascii=False,
+            )
+        except Exception:  # noqa: BLE001 - ultimo recurso: devolve o erro real
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "Falha ao melhorar o documento.",
+                    "detail": str(error),
+                },
+                ensure_ascii=False,
+            )

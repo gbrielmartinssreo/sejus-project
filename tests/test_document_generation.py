@@ -85,7 +85,53 @@ def fake_minuta(monkeypatch, tmp_path):
         return output_path
 
     def montar_docx_revisado(perfil, alteracoes, remocoes, adicoes, output_dir):
-        return montar_docx(perfil, ESTRUTURA, output_dir, insercoes_rastreadas=None)
+        # Stub FIEL para a validação pós-geração: reabre o perfil e marca as
+        # mudanças reais (original tachado + novo em verde), como o real.
+        from docx.shared import RGBColor
+
+        from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"rev_{perfil.name}.docx"
+
+        def _chave(texto):
+            return " ".join((texto or "").strip().split()).rstrip(" .;:,").casefold()
+
+        doc = Document()
+        fonte = Document(str(perfil.file))
+        for p in fonte.paragraphs:
+            texto = paragraph_text(p).strip()
+            alvo = next(
+                (
+                    a
+                    for a in alteracoes or []
+                    if _chave(texto).startswith(_chave(a.get("trecho_original") or ""))
+                ),
+                None,
+            )
+            removido = any(
+                _chave(texto).startswith(_chave(r.get("trecho_original") or ""))
+                for r in remocoes or []
+            )
+            if alvo:
+                pp = doc.add_paragraph()
+                rr = pp.add_run(texto)
+                rr.font.strike = True
+                novo = doc.add_paragraph()
+                rv = novo.add_run(alvo.get("novo_texto") or "")
+                rv.font.color.rgb = RGBColor(0x2E, 0x7D, 0x32)
+                continue
+            if removido:
+                pp = doc.add_paragraph()
+                rr = pp.add_run(texto)
+                rr.font.strike = True
+                continue
+            doc.add_paragraph(texto)
+        for item in adicoes or []:
+            doc.add_paragraph(item.get("texto") or "")
+        doc.save(str(output_path))
+        return output_path
 
     monkeypatch.setattr(generation.minuta_generation, "gerar_estrutura_minuta", gerar_estrutura_minuta)
     monkeypatch.setattr(generation.docx_builder, "montar_docx", montar_docx)
@@ -242,6 +288,12 @@ def test_melhoria_docx_preserva_layout_e_gera_comparacao(fake_retrieval, fake_me
     arquivo = tmp_path / "portaria_limpeza.docx"
     document = Document()
     document.add_paragraph("PORTARIA Nº 45/2026/GAB-SEJUS/MT")
+    document.add_paragraph(
+        "O Secretário de Estado de Justiça, no uso de suas atribuições, resolve:"
+    )
+    document.add_paragraph(
+        "Art. 2º Fica instituído o Grupo de Trabalho de Limpeza da Cadeia."
+    )
     document.save(str(arquivo))
 
     monkeypatch.setattr(user_files, "IMPORTACOES_DIR", tmp_path)

@@ -130,10 +130,13 @@ portanto, frase direta desde a abertura, um problema por item e item
 autossuficiente, para que nenhum apontamento fique vago nem seja descartado
 como mera constatação de conformidade.
 
-Quando o usuário confirmar e pedir o **arquivo corrigido**, encaminhe para a
+Quando o usuário confirmar e pedir o **arquivo corrigido** (ou responder já
+com uma confirmação curta, como "sim", "pode", "pode gerar"), encaminhe para a
 ferramenta `melhorar_documento_usuario` (fluxo "melhorar e comparar"): ela
 aplica os apontamentos desta análise ao documento original como um patch
 (mesmo ato — número, ementa, objeto e assinaturas preservados), marca as
-mudanças no próprio arquivo e apresenta a comparação antes/depois. A análise
+mudanças no próprio arquivo e apresenta a comparação antes/depois. Nunca
+trate essa entrega como "gerar o arquivo" de um ato novo via
+`gerar_documento_normativo`. A análise
 produzida permanece como contexto; não a substitua por uma revisão
 independente nem invente correções que ela não apontou.

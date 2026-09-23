@@ -8,6 +8,7 @@ normalizada e devolve o caminho do arquivo gerado.
 """
 from __future__ import annotations
 
+import copy
 import re
 import shutil
 import uuid
@@ -19,6 +20,8 @@ from docx.shared import Pt, RGBColor
 
 from sejus_project.tools.document_infra.docx_comments import adicionar_comentario
 from sejus_project.tools.document_infra.docx_engine import (
+    XML_SPACE,
+    _run_text,
     all_paragraphs,
     assinalar_insercao,
     build_paragraph,
@@ -283,10 +286,14 @@ def _chave_linha(texto: str) -> str:
     Normaliza variantes de tipografia (travessões e hífens, aspas curvas e os
     vários espaços unicode) para que diferenças puramente tipográficas não
     virem falsos 'replace' no diff, depois colapsa espaços e converte para
-    caixa baixa.
+    caixa baixa. Sinal de pontuação final ('.', ',', ';', ':') é descartado:
+    '...nas unidades penais.' e '...nas unidades penais;' são o MESMO
+    considerando — sem isso a rede de duplicação deixaria passar conteúdo
+    repetido que só difere na pontuação final.
     """
     texto = (texto or "").translate(_TIPOGRAFIA_EQUIVALENTE)
-    return _SIMPLES.sub(" ", texto.strip()).casefold()
+    chave = _SIMPLES.sub(" ", texto.strip()).casefold()
+    return chave.rstrip(" \t.,;:")
 
 
 _RE_ARTIGO_PAR = re.compile(r"^\s*art\.?\s*(\d+)", re.IGNORECASE)
@@ -294,6 +301,60 @@ _RE_SUBITEM_PAR = re.compile(
     r"^\s*(?:§\s*\d|par[áa]grafo\s+[úu]nico|[ivxl]{1,4}\s*[-–—])",
     re.IGNORECASE,
 )
+
+
+def _ancora_rigorosa(
+    linhas: list[str | None],
+    item: dict,
+    usados: set[int] | None = None,
+) -> int | None:
+    """Parágrafo do original que a mudança alcança, SEM ambiguidade.
+
+    Prioriza ``trecho_original`` (o alvo mais específico): casa o parágrafo
+    único OU o par título+subtítulo imediatamente seguinte (a forma usada pela
+    renumeração canônica de capítulos). O alvo só vale quando identifica
+    EXATAMENTE UM parágrafo; com múltiplas correspondências devolve ``None`` —
+    o item é descartado em vez de atingir o parágrafo errado (ex.: rótulo
+    genérico 'CONSIDERANDO' ou 'CAPÍTULO III', que existem mais de uma vez no
+    documento). Sem ``trecho_original``, o ``rotulo`` só ancora se for único.
+    """
+    usados = set() if usados is None else usados
+
+    def _candidatos(alvo: str) -> list[int]:
+        alvo_chave = _chave_linha(alvo)
+        if not alvo_chave:
+            return []
+        inds: list[int] = []
+        for i, linha in enumerate(linhas):
+            if i in usados:
+                continue
+            if not (linha or "").strip():
+                continue
+            chave = _chave_linha(linha)
+            if chave == alvo_chave or chave.startswith(alvo_chave):
+                inds.append(i)
+                continue
+            if i + 1 < len(linhas):
+                prox = linhas[i + 1]
+                if not (prox or "").strip():
+                    continue
+                chave_par = chave + " " + _chave_linha(prox)
+                if chave_par == alvo_chave or chave_par.startswith(alvo_chave):
+                    inds.append(i)
+        return inds
+
+    trecho = (item.get("trecho_original") or "").strip()
+    if trecho:
+        inds = _candidatos(trecho)
+        if len(inds) == 1:
+            return inds[0]
+        return None
+    rotulo = (item.get("rotulo") or "").strip()
+    if rotulo:
+        inds = _candidatos(rotulo)
+        if len(inds) == 1:
+            return inds[0]
+    return None
 
 
 def _marca_inicial(texto: str) -> str | None:
@@ -315,11 +376,13 @@ def _proximos_subitens_texto(
     idx: int,
     limite: int = 8,
 ) -> list[tuple[int, str]]:
-    """(índice, texto) dos parágrafos-subitem (§/inciso) logo após ``idx``.
+    """(índice, texto) dos parágrafos logo após ``idx`` candidatos a absorção.
 
     Pára ao cruzar um novo artigo; parágrafos anulados (None, já removidos)
-    são pulados. Devolve apenas subitens — a base para detectar parágrafos
-    absorvidos por um ``novo_texto`` que funde caput + parágrafo/inciso."""
+    são pulados. Além dos subitens (§/inciso), inclui o PRIMEIRO parágrafo
+    comum imediatamente seguinte (ex.: subtítulo de capítulo "DAS ...") — a
+    base para detectar parágrafos absorvidos por um ``novo_texto`` que funde
+    caput + parágrafo/inciso (ou título + subtítulo) num único bloco."""
     itens: list[tuple[int, str]] = []
     for j in range(idx + 1, min(len(textos), idx + 1 + limite)):
         texto = textos[j]
@@ -331,8 +394,9 @@ def _proximos_subitens_texto(
             break
         if _RE_SUBITEM_PAR.match(texto):
             itens.append((j, texto))
-        else:
-            break
+            continue
+        itens.append((j, texto))
+        break
     return itens
 
 
@@ -430,6 +494,17 @@ def _marcar_absorvidos(
 def _ancora_para_comentario(item: dict) -> str:
     """Trecho do documento onde ancorar o comentário de uma mudança: prioriza
     o texto novo (único), senão o trecho original citado."""
+    if item.get("automatica"):
+        # Correção injetada no MESMO parágrafo: o texto final não repete nem o
+        # original nem o novo integralmente. Ancora no prefixo do trecho entre
+        # o início e a variação (intacto após a inserção verde/tachado).
+        trecho = (item.get("trecho_original") or "").strip()
+        buscar = item.get("buscar") or ""
+        if trecho and buscar:
+            pos = trecho.find(buscar)
+            if pos >= 0:
+                return trecho[: min(pos, 80)].strip() or ""
+        return _primeira_linha(trecho)[:80]
     for campo in ("novo_texto", "texto", "trecho_original"):
         valor = (item.get(campo) or "").strip()
         if valor:
@@ -444,6 +519,30 @@ _TEXTO_SEM_LASTRO = (
     "inventada ou a correção é apenas redacional)."
 )
 
+_RE_CABECALHO_CAPITULO = re.compile(
+    r"^\s*cap[íi]tulo\s+[ivxl]+", re.IGNORECASE
+)
+
+_TEXTO_RENUMERACAO_ENGINE = (
+    "Correção estrutural: numeração de capítulos reordenada para manter a "
+    "sequência numérica do documento (I..N), sem lastro em ato externo."
+)
+
+_TEXTO_RENUMERACAO_APONTAMENTO = (
+    "Correção estrutural: numeração de capítulos reordenada para corrigir a "
+    "duplicidade na numeração (sequência I..N pela ordem do documento)."
+)
+
+
+def _eh_renumeracao(item: dict) -> bool:
+    """Diz se a mudança renumera um título de capítulo (novo texto começa com
+    'CAPÍTULO N'). Essas correções não dependem de lastro em ato externo."""
+    for campo in ("trecho_original", "novo_texto"):
+        primeira = _primeira_linha(item.get(campo) or "")
+        if primeira and _RE_CABECALHO_CAPITULO.match(primeira):
+            return True
+    return False
+
 
 def _texto_comentario(item: dict) -> str:
     """Texto do comentário nativo de uma mudança, conforme a origem dela.
@@ -451,8 +550,11 @@ def _texto_comentario(item: dict) -> str:
     * Com ``lastro``: mantém o texto atual — 'Lastro: <ato>.' mais as ressalvas
       de validação/coerência quando houver (lastro validado ou aviso de
       divergência), para a equipe jurídica conferir a fonte.
+    * Renumeração de capítulo: mensagem estrutural — o comentário explica a
+      duplicidade corrigida (I..N) e NÃO inventa lastro em ato externo;
+      registra o achado da análise quando a mudança o executa.
     * Sem lastro, mas com origem em apontamento da análise aprovado: registra a
-      origem da mudança.
+      origem (com o ID do achado quando disponível).
     * Sem lastro e sem origem de análise (iniciativa do modelo): aviso
       equivalente ao de 'lastro não localizado'.
     """
@@ -466,9 +568,90 @@ def _texto_comentario(item: dict) -> str:
             if ressalva:
                 texto += f" {ressalva}"
         return texto
+    achado = (item.get("achado_id") or "").strip()
+    if item.get("automatica"):
+        texto = (
+            "Correção automática do sistema (redação): "
+            + (item.get("detalhe") or "ajuste de redação sem alterar o conteúdo.")
+        )
+        if achado:
+            texto += f" Origem: achado {achado} da análise (aprovado)."
+        return texto
+    if _eh_renumeracao(item):
+        texto = (
+            _TEXTO_RENUMERACAO_ENGINE
+            if not item.get("origem_apontamento")
+            else _TEXTO_RENUMERACAO_APONTAMENTO
+        )
+        if achado:
+            texto += f" Origem: achado {achado} da análise (aprovado)."
+        return texto
     if item.get("origem_apontamento"):
+        if achado:
+            return f"Origem: achado {achado} da análise (aprovado pelo usuário)."
         return _TEXTO_ORIGEM_APONTAMENTO
     return _TEXTO_SEM_LASTRO
+
+
+def _aplicar_automatica_inline(w_p, item: dict) -> None:
+    """Renderização cirúrgica de uma correção automática de redação.
+
+    Dentro do MESMO parágrafo, tacha apenas o trecho ``buscar`` e insere
+    ``substituir`` logo depois em verde — o parágrafo não sai inteiro tachado
+    nem nasce um parágrafo novo, e o conteúdo (objetivo) do texto é preservado.
+    """
+    texto = paragraph_text(w_p)
+    buscar = item.get("buscar") or ""
+    substituir = item.get("substituir") or ""
+    if not buscar or buscar not in texto:
+        return
+    inicio = texto.index(buscar)
+    fim = inicio + len(buscar)
+    antes, depois = texto[:inicio], texto[fim:]
+    runs = w_p.findall(qn("w:r"))
+    if not runs:
+        return
+    label_pr = runs[0].find(qn("w:rPr"))
+    best_pr = max(runs, key=_run_text).find(qn("w:rPr"))
+    for r in runs:
+        w_p.remove(r)
+
+    def _run(texto_: str, pr, cor: str | None = None, tachado: bool = False):
+        run = w_p.makeelement(qn("w:r"), {})
+        if pr is not None:
+            run.append(copy.deepcopy(pr))
+        rPr = run.find(qn("w:rPr"))
+        if cor or tachado:
+            if rPr is None:
+                rPr = run.makeelement(qn("w:rPr"), {})
+                run.insert(0, rPr)
+            if cor:
+                color = rPr.find(qn("w:color"))
+                if color is None:
+                    color = rPr.makeelement(qn("w:color"), {})
+                    rPr.append(color)
+                color.set(qn("w:val"), cor)
+            if tachado:
+                strike = rPr.find(qn("w:strike"))
+                if strike is None:
+                    strike = rPr.makeelement(qn("w:strike"), {})
+                    rPr.append(strike)
+                strike.set(qn("w:val"), "true")
+        t = run.makeelement(qn("w:t"), {})
+        t.text = texto_
+        if texto_ and texto_ != texto_.strip():
+            t.set(XML_SPACE, "preserve")
+        run.append(t)
+        return run
+
+    if antes:
+        w_p.append(_run(antes, label_pr))
+    if buscar:
+        w_p.append(_run(buscar, best_pr, cor="C62828", tachado=True))
+    if substituir:
+        w_p.append(_run(substituir, best_pr, cor="2E7D32"))
+    if depois:
+        w_p.append(_run(depois, best_pr))
 
 
 def _comentarios_das_mudancas(
@@ -652,6 +835,7 @@ def montar_docx_revisado(
         for i, ch in enumerate(children)
         if inicio <= i < fim and ch.tag == qn("w:p")
     ]
+    textos_miolo = [paragraph_text(wp) for wp in miolo_pars]
 
     def paragrafo_novo(texto: str, rotulo: str = "", papel: str = "artigo"):
         if not texto.strip() or not _pedir_paragrafo(refs, papel):
@@ -664,35 +848,26 @@ def montar_docx_revisado(
         verde(w_p)
         return w_p
 
-    def _ancoras(item: dict) -> list[str]:
-        return [
-            _chave_linha(item.get(campo) or "")
-            for campo in ("trecho_original", "rotulo")
-        ]
-
     def _encontrar(item: dict, usados: set[int]) -> int | None:
-        alvos = [a for a in _ancoras(item) if a]
-        for i, wp in enumerate(miolo_pars):
-            if i in usados:
-                continue
-            chave = _chave_linha(paragraph_text(wp))
-            if any(chave == a or chave.startswith(a) for a in alvos):
-                return i
-        return None
+        return _ancora_rigorosa(textos_miolo, item, usados)
 
     acoes: dict[int, dict] = {}
     for item in alteracoes:
         if not isinstance(item, dict):
             continue
         i = _encontrar(item, set(acoes))
-        if i is not None:
-            acoes[i] = {
-                "tipo": "alterado",
-                "novo_texto": item.get("novo_texto") or "",
-                "rotulo": item.get("rotulo") or "",
-                "requer_decisao_juridica": bool(item.get("requer_decisao_juridica")),
-            }
-            _marcar_absorvidos(acoes, i, item.get("novo_texto") or "", miolo_pars)
+        if i is None:
+            continue
+        if item.get("automatica"):
+            acoes[i] = {"tipo": "automatica", "item": item}
+            continue
+        acoes[i] = {
+            "tipo": "alterado",
+            "novo_texto": item.get("novo_texto") or "",
+            "rotulo": item.get("rotulo") or "",
+            "requer_decisao_juridica": bool(item.get("requer_decisao_juridica")),
+        }
+        _marcar_absorvidos(acoes, i, item.get("novo_texto") or "", miolo_pars)
     for item in remocoes:
         if not isinstance(item, dict):
             continue
@@ -704,6 +879,9 @@ def montar_docx_revisado(
     for i in sorted(acoes):
         wp = miolo_pars[i]
         acao = acoes[i]
+        if acao["tipo"] == "automatica":
+            _aplicar_automatica_inline(wp, acao["item"])
+            continue
         if acao["tipo"] in ("alterado", "removido", "absorvido"):
             tachar(wp)
         if acao["tipo"] == "alterado":

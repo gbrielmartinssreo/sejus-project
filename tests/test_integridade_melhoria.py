@@ -447,6 +447,105 @@ def test_duplicacoes_do_patch_detecta_repeticao_de_paragrafo_intacto():
     assert any("Art. 4º As unidades penais fornecerão materiais" in d for d in duplicados)
 
 
+# ---------------------------------------------------------------------------
+# REGRESSÃO (B2): título de capítulo fundido ao subtítulo não é duplicação
+# ---------------------------------------------------------------------------
+
+
+_CAPITULO_COM_SUBTITULO = (
+    "INSTRUÇÃO NORMATIVA Nº XX/XX/2026\n"
+    "Dispõe sobre a atividade artesanal.\n"
+    "CAPÍTULO I\n"
+    "DAS DISPOSIÇÕES INICIAIS\n"
+    "Art. 1º Disciplinar a atividade artesanal laboral.\n"
+    "CAPÍTULO II\n"
+    "DA COMERCIALIZAÇÃO\n"
+    "Art. 5º A comercialização dos produtos poderá ser realizada.\n"
+)
+
+
+def test_proximos_subitens_texto_inclui_primeiro_paragrafo_comum():
+    """O subtítulo de capítulo ("DA ...") logo após o título é candidato a
+    absorção — antes o helper só devolvia §/inciso e o helper parava no
+    primeiro parágrafo comum."""
+    textos = _CAPITULO_COM_SUBTITULO.splitlines()
+    idx = textos.index("CAPÍTULO II")
+    itens = docx_builder._proximos_subitens_texto(textos, idx, limite=8)
+    assert any("DA COMERCIALIZAÇÃO" in texto for _, texto in itens)
+
+
+def test_duplicacoes_do_patch_aceita_titulo_com_subtitulo_fundido():
+    """REGRESSÃO: reenumerar um capítulo carregando o subtítulo original no
+    'novo_texto' (ex: 'CAPÍTULO II\\nDA COMERCIALIZAÇÃO') não pode ser tratado
+    como duplicação — o subtítulo original é absorvido pelo novo texto.
+    Antes a rede de segurança derrubava o patch inteiro."""
+    alteracoes = [
+        {
+            "tipo": "alterado",
+            "rotulo": "CAPÍTULO II",
+            "trecho_original": "CAPÍTULO II",
+            "novo_texto": "CAPÍTULO III\nDA COMERCIALIZAÇÃO",
+            "detalhe": "Renumera o capítulo mantendo o subtítulo.",
+        }
+    ]
+    duplicados = minuta._duplicacoes_do_patch(
+        _CAPITULO_COM_SUBTITULO, alteracoes, [], []
+    )
+    assert duplicados == []
+
+    depois = minuta._aplicar_patch_no_texto(_CAPITULO_COM_SUBTITULO, alteracoes, [])
+    assert depois.count("DA COMERCIALIZAÇÃO") == 1
+    assert "CAPÍTULO III" in depois
+    assert "CAPÍTULO II" not in depois.replace("CAPÍTULO III", "CAPÍTULO 0")
+
+
+# ---------------------------------------------------------------------------
+# REGRESSÃO: duplicação real descarta só os culpados (aplicação parcial)
+# ---------------------------------------------------------------------------
+
+
+_PATCH_COM_3_ALTERACOES = (
+    "Art. 1º A.\n"
+    "Art. 2º B.\n"
+    "Art. 3º C.\n"
+    "Art. 4º D.\n"
+    "Art. 5º E."
+)
+
+
+def test_filtrar_patch_valido_descarta_apenas_os_culpados_da_duplicacao():
+    """Quando nenhuma remoção única resolve as duplicações, o filtro deve
+    descartar APENAS os itens que introduzem linhas duplicadas e manter o resto
+    do patch — antes descartava TUDO (a cópia intacta)."""
+    alteracoes = [
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 1º",
+            "trecho_original": "Art. 1º A.",
+            "novo_texto": "Art. 1º A.\nArt. 2º B.",
+        },
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º C.",
+            "novo_texto": "Art. 3º C.\nArt. 4º D.",
+        },
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 5º",
+            "trecho_original": "Art. 5º E.",
+            "novo_texto": "Art. 5º E e.",
+            "detalhe": "Item válido, sem duplicação.",
+        },
+    ]
+    alt, rem, adic, descartados = minuta._filtrar_patch_valido(
+        _PATCH_COM_3_ALTERACOES, alteracoes, [], []
+    )
+    assert [a["rotulo"] for a in alt] == ["Art. 5º"]
+    assert rem == [] and adic == []
+    assert set(descartados) == {"Art. 1º", "Art. 3º"}
+
+
 def _modelo_fusao(tmp_path):
     from docx import Document
 

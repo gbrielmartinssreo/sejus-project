@@ -103,6 +103,41 @@ _RE_CONFORMIDADE = [
     re.compile(r"\bcorresponde\s+aos\s+requisitos\b", re.IGNORECASE),
 ]
 
+# Falas de abertura/encerramento e resumos do próprio analista: descrevem o
+# relatório, não pedem alteração no ato. Nunca viram apontamento.
+_RE_INTRO_CONCLUSAO = re.compile(
+    r"(^\s*(?:aqui\s+est[áa]|segue\s+(?:a|o)\s|esta\s+[ée]\s+a|"
+    r"conclus[ãa]o\b|em\s+s[íi]ntese\b|resumo\b|s[íi]ntese\b)|"
+    r"crit[ée]rios\s+de\s+revis|"
+    r"\bo\s+documento\s+(?:est[áa]|foi|permanece|encontra).{0,240}"
+    r"\brecomenda-?se\b)",
+    re.IGNORECASE,
+)
+
+# Constatações de conformidade/elogio estrutural que citam 'critérios',
+# 'previsão' ou resultado positivo sem pedir mudança concreta.
+_RE_ELOGIO_ESTRUTURAL = re.compile(
+    r"\b(estabelece\s+crit[ée]rios|previs[ãa]o\s+detalhada|"
+    r"previs[ãa]o\s+de\s+crit[ée]rios|promovendo\s+(?:transpar[êe]ncia|"
+    r"seguran[çc]a\s+jur[íi]dica)|estrutura\s+(?:clara|organizada)|"
+    r"fundamenta[çc][ãa]o\s+legal\s+adequada|"
+    r"est[áa]\s+bem\s+(?:estruturad|fundamentad)|"
+    r"crit[ée]rios\s+objetivos)\b",
+    re.IGNORECASE,
+)
+
+# Instrução corretiva EXPLÍCITA (imperativo/infinitivo ou marcador de alerta).
+# Diferente de _RE_CORRECAO_FORTE, ignora gerúndios/particípios soltos
+# ('incluindo', 'detalhada') que aparecem em elogios.
+_RE_CORRECAO_IMPERATIVA = re.compile(
+    r"(⚠|\b(corrija|ajuste|consert|arrume|refa[çz]a|retifique|inclua|"
+    r"insira|acrescente|preveja|retire|remova|exclua|substitua|troque|"
+    r"atualize|complemente|detalhe|padronize|uniformize|renumere|reordene|"
+    r"reorganize|esclare[çc]a|explicite|harmonize|garanta|contemple|"
+    r"recomenda-?se|sugere-?se)\w*)",
+    re.IGNORECASE,
+)
+
 # Verbos/expressões que indicam uma instrução de alteração FORTE (não são,
 # por si, elogio). Usado para não descartar um item que aponta algo a fazer.
 _RE_CORRECAO_FORTE = re.compile(
@@ -202,7 +237,16 @@ def _e_acionavel(item: str) -> bool:
         return False
     if _RE_PROMESSA.search(texto):
         return False
+    if _RE_INTRO_CONCLUSAO.search(texto):
+        return False
     if any(padrao.search(texto) for padrao in _RE_SEM_ACAO):
+        return False
+    # Elogio estrutural ('estabelece critérios objetivos', 'previsão detalhada',
+    # 'promovendo transparência') só vale se trouxer instrução corretiva
+    # explícita — caso contrário é constatação, não tarefa.
+    if _RE_ELOGIO_ESTRUTURAL.search(texto) and not (
+        _RE_CORRECAO_IMPERATIVA.search(texto)
+    ):
         return False
     if any(padrao.search(texto) for padrao in _RE_CONFORMIDADE) and not (
         _RE_CORRECAO_FORTE.search(texto)
