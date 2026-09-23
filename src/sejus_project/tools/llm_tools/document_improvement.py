@@ -16,11 +16,15 @@ import os
 import re
 
 from sejus_project.tools.document_infra.docx_builder import (
-    _chave_linha as _chave_texto,
-)
-from sejus_project.tools.document_infra.docx_builder import (
+    _ancora_rigorosa,
     _paragrafos_absorvidos,
     _proximos_subitens_texto,
+)
+from sejus_project.tools.document_infra.docx_builder import (
+    _chave_linha as _chave_texto,
+)
+from sejus_project.tools.document_infra.analise_validacao import (
+    detectar_correcoes_redacao,
 )
 from sejus_project.tools.document_infra.modelos import PerfilModelo
 from sejus_project.tools.llm_tools.minuta_generation import (
@@ -142,15 +146,17 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                 "type": "string",
                 "enum": [ORIGEM_ANALISE_APROVADA, ORIGEM_INICIATIVA_MODELO],
                 "description": (
-                    "Origem da mudanca. 'origem_analise_aprovada' quando o item "
-                    "executa um apontamento da ANALISE que o usuario aprovou "
-                    "pedindo a correcao; 'iniciativa_modelo' quando nao "
-                    "corresponde a nenhum apontamento (decisao propria do "
-                    "modelo ao gerar o patch)."
+                    "Opcional (padrao 'iniciativa_modelo'). Origem da mudanca: "
+                    "'origem_analise_aprovada' quando o item executa um "
+                    "apontamento da ANALISE que o usuario aprovou pedindo a "
+                    "correcao; 'iniciativa_modelo' quando nao corresponde a "
+                    "nenhum apontamento (decisao propria do modelo ao gerar o "
+                    "patch). Se ausente, o sistema trata como "
+                    "'iniciativa_modelo'."
                 ),
             },
         },
-        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe", "requer_decisao_juridica", "origem"],
+        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe", "requer_decisao_juridica"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
@@ -188,15 +194,17 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
                 "type": "string",
                 "enum": [ORIGEM_ANALISE_APROVADA, ORIGEM_INICIATIVA_MODELO],
                 "description": (
-                    "Origem da mudanca. 'origem_analise_aprovada' quando o item "
-                    "executa um apontamento da ANALISE que o usuario aprovou "
-                    "pedindo a correcao; 'iniciativa_modelo' quando nao "
-                    "corresponde a nenhum apontamento (decisao propria do "
-                    "modelo ao gerar o patch)."
+                    "Opcional (padrao 'iniciativa_modelo'). Origem da mudanca: "
+                    "'origem_analise_aprovada' quando o item executa um "
+                    "apontamento da ANALISE que o usuario aprovou pedindo a "
+                    "correcao; 'iniciativa_modelo' quando nao corresponde a "
+                    "nenhum apontamento (decisao propria do modelo ao gerar o "
+                    "patch). Se ausente, o sistema trata como "
+                    "'iniciativa_modelo'."
                 ),
             },
         },
-        "required": ["rotulo", "trecho_original", "detalhe", "origem"],
+        "required": ["rotulo", "trecho_original", "detalhe"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais"] = {
@@ -266,15 +274,17 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
                 "type": "string",
                 "enum": [ORIGEM_ANALISE_APROVADA, ORIGEM_INICIATIVA_MODELO],
                 "description": (
-                    "Origem da mudanca. 'origem_analise_aprovada' quando o item "
-                    "executa um apontamento da ANALISE que o usuario aprovou "
-                    "pedindo a correcao; 'iniciativa_modelo' quando nao "
-                    "corresponde a nenhum apontamento (decisao propria do "
-                    "modelo ao gerar o patch)."
+                    "Opcional (padrao 'iniciativa_modelo'). Origem da mudanca: "
+                    "'origem_analise_aprovada' quando o item executa um "
+                    "apontamento da ANALISE que o usuario aprovou pedindo a "
+                    "correcao; 'iniciativa_modelo' quando nao corresponde a "
+                    "nenhum apontamento (decisao propria do modelo ao gerar o "
+                    "patch). Se ausente, o sistema trata como "
+                    "'iniciativa_modelo'."
                 ),
             },
         },
-        "required": ["o_que", "posicao", "detalhe", "origem"],
+        "required": ["o_que", "posicao", "detalhe"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["lacunas_identificadas"] = {
@@ -487,6 +497,18 @@ def _sistema_melhoria():
         "gerar o patch). A origem define a exigencia de lastro: itens "
         "'origem_analise_aprovada' sao aplicados mesmo sem ato no acervo; "
         "itens 'iniciativa_modelo' exigem lastro valido.\n"
+        "16. PRESERVE O OBJETIVO DO ACHADO: cada apontamento da analise tem "
+        "um objetivo especifico (corrigir grafia, sanar lacuna, renumerar "
+        "capitulos, revisar fundamento, etc.). Aplique a mudanca que CUMPRA "
+        "esse objetivo no trecho apontado — nao troque o alvo (nao use um "
+        "apontamento de renumeracao para inserir conteudo novo, nem um de "
+        "redacao para mexer em numeros). Se o apontamento pedir AMPLIACAO de "
+        "conteudo (novo prazo, nova exigencia, novo capitulo): proponha em "
+        "'adicoes_estruturais' OU, quando nao houver como ancorar sem alterar "
+        "a estrutura original, marque 'nao_aplicado' com impedimento concreto "
+        "e justificado no 'motivo' (o sistema registra a proposta como "
+        "pendente de decisao). Nao transforme a correcao de um tema em "
+        "reescrita integral de outro trecho.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -730,24 +752,10 @@ def _aplicar_patch_no_texto(
     """
     linhas: list[str | None] = list((conteudo or "").splitlines())
 
-    def _encontrar(campos: dict) -> int | None:
-        alvos = [
-            _chave_linha(campos.get(nome) or "")
-            for nome in ("trecho_original", "rotulo")
-        ]
-        alvos = [a for a in alvos if a]
-        for i, linha in enumerate(linhas):
-            if linha is None:
-                continue
-            chave = _chave_linha(linha)
-            if any(chave == a or chave.startswith(a) for a in alvos):
-                return i
-        return None
-
     for a in alteracoes:
         if not isinstance(a, dict):
             continue
-        i = _encontrar(a)
+        i = _ancora_rigorosa(linhas, a, set())
         if i is not None:
             novo_texto = (a.get("novo_texto") or "").strip()
             linhas[i] = novo_texto
@@ -760,7 +768,7 @@ def _aplicar_patch_no_texto(
     for r in remocoes:
         if not isinstance(r, dict):
             continue
-        i = _encontrar(r)
+        i = _ancora_rigorosa(linhas, r, set())
         if i is not None:
             linhas[i] = None
     return "\n".join(linha for linha in linhas if linha is not None)
@@ -782,40 +790,25 @@ def _linhas_novas_de(item: dict) -> list[str]:
     return textos
 
 
-def _duplicacoes_do_patch(
+def _duplicacoes_detalhado(
     conteudo: str,
     alteracoes: list[dict],
     remocoes: list[dict],
     adicoes: list[dict],
-) -> list[str]:
-    """Detecta parágrafos que ficariam DUPLICADOS no texto final.
+) -> tuple[list[str], dict[int, list[tuple[str, int]]]]:
+    """Versão estruturada de ``_duplicacoes_do_patch``.
 
-    Rede de segurança além da marcação de parágrafos absorvidos: simula o patch
-    ("depois" com aceitação vs. rejeição) e compara. Se um parágrafo original
-    não afetado pelas mudanças reaparecer (chave normalizada) entre os textos
-    novos — do novo_texto de uma alteração ou do texto de uma adição — o patch
-    está inconsistente. Devolve mensagens legíveis (integra a ``PatchIntegrityError``)."""
+    Além das mensagens, devolve, para cada parágrafo original que ficaria
+    duplicado, a lista de ``(grupo, indice)`` dos itens do patch responsáveis
+    por introduzir a linha duplicada — permite descartar apenas os culpados
+    em vez de derrubar o patch inteiro."""
     linhas: list[str | None] = list((conteudo or "").splitlines())
-
-    def _encontrar(item: dict, usados: set[int]) -> int | None:
-        alvos = [
-            _chave_linha(item.get(nome) or "")
-            for nome in ("trecho_original", "rotulo")
-        ]
-        alvos = [a for a in alvos if a]
-        for i, linha in enumerate(linhas):
-            if i in usados or not linha:
-                continue
-            chave = _chave_linha(linha)
-            if any(chave == a or chave.startswith(a) for a in alvos):
-                return i
-        return None
 
     afetados: set[int] = set()
     for a in alteracoes:
         if not isinstance(a, dict):
             continue
-        i = _encontrar(a, afetados)
+        i = _ancora_rigorosa(linhas, a, afetados)
         if i is None:
             continue
         novo_texto = (a.get("novo_texto") or "").strip()
@@ -829,30 +822,52 @@ def _duplicacoes_do_patch(
     for r in remocoes:
         if not isinstance(r, dict):
             continue
-        i = _encontrar(r, afetados)
+        i = _ancora_rigorosa(linhas, r, afetados)
         if i is None:
             continue
         linhas[i] = None
         afetados.add(i)
 
-    novos: set[str] = set()
-    for grupo in (alteracoes, adicoes):
-        for item in grupo:
+    fontes: dict[str, list[tuple[str, int]]] = {}
+    for nome_grupo, grupo in (
+        ("alteracoes", alteracoes),
+        ("adicoes_estruturais", adicoes),
+    ):
+        for indice, item in enumerate(grupo):
             if not isinstance(item, dict):
                 continue
             for linha in _linhas_novas_de(item):
                 chave = _chave_linha(linha)
                 if chave:
-                    novos.add(chave)
+                    fontes.setdefault(chave, []).append((nome_grupo, indice))
 
     duplicados: list[str] = []
+    fontes_por_linha: dict[int, list[tuple[str, int]]] = {}
     for i, linha in enumerate(linhas):
         if i in afetados or not linha:
             continue
         chave = _chave_linha(linha)
-        if chave and chave in novos:
+        if chave and chave in fontes:
             trecho = next((l.strip() for l in linha.splitlines() if l.strip()), "")
             duplicados.append(f"parágrafo '{trecho[:90]}' duplicado após aplicar a alteração")
+            fontes_por_linha[i] = fontes[chave]
+    return duplicados, fontes_por_linha
+
+
+def _duplicacoes_do_patch(
+    conteudo: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> list[str]:
+    """Detecta parágrafos que ficariam DUPLICADOS no texto final.
+
+    Rede de segurança além da marcação de parágrafos absorvidos: simula o patch
+    ("depois" com aceitação vs. rejeição) e compara. Se um parágrafo original
+    não afetado pelas mudanças reaparecer (chave normalizada) entre os textos
+    novos — do novo_texto de uma alteração ou do texto de uma adição — o patch
+    está inconsistente. Devolve mensagens legíveis (integra a ``PatchIntegrityError``)."""
+    duplicados, _ = _duplicacoes_detalhado(conteudo, alteracoes, remocoes, adicoes)
     return duplicados
 
 
@@ -911,22 +926,144 @@ def _construir_estrutura(
 def _item_tem_ancora(conteudo: str, item: dict) -> bool:
     """Diz se o 'trecho_original'/'rotulo' de um item ancora no texto ORIGINAL.
 
-    Usado tanto pela sanidade do patch quanto pela validacao da cobertura dos
-    apontamentos: uma mudanca sem ancora resolvivel nao foi aplicada de fato."""
-    linhas = [linha for linha in (conteudo or "").splitlines() if linha.strip()]
-    chaves = [_chave_linha(linha) for linha in linhas]
-    alvos = [
-        _chave_linha(item.get(nome) or "")
-        for nome in ("trecho_original", "rotulo")
+    Ancoragem ESTRITA: ``trecho_original`` precisa identificar UM parágrafo
+    (único parágrafo ou par título+subtítulo); rótulo genérico (ex.:
+    'CONSIDERANDO', 'CAPÍTULO III' — que existem mais de uma vez) é tratado
+    como AMBÍGUO e não ancora, para a mudança não atingir parágrafo errado.
+    Usado pela sanidade do patch e pela validação da cobertura dos apontamentos:
+    mudança sem âncora inequívoca não é aplicada de fato."""
+    linhas = (conteudo or "").splitlines()
+    return _ancora_rigorosa(linhas, item, set()) is not None
+
+
+# ---------------------------------------------------------------------------
+# Renumeração canônica de capítulos (sequência I..N pela ordem do documento)
+# ---------------------------------------------------------------------------
+
+_ARABICOS_POR_ROMANO = {
+    "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6,
+    "vii": 7, "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12,
+    "xiii": 13, "xiv": 14, "xv": 15, "xvi": 16, "xvii": 17,
+    "xviii": 18, "xix": 19, "xx": 20,
+}
+
+_ROMANO_POR_ARABICO = {
+    valor: romano
+    for romano, valor in _ARABICOS_POR_ROMANO.items()
+}
+
+
+def _numeral_capitulo(texto: str) -> str | None:
+    """Numeral romano de um cabeçalho 'CAPÍTULO N' (com/sem acento) ou None."""
+    sem_acento = _remover_acentos(texto or "")
+    m = re.match(r"^\s*capitulo\s+([ivxl]+)\b", sem_acento, re.IGNORECASE)
+    return m.group(1).casefold() if m else None
+
+
+def _romano_para_int(romano: str) -> int | None:
+    return _ARABICOS_POR_ROMANO.get((romano or "").casefold())
+
+
+def _int_para_romano(num: int) -> str:
+    romano = _ROMANO_POR_ARABICO.get(num)
+    if romano:
+        return romano
+    return "XX"
+
+
+def _subtitulo_de_capitulo(linhas: list[str], idx: int) -> str:
+    """Primeira linha não-vazia após um título de capítulo (o subtítulo 'DA
+    ...') sem atravessar outro cabeçalho. Vazio quando não houver subtítulo."""
+    for j in range(idx + 1, len(linhas)):
+        linha = (linhas[j] or "").strip()
+        if not linha:
+            continue
+        if _numeral_capitulo(linha):
+            return ""
+        return linha
+    return ""
+
+
+def _renumeracao_canonica_capitulos(conteudo: str) -> list[dict]:
+    """Alterações que reordenam a numeração dos capítulos na forma CANÔNICA.
+
+    Validade pela ORDEM dos cabeçalhos no documento: o k-ésimo capítulo recebe
+    o numeral k (I..N), mantendo o PRIMEIRO de cada numeração repetida — no
+    caso de dois 'CAPÍTULO III', o primeiro permanece III e os seguintes são
+    renumerados. Devolve vazio quando a sequência já é contígua I..N. Cada item
+    carrega o subtítulo no ``trecho_original``/``novo_texto`` (âncora única).
+    """
+    linhas = (conteudo or "").splitlines()
+    indices = [
+        i
+        for i, linha in enumerate(linhas)
+        if _romano_para_int(_numeral_capitulo(linha))
     ]
-    alvos = [a for a in alvos if a]
-    if not alvos:
-        return False
-    return any(
-        chave == a or chave.startswith(a)
-        for chave in chaves
-        for a in alvos
-    )
+    planos: list[dict] = []
+    for pos, idx in enumerate(indices):
+        romano_atual = _numeral_capitulo(linhas[idx])
+        alvo = pos + 1
+        if _romano_para_int(romano_atual) == alvo:
+            continue
+        sub = _subtitulo_de_capitulo(linhas, idx)
+        trecho = linhas[idx].strip()
+        novo = f"CAPÍTULO {_int_para_romano(alvo).upper()}"
+        if sub:
+            trecho = f"{trecho}\n{sub}"
+            novo = f"{novo}\n{sub}"
+        planos.append(
+            {
+                "tipo": "corrigido",
+                "rotulo": f"CAPÍTULO {romano_atual.upper()}",
+                "trecho_original": trecho,
+                "novo_texto": novo,
+                "detalhe": (
+                    "Renumeração automática do sistema para manter a sequência "
+                    "numérica dos capítulos (I..N) pela ordem do documento."
+                ),
+                "renumeracao_engine": True,
+            }
+        )
+    return planos
+
+
+def _romano_ancorado(conteudo: str, item: dict) -> str | None:
+    """Numeral do cabeçalho QUE a mudança alcança no original (via âncora
+    estrita), para saber se o item muda o número do capítulo."""
+    linhas = (conteudo or "").splitlines()
+    i = _ancora_rigorosa(linhas, item, set())
+    if i is None:
+        return None
+    return _numeral_capitulo(linhas[i])
+
+
+def _substituir_renumeracao_do_modelo(
+    conteudo: str,
+    alteracoes: list[dict],
+    canonicas: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Troca/restringe a numeração de capítulos propostas pelo modelo.
+
+    A numeração de capítulos passa a ser garantida pelo SISTEMA: itens do
+    modelo que mudam o numeral de um cabeçalho são descartados e substituídos
+    pelas alterações canônicas (I..N). Itens que alteram APENAS o subtítulo
+    (mesmo numeral) são mantidos. Devolve ``(alteracoes, descartados)``."""
+    mantidos: list[dict] = []
+    descartados: list[str] = []
+    for a in alteracoes:
+        if not isinstance(a, dict):
+            continue
+        num_atual = _romano_ancorado(conteudo, a)
+        num_novo = (
+            _numeral_capitulo(a.get("novo_texto") or "")
+            or _numeral_capitulo(a.get("trecho_original") or "")
+        )
+        if num_atual and num_novo and num_atual != num_novo:
+            descartados.append(a.get("rotulo") or "?")
+            continue
+        mantidos.append(a)
+    mantidos.extend(canonicas)
+    return mantidos, descartados
 
 
 def _problemas_do_patch(
@@ -1016,7 +1153,12 @@ def _filtrar_patch_valido(
         + [_rotulo(a) for a in adicoes if not _ok_add(a)]
     )
 
-    while _duplicacoes_do_patch(conteudo, alt, rem, adic):
+    while True:
+        duplicados, fontes_por_linha = _duplicacoes_detalhado(
+            conteudo, alt, rem, adic
+        )
+        if not duplicados:
+            break
         resolvido = False
         for lista_nome in ("alt", "adic", "rem"):
             lista = {"alt": alt, "adic": adic, "rem": rem}[lista_nome]
@@ -1040,9 +1182,42 @@ def _filtrar_patch_valido(
                     break
             if resolvido:
                 break
-        if not resolvido:
-            # Não foi possível tornar o patch válido: descarta tudo (não aplica
-            # patch inválido; o chamador entrega a cópia intacta).
+        if resolvido:
+            continue
+        # Nenhuma remoção única resolve: descarta apenas os itens que
+        # INTRODUZEM as linhas duplicadas, mantendo o restante do patch
+        # aplicável (aplicação parcial em vez de derrubar tudo).
+        culpaveis: set[tuple[str, int]] = set()
+        for fontes in fontes_por_linha.values():
+            culpaveis.update(fontes)
+        if not culpaveis:
+            # Sem culpado identificável: não aplica patch inválido (entrega a
+            # cópia intacta em vez de texto duplicado).
+            descartados.extend(_rotulo(a) for a in alt)
+            descartados.extend(_rotulo(r) for r in rem)
+            descartados.extend(_rotulo(a) for a in adic)
+            return [], [], [], descartados
+        por_grupo: dict[str, list[int]] = {}
+        _MAP_GRUPO = {
+            "alteracoes": "alt",
+            "remocoes": "rem",
+            "adicoes_estruturais": "adic",
+        }
+        for nome_grupo, indice in culpaveis:
+            lista_nome = _MAP_GRUPO.get(nome_grupo)
+            if lista_nome is None:
+                continue
+            por_grupo.setdefault(lista_nome, []).append(indice)
+        removidos = 0
+        for lista_nome, indices in por_grupo.items():
+            lista = {"alt": alt, "adic": adic, "rem": rem}[lista_nome]
+            for indice in sorted(indices, reverse=True):
+                if 0 <= indice < len(lista):
+                    descartados.append(_rotulo(lista[indice]))
+                    del lista[indice]
+                    removidos += 1
+        if removidos == 0:
+            # Indices fora do alcance: evita loop infinito (desiste do patch).
             descartados.extend(_rotulo(a) for a in alt)
             descartados.extend(_rotulo(r) for r in rem)
             descartados.extend(_rotulo(a) for a in adic)
@@ -1306,6 +1481,138 @@ def _validar_cobertura(
     return cobertura
 
 
+# ===========================================================================
+# Reconciliar cobertura com correções automáticas (numeração de capítulos e
+# redação) na MESMA rastreabilidade dos patches do modelo.
+# ===========================================================================
+
+_RE_AP_RENUMERACAO = re.compile(
+    r"renumer|cascat\w*|sequ[eê]nci\w* de cap|duplic\w* de cap|"
+    r"cap[ií]tulo (?:repetid\w*|duplicad\w*)|numera\w* de cap|"
+    r"ordem dos cap[ií]tulos",
+    re.IGNORECASE,
+)
+
+_RE_AP_REDACAO = re.compile(
+    r"ortograf|grafia|parafins|jun[cç][aã]\w*|reda[cç][aã]\w*|"
+    r"escrit\w* (?:de|do|incorret)|acentua[cç][aã]\w*",
+    re.IGNORECASE,
+)
+
+
+def _categoria_apontamento(apontamento: str) -> str:
+    if _RE_AP_RENUMERACAO.search(apontamento or ""):
+        return "renumeracao"
+    if _RE_AP_REDACAO.search(apontamento or ""):
+        return "redacao"
+    return ""
+
+
+def _categoria_item(item: dict) -> str:
+    if item.get("renumeracao_engine"):
+        return "renumeracao"
+    if item.get("automatica"):
+        return "redacao"
+    return ""
+
+
+def _reconciliar_cobertura_automatica(
+    cobertura: list[dict],
+    alteracoes: list[dict],
+    apontamentos: list[dict],
+) -> list[dict]:
+    """Reconcilia a cobertura com as correções automáticas do sistema.
+
+    (1) Apontamentos marcados como ``nao_aplicado``/``falhou`` que são em
+    realidade resolvidos por uma correção automática (renumeração canônica de
+    capítulos ou correção de redação) passam ao status PELO RESULTADO EFETIVO
+    (``aplicado``), justificado com a referência à correção — capítulos I..N
+    não podem terminar 'nao_aplicado'. (2) As correções automáticas sem
+    apontamento correspondente ganham linha própria de rastreabilidade
+    (``auto-*``), com a mesma estrutura do painel."""
+    automaticas = [
+        a for a in alteracoes
+        if isinstance(a, dict) and _categoria_item(a) != ""
+    ]
+    if not automaticas:
+        return cobertura
+
+    usadas: set[int] = set()
+    for entrada in cobertura or []:
+        if not isinstance(entrada, dict):
+            continue
+        if (entrada.get("status") or "").strip().casefold() not in (
+            STATUS_NAO_APLICADO,
+            STATUS_FALHOU,
+        ):
+            continue
+        categoria = _categoria_apontamento(str(entrada.get("apontamento") or ""))
+        if not categoria:
+            continue
+        for i, item in enumerate(automaticas):
+            if i in usadas or _categoria_item(item) != categoria:
+                continue
+            usadas.add(i)
+            entrada["status"] = STATUS_APLICADO
+            entrada["referencia"] = (
+                item.get("rotulo") or entrada.get("referencia") or ""
+            )
+            entrada["motivo"] = (
+                "resolvido por correção automática do sistema: "
+                + (item.get("detalhe") or item.get("motivo") or "")
+            )
+            item["origem_apontamento"] = True
+            item["achado_id"] = (
+                str(entrada.get("apontamento_id") or "")
+                or str(item.get("achado_id") or "")
+                or None
+            )
+            break
+
+    rotulos_ja = {
+        _chave_texto(str(c.get("referencia") or ""))
+        for c in cobertura
+        if isinstance(c, dict)
+    }
+    ajustes = list(alteracoes)
+    for i, item in enumerate(automaticas):
+        if i in usadas:
+            continue
+        rotulo = item.get("rotulo") or ""
+        if _chave_texto(rotulo) in rotulos_ja:
+            continue
+        fonte = "renumeração de capítulos" if _categoria_item(item) == "renumeracao" \
+            else "correção automática de redação"
+        item2 = dict(item)
+        rotulo_num = _numeral_capitulo(item2.get("novo_texto") or "") \
+            or _numeral_capitulo(item2.get("trecho_original") or "")
+        if rotulo_num and _categoria_item(item) == "renumeracao":
+            rotulo = f"CAPÍTULO {rotulo_num.upper()}"
+        cobertura.append({
+            "apontamento_id": f"auto-{_slug(item, ajustes)}",
+            "apontamento": f"Correção automática do sistema: {fonte}.",
+            "origem": "sistema (correção automática)",
+            "status": STATUS_APLICADO,
+            "referencia": rotulo,
+            "motivo": item.get("detalhe") or "correção automática aplicada",
+        })
+        rotulos_ja.add(_chave_texto(rotulo))
+    return cobertura
+
+
+def _slug(item: dict, alteracoes: list[dict]) -> str:
+    """Identificador estável (8 hex) para a linha de rastreabilidade auto-*."""
+    import hashlib
+
+    chave = (
+        str(item.get("rotulo") or "")
+        + "|" + str(item.get("buscar") or "")
+        + "|" + str(item.get("trecho_original") or "")
+        + "|" + str(len(alteracoes))
+    )
+    return hashlib.sha1(chave.encode("utf-8")).hexdigest()[:8]
+
+
 def _marcar_origem_apontamento(
     alteracoes: list[dict],
     remocoes: list[dict],
@@ -1332,6 +1639,7 @@ def _marcar_origem_apontamento(
         item = localizada[1]
         if isinstance(item, dict):
             item["origem_apontamento"] = True
+            item["achado_id"] = (entrada.get("apontamento_id") or "") or None
 
 
 def _problemas_cobertura(
@@ -1704,11 +2012,30 @@ def gerar_estrutura_melhoria(
         remocoes = _dedupe_mudancas(remocoes)
         adicoes = _dedupe_mudancas(adicoes)
 
+    # Correções automáticas de redação verificáveis sobre o ORIGINAL (ex.:
+    # 'parágrafo único do 20' -> 'parágrafo único do art. 20', 'parafins' ->
+    # 'para fins') entram no MESMO patch e na MESMA rastreabilidade dos itens
+    # do modelo. São ancoradas por parágrafo inteiro e não alteram o conteúdo —
+    # só a grafia/forma, preservando o objetivo de cada achado.
+    alteracoes = _dedupe_mudancas(
+        detectar_correcoes_redacao(conteudo) + alteracoes
+    )
+
+    # Numeração de capítulos é responsabilidade do SISTEMA: renumeração
+    # proposta pelo modelo (que tende a deslocar TODA a cascata e errar o
+    # primeiro capítulo duplicado) é substituída pela forma canônica —
+    # sequência I..N pela ordem dos documentos, preservando os títulos.
+    canonicas = _renumeracao_canonica_capitulos(conteudo)
+    alteracoes, descartados_renumeracao = _substituir_renumeracao_do_modelo(
+        conteudo, alteracoes, canonicas
+    )
+
     # Não aplica patch inválido: descarta itens sem âncora ou que causariam
     # duplicação. Se nada sobrar, a entrega será a cópia intacta do original.
     alteracoes, remocoes, adicoes, descartados = _filtrar_patch_valido(
         conteudo, alteracoes, remocoes, adicoes
     )
+    descartados = descartados_renumeracao + descartados
 
     # Cobertura dos apontamentos validada UMA vez sobre o patch consolidado.
     cobertura = _validar_cobertura(
@@ -1718,6 +2045,9 @@ def gerar_estrutura_melhoria(
         adicoes,
         apontamentos,
         _dedupe_declarada(declarada),
+    )
+    cobertura = _reconciliar_cobertura_automatica(
+        cobertura, alteracoes, apontamentos
     )
     estrutura = _construir_estrutura(conteudo, alteracoes, remocoes, numero, ementa)
     estrutura["_cobertura_analise"] = cobertura

@@ -1,11 +1,13 @@
 import inspect
 import json
 import re
+import traceback
 
 from sejus_project.agent.skills.loader import (
     build_system_message,
 )
 from sejus_project.llm.ia import perguntar
+from sejus_project.tools.document_infra import docx_validacao
 from sejus_project.tools.llm_tools import analysis_registry
 from sejus_project.tools.llm_tools.document_generation import (
     aceitar_proposta,
@@ -130,11 +132,17 @@ SYSTEM_INSTRUCTIONS = (
     "o arquivo corrigido (ex.: 'consegue fazer a correcao?', 'me de o arquivo "
     "corrigido'), use a ferramenta melhorar_documento_usuario — NAO use "
     "gerar_documento_normativo e NAO abra formulario de campos de um ato novo. "
+    "Ao oferecer entregar o arquivo apos a analise, fale em 'aplicar as "
+    "correcoes via melhoria e gerar o arquivo corrigido' — nunca trate isso "
+    "como 'gerar o arquivo' de um ato novo a partir de template. "
     "A melhoria recebe automaticamente os apontamentos acionaveis da analise "
     "registrada para aquele documento: aplique-os ao original e, para cada "
     "apontamento, garanta desfecho explicito (aplicado ou justificativa de "
     "por que nao pode ser aplicado). Nao faca uma revisao independente que "
-    "descarte a analise nem invente correcoes que ela nao apontou.\n"
+    "descarte a analise nem invente correcoes que ela nao apontou. "
+    "Se, depois da analise, o usuario responder so com uma confirmacao curta "
+    "('sim', 'pode', 'pode gerar'), isso autoriza aplicar os apontamentos — "
+    "chame melhorar_documento_usuario, NAO gere ato novo.\n"
     "Se gerar_documento_normativo retornar status 'melhoria_necessaria', "
     "encaminhe para melhorar_documento_usuario com o arquivo e os "
     "apontamentos indicados; nunca insista na geracao.\n"
@@ -294,6 +302,7 @@ def _executar_tool(tool_call):
             result = function(**arguments)
 
     except Exception as error:  # noqa: BLE001
+        traceback.print_exc()
         return json.dumps(
             {
                 "status": "error",
@@ -340,6 +349,59 @@ def _cobertura_para_texto(cobertura) -> str:
             elif status != "aplicado" and motivo:
                 sufixo = f" — {motivo}"
             linhas.append(f"- {texto}{sufixo}")
+    return "\n".join(linhas)
+
+
+def _passagens_para_texto(passagens: list | None) -> str:
+    """Registro das cinco passagens de validação pós-geração (resultado + tempo)."""
+    if not passagens:
+        return ""
+    ok = all(p.get("ok") for p in passagens)
+    cabecalho = (
+        "Validação pós-geração (5 passagens): todas passaram."
+        if ok
+        else "Validação pós-geração (5 passagens): falhas identificadas e "
+        "itens responsáveis descartados."
+    )
+    return f"\n\n{cabecalho}\n{docx_validacao.resumo_passagens(passagens)}"
+
+
+def _passagens_analise_para_texto(passagens: list | None) -> str:
+    """As cinco passagens de ANÁLISE (antes da melhoria), DISTINCTAS das
+    pós-geração: cada uma com a chamada executada, o resultado e a duração."""
+    if not passagens:
+        return ""
+    linhas = ["Passagens de análise (antes da melhoria):"]
+    for p in passagens:
+        marcador = "OK" if p.get("ok") else "FALHA"
+        chamadas = p.get("chamadas") or []
+        detalhe_chamadas = "; ".join(
+            f"{c.get('funcao', '?')}"
+            + (
+                f"({c['alvos']} alvos)"
+                if isinstance(c.get("alvos"), int) else ""
+            )
+            for c in chamadas
+        ) or "sem chamadas registradas"
+        linhas.append(
+            f"- {p.get('passo', '?')} — {marcador} "
+            f"({p.get('tempo_ms', 0)} ms) | chamadas: {detalhe_chamadas} "
+            f"| {p.get('resultado', '')}"
+        )
+    return "\n".join(linhas)
+
+
+def _achados_descartados_para_texto(descartados: list | None) -> str:
+    """Achados descartados na conferência, com o motivo concreto."""
+    if not descartados:
+        return ""
+    linhas = [
+        f"A conferência dos achados descartou {len(descartados)} "
+        "(contradizem o original ou não são instrução de alteração):"
+    ]
+    for d in descartados[:15]:
+        texto = str(d.get("apontamento") or "")[:140]
+        linhas.append(f"- {texto} — {d.get('motivo', '')}")
     return "\n".join(linhas)
 
 
@@ -403,6 +465,9 @@ def _resposta_melhoria(result: dict) -> str:
         cobertura = _cobertura_para_texto(result.get("apontamentos_analise"))
         if cobertura:
             resposta += f"\n\n{cobertura}"
+        resposta += _passagens_analise_para_texto(result.get("passagens_analise"))
+        resposta += _achados_descartados_para_texto(result.get("achados_descartados"))
+        resposta += _passagens_para_texto(result.get("passagens"))
         outros = result.get("outros") or []
         if outros:
             resposta += (
@@ -437,12 +502,17 @@ def _resposta_melhoria(result: dict) -> str:
     if cobertura:
         resposta += f"\n\n{cobertura}"
 
+    resposta += _passagens_analise_para_texto(result.get("passagens_analise"))
+    resposta += _achados_descartados_para_texto(result.get("achados_descartados"))
+
     if result.get("descartados"):
         resposta += (
             "\n\nMudanças inválidas descartadas: "
             + ", ".join(dict.fromkeys(result.get("descartados")))
             + "."
         )
+
+    resposta += _passagens_para_texto(result.get("passagens"))
 
     outros = result.get("outros") or []
 
@@ -591,6 +661,39 @@ def _tratar_melhoria_direta(question):
     return None
 
 
+def _is_afirmacao(question: str) -> bool:
+    """Confirmação curta do usuário ("sim", "pode", "concordo"...).
+
+    Usada para reconhecer a aprovação da ENTREGA do arquivo corrigido depois
+    que o agente já analisou o documento: nesse caso o "sim" não fala de um
+    ato novo, e sim autoriza aplicar os apontamentos da análise no original."""
+    texto = (question or "").strip()
+    if not texto:
+        return False
+    simples = {
+        "sim", "s", "ok", "okay", "claro", "concordo", "confirmo",
+        "confirma", "pode", "prossiga", "continua", "continue",
+        "pode gerar", "pode fazer", "pode seguir", "pode inventar",
+        "pode sim", "pode gerar sim", "claro que pode", "sim, pode",
+    }
+    normalizado = " ".join(texto.casefold().split())
+    if normalizado in simples:
+        return True
+    # Aprovação seguida de conteúdo curto: "sim, pode gerar o arquivo",
+    # "pode gerar o arquivo corrigido". Pergunta ("?") não é aprovação.
+    if normalizado.endswith("?"):
+        return False
+    aprovacoes = (
+        "sim", "ok", "okay", "claro", "concordo", "confirmo", "confirma",
+        "prossiga", "continua", "continue", "pode", "pode sim", "pode gerar",
+        "pode fazer", "pode seguir", "pode inventar",
+    )
+    return any(
+        normalizado.startswith(aprovacao + " ") or normalizado.startswith(aprovacao + ",")
+        for aprovacao in aprovacoes
+    ) and len(normalizado) <= 80
+
+
 def _tratar_correcao_direta(question):
     """Encaminha pedido de correção de um documento JÁ ANALISADO para a melhoria.
 
@@ -598,9 +701,16 @@ def _tratar_correcao_direta(question):
     explícitos de melhoria), aqui o gatilho é uma intenção de corrigir/entregar
     o arquivo corrigido depois que o agente já o analisou. Passa os apontamentos
     acionáveis da análise registrada para que a melhoria os aplique ao original
-    — sem abrir o formulário de geração de um ato novo."""
+    — sem abrir o formulário de geração de um ato novo.
 
-    if not pedido_de_correcao(question):
+    Uma confirmação curta ("sim"/"pode gerar") também aciona a melhoria quando
+    há análise registrada: depois da análise, acompanhada da oferta do agente de
+    entregar o arquivo corrigido, o "sim" não é pedido de ato novo."""
+    correcao = pedido_de_correcao(question)
+    confirmacao = False
+    if not correcao:
+        confirmacao = _is_afirmacao(question) and bool(analise_para_correcao())
+    if not correcao and not confirmacao:
         return None
 
     analise = analise_para_correcao()
@@ -777,6 +887,7 @@ def _executar_loop_agente(question: str = ""):
             )
 
         except Exception as error:  # noqa: BLE001
+            traceback.print_exc()
             mensagem_erro = (
                 f"Não foi possível consultar o modelo de linguagem: "
                 f"{error}"

@@ -344,7 +344,6 @@ def test_melhoria_definition_tem_remocoes_adicoes_e_lacunas():
         "rotulo",
         "trecho_original",
         "detalhe",
-        "origem",
     ]
 
 
@@ -412,15 +411,18 @@ def test_schema_estende_lastro_e_requer_decisao_juridica():
     assert "lastro" in remocoes
     assert "requer_decisao_juridica" in adicoes
     assert "[PRAZO A DEFINIR PELA SECRETARIA]" in minuta._sistema_melhoria()
-    # Origem por item (apontamento aprovado vs. iniciativa do modelo).
+    # Origem por item (apontamento aprovado vs. iniciativa do modelo) é
+    # OPCIONAL no schema: quando ausente, o motor assume 'iniciativa_modelo'
+    # (padrão) e só marca 'origem_analise_aprovada' com vínculo real na
+    # cobertura da análise.
     for grupo in (alteracoes, remocoes, adicoes):
         assert grupo["origem"]["enum"] == [
             minuta.ORIGEM_ANALISE_APROVADA,
             minuta.ORIGEM_INICIATIVA_MODELO,
         ]
-    assert "origem" in props["alteracoes"]["items"]["required"]
-    assert "origem" in props["remocoes"]["items"]["required"]
-    assert "origem" in props["adicoes_estruturais"]["items"]["required"]
+    assert "origem" not in props["alteracoes"]["items"]["required"]
+    assert "origem" not in props["remocoes"]["items"]["required"]
+    assert "origem" not in props["adicoes_estruturais"]["items"]["required"]
     sistema = minuta._sistema_melhoria()
     assert "origem_analise_aprovada" in sistema
     assert "iniciativa_modelo" in sistema

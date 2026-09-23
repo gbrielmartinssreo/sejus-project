@@ -1212,12 +1212,21 @@ def test_fluxo_completo_analise_aprofundamento_correcao_docx(monkeypatch, tmp_pa
         c["apontamento_id"]: c for c in generation.ultima_comparacao()["apontamentos_analise"]
     }
     assert cobertura[id_incisos]["status"] == "aplicado"
-    assert cobertura[id_renumerar]["status"] == "nao_aplicado"
-    assert "decisão" in cobertura[id_renumerar]["motivo"]
-    vigencia = next(
-        c for c in cobertura.values() if "vigência" in c["apontamento"]
+    assert cobertura[id_renumerar]["status"] == "aplicado"
+    assert "correção automática do sistema" in cobertura[id_renumerar]["motivo"]
+    # O apontamento de vigência é CONTRADITADO pela conferência: o documento já
+    # tem o artigo de vigência (Art. 33 'entra em vigor'), então não vira tarefa
+    # nem entra no painel de cobertura — fica registrado nos descartados.
+    id_vigencia = next(
+        a["id"] for a in apontamentos if "vigência" in a["texto"]
     )
-    assert vigencia["status"] == "falhou"
+    assert id_vigencia not in cobertura
+    descartados_analise = generation.ultima_comparacao().get(
+        "achados_descartados"
+    ) or []
+    assert any(
+        d.get("apontamento_id") == id_vigencia for d in descartados_analise
+    )
 
     # DOCX: incisos II e IV antigos tachados; novos aparecem uma vez.
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -1257,7 +1266,11 @@ def test_fluxo_completo_analise_aprofundamento_correcao_docx(monkeypatch, tmp_pa
         " ".join(t.text or "" for t in c.iter(ns + "t")) for c in tree_comentarios.iter(ns + "comment")
     ]
     assert any(
-        t and "Origem: apontamento da análise, aprovado pelo usuário." in t
+        t
+        and "Origem:" in t
+        and "da análise" in t
+        and "aprovado" in t
+        and "achado" in t
         for t in textos_comentarios
     )
     n_comentarios = len(list(tree_comentarios.iter(ns + "comment")))
@@ -1280,20 +1293,21 @@ _ALTERACAO_INVALIDA = {
 }
 
 
-def _preparar_melhoria(monkeypatch, tmp_path, patch):
+def _preparar_melhoria(monkeypatch, tmp_path, patch, conteudo=None):
     from docx import Document
 
     from sejus_project.tools.document_infra.modelos import PORTARIA, PerfilModelo
 
+    conteudo = _DOC19 if conteudo is None else conteudo
     generation.limpar_estado()
     modelo = tmp_path / "USUARIO.docx"
     doc = Document()
-    for linha in _DOC19.splitlines():
+    for linha in conteudo.splitlines():
         doc.add_paragraph(linha)
     doc.save(str(modelo))
 
     monkeypatch.setattr(generation, "_resolve_file", lambda n: modelo)
-    monkeypatch.setattr(generation, "extract_file_text", lambda p: _DOC19)
+    monkeypatch.setattr(generation, "extract_file_text", lambda p: conteudo)
     monkeypatch.setattr(generation, "retrieve", lambda *a, **k: [])
     monkeypatch.setattr(generation, "_salvar_propostas_disc", lambda *a, **k: None)
     monkeypatch.setattr(generation, "OUTPUTS_DIR", tmp_path)
@@ -1395,6 +1409,264 @@ def test_todas_correcoes_entregam_documento_corrigido(monkeypatch, tmp_path):
     assert not resultado.get("descartados")
 
 
+_CONTEUDO_REENUMERACAO = (
+    "INSTRUÇÃO NORMATIVA Nº 1/2026\n"
+    "Dispõe sobre o trabalho artesanal.\n"
+    "CAPÍTULO I\n"
+    "DAS DISPOSIÇÕES GERAIS\n"
+    "Art. 1º A atividade artesanal será disciplinada.\n"
+    "CAPÍTULO II\n"
+    "DA COMERCIALIZAÇÃO\n"
+    "Art. 2º A comercialização dos produtos poderá ser realizada."
+)
+
+
+def test_renumeracao_do_modelo_que_quebraria_a_sequencia_e_descartada(
+    monkeypatch, tmp_path,
+):
+    """REGRESSÃO: renumeração de capítulos é garantida pelo SISTEMA. Item do
+    modelo que muda o numeral para outro que quebra a sequência (II -> III num
+    documento I, II já contíguo) é DESCARTADO e entregue a cópia intacta, em
+    vez de corromper a numeração."""
+    _preparar_melhoria(
+        monkeypatch,
+        tmp_path,
+        _patch_base(
+            alteracoes=[
+                {
+                    "tipo": "alterado",
+                    "rotulo": "CAPÍTULO II",
+                    "trecho_original": "CAPÍTULO II",
+                    "novo_texto": "CAPÍTULO III\nDA COMERCIALIZAÇÃO",
+                    "detalhe": "Corrige a duplicidade de numeração.",
+                }
+            ]
+        ),
+        conteudo=_CONTEUDO_REENUMERACAO,
+    )
+
+    resultado = json.loads(
+        generation.melhorar_documento_usuario(filename="USUARIO.docx")
+    )
+
+    assert resultado["status"] == "improved"
+    assert resultado["fallback"] is True
+    assert resultado["alteracoes"] == []
+    assert "CAPÍTULO II" in resultado["descartados"]
+    # A renumeração descartada não corrompe o arquivo: o ordem original I, II
+    # é preservada na cópia intacta.
+    from docx import Document
+
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    doc = Document(str(resultado["output_path"]))
+    pares = []
+    for p in doc.element.body.iter(ns + "p"):
+        if p.getparent().tag == ns + "tc":
+            continue
+        t = paragraph_text(p).strip()
+        if t:
+            pares.append(t)
+    ativos = [t for t in pares if not t.startswith("[Pendente")]
+    assert "CAPÍTULO II" in ativos
+    assert not any(t.startswith("CAPÍTULO III") for t in ativos)
+
+
+def test_renumeracao_canonica_corrige_capitulo_duplicado(monkeypatch, tmp_path):
+    """REGRESSÃO (artesanato real): capítulos I, II, III, III, IV..VIII (o
+    terceiro capítulo é o primeiro dos III repetidos) com correções propostas
+    pelo modelo devem sair na sequência I..IX: o PRIMEIRO III permanece III e
+    o segundo é renumerado (IV..IX)."""
+    conteudo = (
+        "INSTRUÇÃO NORMATIVA Nº 1/2026\n"
+        "CAPÍTULO I\n"
+        "DAS DISPOSIÇÕES GERAIS\n"
+        "CAPÍTULO II\n"
+        "DO REGIME DE EXECUÇÃO\n"
+        "CAPÍTULO III\n"
+        "DO FORNECIMENTO\n"
+        "CAPÍTULO III\n"
+        "DO REGISTRO DA ATIVIDADE\n"
+        "CAPÍTULO IV\n"
+        "DA COMERCIALIZAÇÃO\n"
+        "CAPÍTULO V\n"
+        "DA ATUAÇÃO\n"
+        "Art. 1º A atividade será disciplinada.\n"
+        "CAPÍTULO VI\n"
+        "DAS DISPOSIÇÕES FINAIS\n"
+    )
+    _preparar_melhoria(
+        monkeypatch,
+        tmp_path,
+        _patch_base(
+            alteracoes=[
+                {
+                    "tipo": "alterado",
+                    "rotulo": "CAPÍTULO IV",
+                    "trecho_original": "CAPÍTULO IV",
+                    "novo_texto": "CAPÍTULO V\nDA COMERCIALIZAÇÃO",
+                    "detalhe": "Ajusta a cascata após o capítulo duplicado.",
+                }
+            ]
+        ),
+        conteudo=conteudo,
+    )
+
+    resultado = json.loads(
+        generation.melhorar_documento_usuario(filename="USUARIO.docx")
+    )
+
+    assert resultado["status"] == "improved"
+    assert resultado["fallback"] is False, resultado.get("aviso")
+    assert resultado["descartados"] == ["CAPÍTULO IV"]
+
+    from docx import Document
+
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    doc = Document(str(resultado["output_path"]))
+    ativos = []
+    for p in doc.element.body.iter(ns + "p"):
+        if p.getparent().tag == ns + "tc":
+            continue
+        t = paragraph_text(p).strip()
+        if (
+            t
+            and not t.startswith("[Pendente")
+            and p.find(ns + "r/" + ns + "rPr/" + ns + "strike") is None
+        ):
+            ativos.append(t)
+    capitulos = [t for t in ativos if t.splitlines()[0].startswith("CAPÍTULO")]
+    # CANÔNICA I..N pela ordem do documento: o terceiro capítulo (primeiro
+    # dos III duplicados) permanece III e os seguintes viram IV..VII.
+    assert capitulos[0].splitlines()[0] == "CAPÍTULO I"
+    assert capitulos[1].splitlines()[0] == "CAPÍTULO II"
+    assert capitulos[2].splitlines()[0] == "CAPÍTULO III"  # primeiro III fica III
+    assert capitulos[3].splitlines()[0] == "CAPÍTULO IV"  # segundo III vira IV
+    assert capitulos[4].splitlines()[0] == "CAPÍTULO V"
+    assert capitulos[5].splitlines()[0] == "CAPÍTULO VI"
+    assert capitulos[6].splitlines()[0] == "CAPÍTULO VII"
+
+
+def test_passagens_de_validacao_registradas_na_resposta(monkeypatch, tmp_path):
+    """A melhoria registra as CINCO passagens de validação pós-geração com
+    resultado e tempo (prova executável), e tudo passando entrega o arquivo."""
+    _preparar_melhoria(
+        monkeypatch,
+        tmp_path,
+        _patch_base(alteracoes=[_ALTERACAO19]),
+    )
+
+    resultado = json.loads(
+        generation.melhorar_documento_usuario(filename="USUARIO.docx")
+    )
+
+    assert resultado["fallback"] is False
+    passagens = resultado["passagens"]
+    assert isinstance(passagens, list) and len(passagens) == 5
+    for p in passagens:
+        assert p["passo"].lstrip()[0].isdigit()
+        assert p["objetivo"]
+        assert "resultado" in p and p["resultado"].startswith("OK")
+        assert isinstance(p["tempo_ms"], (int, float))
+    assert all(p["ok"] for p in passagens)
+    # O agente cita as passagens na resposta final.
+    texto = agent._resposta_melhoria(resultado)
+    assert "Validação pós-geração" in texto
+    assert "todas passaram" in texto
+
+
+def test_passagens_de_validacao_no_fallback_intacto(monkeypatch, tmp_path):
+    """Cópia intacta (sem correções) ainda executa as cinco passagens sobre o
+    arquivo entregue — a validação é comprovada também na entrega de fallback."""
+    _preparar_melhoria(monkeypatch, tmp_path, _patch_base())
+
+    resultado = json.loads(
+        generation.melhorar_documento_usuario(filename="USUARIO.docx")
+    )
+
+    assert resultado["fallback"] is True
+    passagens = resultado["passagens"]
+    assert isinstance(passagens, list) and len(passagens) == 5
+    assert all(p["ok"] for p in passagens)
+    texto = agent._resposta_melhoria(resultado)
+    assert "Validação pós-geração" in texto
+
+
+_CONTEUDO_CONSIDERANDOS = (
+    "PORTARIA Nº 1/2026\n"
+    "CONSIDERANDO o disposto na Lei de Execução Penal (LEP), Lei nº 7.210/1984;\n"
+    "CONSIDERANDO a competência da FUNDAÇÃO NOVA CHANCE – FUNAC;\n"
+    "RESOLVE:\n"
+    "Art. 1º Disciplinar o trabalho artesanal.\n"
+)
+
+
+def test_considerando_ambiguo_descartado_preserva_os_originais(
+    monkeypatch, tmp_path,
+):
+    """REGRESSÃO (artesanato real): âncora genérica 'CONSIDERANDO' com DUAS
+    ocorrências no original NÃO pode tachar os dois e inserir duas cópias de um
+    texto genérico. O item é descartado (âncora ambígua) e a cópia intacta é
+    entregue com os considerandos originais preservados."""
+    _preparar_melhoria(
+        monkeypatch,
+        tmp_path,
+        _patch_base(
+            alteracoes=[
+                {
+                    "tipo": "alterado",
+                    "rotulo": "CONSIDERANDO",
+                    "trecho_original": "CONSIDERANDO",
+                    "novo_texto": (
+                        "CONSIDERANDO a necessidade de regulamentar o "
+                        "artesanato no âmbito estadual;\n"
+                        "CONSIDERANDO a necessidade de regulamentar o "
+                        "artesanato no âmbito estadual;"
+                    ),
+                    "detalhe": "Atualiza o preâmbulo.",
+                }
+            ]
+        ),
+        conteudo=_CONTEUDO_CONSIDERANDOS,
+    )
+
+    resultado = json.loads(
+        generation.melhorar_documento_usuario(filename="USUARIO.docx")
+    )
+
+    assert resultado["status"] == "improved"
+    assert resultado["fallback"] is True
+    assert "CONSIDERANDO" in resultado["descartados"]
+
+    from docx import Document
+
+    from sejus_project.tools.document_infra.docx_engine import paragraph_text
+
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    doc = Document(str(resultado["output_path"]))
+    ativas = []
+    for p in doc.element.body.iter(ns + "p"):
+        if p.getparent().tag == ns + "tc":
+            continue
+        t = paragraph_text(p).strip()
+        if (
+            t
+            and not t.startswith("[Pendente")
+            and p.find(ns + "r/" + ns + "rPr/" + ns + "strike") is None
+        ):
+            ativas.append(t)
+    considerandos = [t for t in ativas if t.startswith("CONSIDERANDO")]
+    # Os DOIS considerandos originais seguem no texto ativo, sem duplicação do
+    # texto genérico.
+    assert len(considerandos) == 2
+    assert any("Lei de Execução Penal" in t for t in considerandos)
+    assert any("FUNAC" in t for t in considerandos)
+    assert not any("artesanato no âmbito estadual" in t for t in considerandos)
+
+
 def test_fallback_quando_llm_falha_entrega_copia_intacta(monkeypatch, tmp_path):
     """Falha de geração do patch (LLM) também entrega a cópia intacta."""
     modelo = _preparar_melhoria(monkeypatch, tmp_path, _patch_base())
@@ -1413,3 +1685,142 @@ def test_fallback_quando_llm_falha_entrega_copia_intacta(monkeypatch, tmp_path):
     output = Path(resultado["output_path"])
     assert output.is_file()
     assert output.read_bytes() == modelo.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Confirmação "sim" depois da análise: nunca completar a geração de um ato novo
+# ---------------------------------------------------------------------------
+
+
+def test_sim_nao_completa_pendencia_de_correcao_sem_verbo(monkeypatch, tmp_path):
+    """Pendência criada como "gere a IN sobre..." (sem verbo de correção) não é
+    completada como ato novo quando há análise registrada: o "sim" desvia para
+    a melhoria. Reproduz o bug real que entregava IN_FUNCAO_ARMADA no lugar do
+    arquivo corrigido via motor."""
+    sessao = analysis_registry.nova_sessao()
+    conteudo = "INSTRUÇÃO NORMATIVA Nº 5/2026\nArt. 1º Texto."
+    analysis_registry.registrar(
+        sessao,
+        "USUARIO.docx",
+        analysis_registry.hash_conteudo(conteudo),
+        "análise",
+        [{"id": "ap-1", "texto": "incluir prazo de validade"}],
+    )
+    monkeypatch.setattr(generation, "_resolve_file", lambda n: Path(tmp_path) / n)
+    monkeypatch.setattr(generation, "extract_file_text", lambda p: conteudo)
+    generation._pending_document = {
+        "request": "gere a instrução normativa sobre o trabalho artesanal",
+        "perfil": "IN_FUNCAO_ARMADA",
+        "contexto": {"fonte": "x"},
+    }
+
+    try:
+        resultado = json.loads(generation.gerar_documento_normativo("sim"))
+
+        assert resultado["status"] == "melhoria_necessaria"
+        assert resultado["filename"] == "USUARIO.docx"
+        assert resultado["apontamentos"][0]["id"] == "ap-1"
+        assert generation.has_pending_document() is False
+    finally:
+        generation._pending_document = None
+
+
+def test_pendencia_legitima_sem_analise_sim_ainda_completa(monkeypatch):
+    """Geração legítima (sem análise registrada na sessão) continua sendo
+    completada pela confirmação — o guard só desvia para a melhoria quando a
+    pendência esconde a entrega de um documento analisado."""
+    monkeypatch.setattr(
+        generation, "analise_para_correcao", lambda filename=None: None
+    )
+    monkeypatch.setattr(
+        generation,
+        "_gerar_e_relatar",
+        lambda *a, **k: json.dumps(
+            {"status": "generated", "output_path": "/tmp/out.docx"},
+            ensure_ascii=False,
+        ),
+    )
+    generation._pending_document = {
+        "request": "gere uma portaria de designação",
+        "perfil": "PORTARIA",
+        "contexto": {"fonte": "x"},
+    }
+
+    try:
+        resposta = agent._tratar_geracao_pendente("sim")
+
+        assert resposta is not None
+        assert "Documento gerado" in resposta
+        assert generation.has_pending_document() is False
+    finally:
+        generation._pending_document = None
+
+
+def test_sim_pos_analise_roda_a_melhoria_no_agente(monkeypatch):
+    """Depois da análise registrada, um "sim"/"pode gerar" dispara
+    melhorar_documento_usuario com os apontamentos — não a geração de ato
+    novo (o roteamento não pode mais entregar um template no lugar da
+    correção do arquivo)."""
+    monkeypatch.setattr(agent, "messages", [])
+    monkeypatch.setattr(agent, "has_pending_document", lambda: False)
+    capturado = {}
+
+    def fake_melhorar(filename=None, diretrizes=None, apontamentos=None):
+        capturado["filename"] = filename
+        capturado["diretrizes"] = diretrizes
+        capturado["apontamentos"] = apontamentos
+        return json.dumps(
+            {
+                "status": "improved",
+                "filename": filename,
+                "alteracoes": [],
+                "apontamentos_analise": [
+                    {
+                        "apontamento_id": "ap-1",
+                        "apontamento": "corrigir X",
+                        "status": "aplicado",
+                        "referencia": "Art. 1º",
+                        "motivo": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(agent, "melhorar_documento_usuario", fake_melhorar)
+    monkeypatch.setattr(
+        agent,
+        "analise_para_correcao",
+        lambda filename=None: {
+            "filename": "USUARIO.docx",
+            "apontamentos": [{"id": "ap-1", "texto": "corrigir X"}],
+            "analise_completa": "análise",
+        },
+    )
+
+    resposta = agent._tratar_correcao_direta("sim")
+
+    assert resposta is not None
+    assert capturado["filename"] == "USUARIO.docx"
+    assert capturado["apontamentos"][0]["id"] == "ap-1"
+
+
+def test_sim_sem_analise_nao_dispara_melhoria(monkeypatch):
+    """Sem análise registrada, um "sim" solto não aciona a melhoria (o
+    fluxo cai para o loop do agente, que confirma a análise, por exemplo)."""
+    monkeypatch.setattr(agent, "messages", [])
+    monkeypatch.setattr(agent, "analise_para_correcao", lambda filename=None: None)
+    monkeypatch.setattr(generation, "_ultimo_arquivo_importado", lambda: None)
+
+    assert agent._tratar_correcao_direta("sim") is None
+    assert agent._tratar_correcao_direta("pode gerar o arquivo corrigido?") is None
+
+
+def test_is_afirmacao_nao_confunde_perguntas():
+    assert agent._is_afirmacao("sim") is True
+    assert agent._is_afirmacao("pode") is True
+    assert agent._is_afirmacao("pode gerar o arquivo corrigido") is True
+    assert agent._is_afirmacao("sim, pode gerar") is True
+    assert agent._is_afirmacao("pode gerar o arquivo corrigido?") is False
+    assert agent._is_afirmacao("não") is False
+    assert agent._is_afirmacao("o que mais precisa ajustar?") is False
