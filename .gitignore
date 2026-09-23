@@ -6,3 +6,4 @@ outputs/
 importacoes_usuario/
 .pytest_cache/
 .ruff_cache/
+.zed/
