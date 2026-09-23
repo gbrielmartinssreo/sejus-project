@@ -617,7 +617,7 @@ _MELHORIA_JANELA_OVERLAP_CHARS = 2_000
 # Tentativas de geração do patch por janela. Cada tentativa pode reprocessar o
 # JSON quando a sanidade do patch ou a cobertura dos apontamentos fica
 # incompleta/vaga (IDs de apontamento precisam ser ecoados com fidelidade).
-_MAX_TENTATIVAS_PATCH = 3
+_MAX_TENTATIVAS_PATCH = 2
 
 
 def _tamanho_janela() -> int:
@@ -1071,6 +1071,35 @@ def _substituir_renumeracao_do_modelo(
     return mantidos, descartados
 
 
+# Marcadores de subdispositivo (§/Parágrafo único/inciso/alínea) no início de
+# uma linha. Usado para detectar quando uma alteração removeria subitens sem
+# que eles constem do novo texto nem de remoção explícita.
+_RE_MARCA_SUBITEM = re.compile(
+    r"^\s*(§\s*\d+[ºo°]?|par[áa]grafo\s+[úu]nico|[ivxl]{1,4}\s*[-–—]|[a-z]\))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _marcas_subitens(texto: str) -> set[str]:
+    return {_chave_texto(m.group(1)) for m in _RE_MARCA_SUBITEM.finditer(texto or "")}
+
+
+def _subitens_perdidos(item: dict) -> list[str]:
+    """Subitens citados em ``trecho_original`` que sumiriam da versão ativa.
+
+    Uma alteração só pode descartar §/inciso se a exclusão for declarada no
+    patch (``subitens_removidos``/``excluir_subitens``). Sem isso, a perda é
+    involuntária — a alteração é rejeitada para não apagar dispositivo vigente.
+    Remoções (``tipo == 'removido'``) são exclusões explícitas por definição."""
+    if item.get("tipo") == "removido":
+        return []
+    if item.get("excluir_subitens") or item.get("subitens_removidos"):
+        return []
+    trecho = item.get("trecho_original") or ""
+    novo = item.get("novo_texto") or item.get("texto") or ""
+    return sorted(_marcas_subitens(trecho) - _marcas_subitens(novo))
+
+
 def _problemas_do_patch(
     conteudo: str,
     alteracoes: list[dict],
@@ -1100,6 +1129,12 @@ def _problemas_do_patch(
         elif not _item_tem_ancora(conteudo, a):
             problemas.append(
                 f"ancora nao encontrada no original: {a.get('rotulo') or '?'}"
+            )
+        perdidos = _subitens_perdidos(a)
+        if perdidos:
+            problemas.append(
+                f"alteracao '{a.get('rotulo') or '?'}' descarta subitem(ns) "
+                f"({', '.join(perdidos)}) sem declaracao explicita de exclusao"
             )
     for r in remocoes:
         if not isinstance(r, dict):
@@ -1134,6 +1169,7 @@ def _filtrar_patch_valido(
             and item.get("tipo") in ("alterado", "corrigido")
             and bool((item.get("novo_texto") or "").strip())
             and _item_tem_ancora(conteudo, item)
+            and not _subitens_perdidos(item)
         )
 
     def _ok_rem(item) -> bool:
@@ -1152,8 +1188,18 @@ def _filtrar_patch_valido(
     alt = [a for a in alteracoes if _ok_alt(a)]
     rem = [r for r in remocoes if _ok_rem(r)]
     adic = [a for a in adicoes if _ok_add(a)]
+
+    def _rotulo_descarte(a: dict) -> str:
+        perdidos = _subitens_perdidos(a)
+        if perdidos:
+            return (
+                f"{_rotulo(a)} (perda involuntaria de subitens: "
+                f"{', '.join(perdidos)})"
+            )
+        return _rotulo(a)
+
     descartados = (
-        [_rotulo(a) for a in alteracoes if not _ok_alt(a)]
+        [_rotulo_descarte(a) for a in alteracoes if not _ok_alt(a)]
         + [_rotulo(r) for r in remocoes if not _ok_rem(r)]
         + [_rotulo(a) for a in adicoes if not _ok_add(a)]
     )
@@ -1458,6 +1504,10 @@ def _localizar_mudanca_por_apontamento(
     for tipo, grupo in (("alteracao", alteracoes), ("remocao", remocoes), ("adicao", adicoes)):
         for item in grupo or []:
             if not isinstance(item, dict):
+                continue
+            # Correções automáticas do sistema têm reconciliação própria
+            # (_reconciliar_cobertura_automatica), com motivo específico.
+            if _categoria_item(item):
                 continue
             rotulo = item.get("rotulo") or item.get("o_que") or ""
             corpo = " ".join(
