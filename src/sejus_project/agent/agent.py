@@ -6,6 +6,7 @@ from sejus_project.agent.skills.loader import (
     build_system_message,
 )
 from sejus_project.llm.ia import perguntar
+from sejus_project.tools.llm_tools import analysis_registry
 from sejus_project.tools.llm_tools.document_generation import (
     aceitar_proposta,
     analise_para_correcao,
@@ -34,7 +35,11 @@ from sejus_project.tools.llm_tools.more import definition as more_definition
 from sejus_project.tools.llm_tools.more import more_epic
 from sejus_project.tools.llm_tools.retrieval import consultar_atos_sejus
 from sejus_project.tools.llm_tools.retrieval import definition as retrieval_definition
-from sejus_project.tools.llm_tools.user_files import analisar_arquivo_usuario
+from sejus_project.tools.llm_tools.user_files import (
+    _list_available_files,
+    analisar_arquivo_usuario,
+    upload_sessao,
+)
 from sejus_project.tools.llm_tools.user_files import definition as user_files_definition
 
 # ============================================================================
@@ -99,7 +104,11 @@ SYSTEM_INSTRUCTIONS = (
     "ferramenta sem o argumento filename: ela usa a importacao mais recente "
     "e devolve a lista de outras arquivos importados para voce sugerir. "
     "O mesmo vale para analisar_arquivo_usuario: sem filename ela le a "
-    "importacao mais recente. A leitura do arquivo e paginada: se a tool "
+    "importacao mais recente, e o upload fica registrado na sessao — "
+    "mesmo que o filename informado nao exista, a ferramenta usa o ultimo "
+    "arquivo enviado e devolve o campo 'aviso' com o nome real. Confie no "
+    "'filename' retornado e siga a analise; NAO peca ao usuario para repetir "
+    "o nome do arquivo. A leitura do arquivo e paginada: se a tool "
     "devolver 'has_more': true, chame analisar_arquivo_usuario novamente com "
     "'offset' = 'next_offset' e continue ate ler o documento inteiro antes de "
     "concluir a analise; nao resuma nem ignore o restante do arquivo.\n"
@@ -144,9 +153,32 @@ SYSTEM_INSTRUCTIONS = (
 )
 
 
+def _contexto_upload_sessao() -> str | None:
+    """Anota para o LLM que um arquivo foi enviado na sessão.
+
+    O upload ocorre fora do chat (endpoint /api/upload): sem essa anotação o
+    LLM não tem como saber que existe um arquivo disponível e acaba pedindo
+    para o usuário "enviar o documento" de novo, mesmo com o upload já feito."""
+    nome = upload_sessao()
+    if not nome:
+        return None
+    return (
+        "Contexto: o usuario acaba de enviar/importar o arquivo "
+        f"'{nome}', ja gravado na pasta de importacoes desta sessao. "
+        "Se o pedido atual envolver analisar/revisar/verificar um documento, "
+        "chame analisar_arquivo_usuario usando esse arquivo (filename OPCIONAL "
+        "-- sem ele a tool usa este upload). Nao peca para o usuario reenviar "
+        "o arquivo nem informar o nome de novo; se precisar confirmar qual "
+        "arquivo usar, confirme pelo nome em uma frase."
+    )
+
+
 def _messages_for_llm() -> list[dict]:
+    sistema = build_system_message(SYSTEM_INSTRUCTIONS, messages)
+    contexto = _contexto_upload_sessao()
     return [
-        build_system_message(SYSTEM_INSTRUCTIONS, messages),
+        sistema,
+        *([{"role": "system", "content": contexto}] if contexto else []),
         *messages,
     ]
 
@@ -576,6 +608,106 @@ def _tratar_correcao_direta(question):
 
 
 # ============================================================================
+# CONFIRMAÇÃO DO ARQUIVO ENVIADO (encerra o loop de "envie o arquivo de novo")
+# ============================================================================
+
+# Intenção de analisar/revisar/verificar um documento (palavras-gatilho).
+_RE_PEDIDO_ANALISE = re.compile(
+    r"\ban[áa]l\w*|audit\w*|conformidade|consist[eê]nc\w*|verific\w*|avali\w*|"
+    r"confer\w*|inspecion\w*|revis\w*|cotej\w*|adequa[çc][ãa]o|vigente|"
+    r"jur[ií]dic\w*|ortogr[áa]fic\w*|sistem[áa]tic\w*",
+    re.IGNORECASE,
+)
+_RE_REF_DOCUMENTO = re.compile(
+    r"\b(arquivo|documento|texto|minuta|ato|norma|instru[çc][ãa]o|\bin\b|"
+    r"portaria|decreto|anexo|conte[uú]do)\b",
+    re.IGNORECASE,
+)
+
+
+def _arquivo_ja_analisado(nome: str) -> bool:
+    """True se o arquivo já tem análise registrada nesta sessão."""
+    try:
+        return (
+            analysis_registry.obter(
+                analysis_registry.sessao_atual(), nome
+            )
+            is not None
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _mensagem_confirmacao(nome: str) -> str:
+    """Pergunta de confirmação citando o arquivo encontrado no envio."""
+    outros = [
+        nome_outro
+        for nome_outro in _list_available_files()
+        if nome_outro.casefold() != nome.casefold()
+    ]
+    texto = (
+        f"Encontrei o arquivo **'{nome}'** no envio recente.\n\n"
+        "É este o arquivo que você deseja que eu analise?"
+    )
+    if outros:
+        texto += (
+            "\n\nTambém identifiquei outros arquivos importados: "
+            + ", ".join(f"'{item}'" for item in outros[:5])
+            + ". Se preferir analisar outro, informe o nome."
+        )
+    return texto
+
+
+def _primeiro_pedido_analise_sem_nome(question: str) -> str | None:
+    """Intercepta o primeiro pedido de análise de um documento enviado SEM
+    citar o nome: em vez de deixar o LLM responder "envie o arquivo" (loop de
+    reenvio), confirma o upload registrado na sessão perguntando se é o
+    correto. Só atua uma vez por arquivo (análise ainda não registrada)."""
+    if not (
+        _RE_PEDIDO_ANALISE.search(question)
+        and _RE_REF_DOCUMENTO.search(question)
+    ):
+        return None
+
+    nome = upload_sessao()
+    if not nome:
+        return None
+    if nome.casefold() in question.casefold():
+        return None
+    if _arquivo_ja_analisado(nome):
+        return None
+
+    resposta = _mensagem_confirmacao(nome)
+    messages.append({"role": "assistant", "content": resposta})
+    return resposta
+
+
+# Respostas do LLM que pedem o arquivo de novo (gato escaldado: acontece quando
+# o LLM responde em texto sem chamar a tool). Nesse caso trocamos pela mesma
+# confirmação do upload registrado, para nunca pedir reenvio.
+_RE_PEDE_ENVIO = re.compile(
+    r"(?:por\s+favor\s*,\s*)?(?:envie|enviar|mande|manda|encaminhe|"
+    r"forne[çc]a|disponibilize|compartilhe|anexe)\b.{0,80}"
+    r"\b(?:arquivo|documento|instru[çc][ãa]o|\bin\b|minuta|ato|norma|texto)\b"
+    r"|\binform(?:e|ar)?\b.{0,40}?\bnome\s+do\s+arquivo\b"
+    r"|\bqual\s+(?:[ée]|eh)?\s*(?:o\s+)?nome\s+do\s+arquivo\b"
+    r"|\bpara\s+que\s+eu\s+poss(?:a|o)\s+analisar\b",
+    re.IGNORECASE,
+)
+
+
+def _resposta_reenvio_para_confirmacao(conteudo: str) -> str | None:
+    """Se o LLM respondeu pedindo o arquivo de novo, mas há upload registrado
+    na sessão, devolve a pergunta de confirmação no lugar daquela resposta."""
+    if not _RE_PEDE_ENVIO.search(conteudo or ""):
+        return None
+    nome = upload_sessao()
+    if not nome:
+        return None
+    return _mensagem_confirmacao(nome)
+
+
+# ============================================================================
 # LOOP PRINCIPAL DO AGENTE
 # ============================================================================
 
@@ -650,6 +782,12 @@ def _executar_loop_agente(question: str = ""):
         if not message.tool_calls:
 
             conteudo = message.content
+
+            # Se o LLM pediu o arquivo de novo (sem usar a tool), converte na
+            # confirmação do upload registrado — nunca pedir reenvio ao usuário.
+            troca = _resposta_reenvio_para_confirmacao(conteudo)
+            if troca is not None:
+                conteudo = troca
 
             messages.append({
                 "role": "assistant",
@@ -757,7 +895,14 @@ def executar(question):
     if resposta is not None:
         return resposta
 
-    # 6. Caso nenhum fluxo especial tenha sido acionado,
+    # 6. Primeiro pedido de análise de documento enviado sem citar o nome:
+    #    confirma o arquivo encontrado na sessão em vez de pedir reenvio.
+    resposta = _primeiro_pedido_analise_sem_nome(question)
+
+    if resposta is not None:
+        return resposta
+
+    # 7. Caso nenhum fluxo especial tenha sido acionado,
     #    executa o agente normalmente.
     return _executar_loop_agente(question)
 

@@ -12,6 +12,8 @@ Rodar local:
 """
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -31,6 +33,7 @@ from sejus_project.tools.llm_tools.user_files import (
     SUPPORTED_EXTENSIONS,
     UserFileError,
     _resolve_file,
+    registrar_upload,
 )
 from sejus_project.web.render_html import minuta_para_texto
 
@@ -38,6 +41,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # Teto para a mensagem vinda do navegador antes de chegar às tools.
 MAX_MESSAGE_CHARS = 80_000
+
+# Uploads em andamento: o /api/chat espera esse número zerar (com teto) antes
+# de executar o agente, para a tool de análise enxergar o arquivo recém-enviado
+# em vez de processar a pergunta contra a pasta ainda sem o arquivo (corrida
+# entre a resposta do /api/upload e a mensagem de chat seguinte).
+_UPLOADS_ATIVOS = 0
+_UPLOADS_LOCK = threading.Lock()
 
 app = FastAPI(title="SEJUS Chat", docs_url="/docs", redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -57,6 +67,18 @@ async def _erro_interno(_request: Request, exc: Exception) -> JSONResponse:
             "error": str(exc),
         },
     )
+
+
+def _uploads_em_andamento() -> int:
+    with _UPLOADS_LOCK:
+        return _UPLOADS_ATIVOS
+
+
+def _aguardar_upload_em_andamento(timeout: float = 5.0) -> None:
+    """Segura o chat até os uploads em andamento terminarem (com teto)."""
+    limite = time.monotonic() + timeout
+    while _uploads_em_andamento() and time.monotonic() < limite:
+        time.sleep(0.05)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -167,6 +189,10 @@ def chat(payload: ChatMessage) -> dict:
             },
         )
 
+    # Corrida enviar-mensagem/upload: deixa o upload terminar antes de o agente
+    # consultar a pasta, para a análise já encontrar o arquivo recém-enviado.
+    _aguardar_upload_em_andamento()
+
     reply = agent.executar(payload.message)
     return _resposta_chat(reply)
 
@@ -191,7 +217,11 @@ def limpar_conversa() -> dict:
 
 @app.post("/api/upload")
 async def upload(arquivo: UploadFile) -> dict:
-    """Salva um arquivo do navegador na pasta de importacoes do usuario."""
+    """Salva um arquivo do navegador na pasta de importacoes do usuario e o
+    registra como upload da sessão, para a tool de análise sempre encontrá-lo
+    (mesmo sem o usuário citar o nome). Grava num arquivo parcial e renomeia
+    por último (escrita atômica): um /api/chat concorrente nunca enxerga o
+    arquivo pela metade."""
     nome = Path(arquivo.filename or "arquivo").name
     extensao = Path(nome).suffix.lower()
 
@@ -202,12 +232,28 @@ async def upload(arquivo: UploadFile) -> dict:
             f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}",
         )
 
-    IMPORTACOES_DIR.mkdir(parents=True, exist_ok=True)
-    destino = IMPORTACOES_DIR / nome
+    global _UPLOADS_ATIVOS
+    with _UPLOADS_LOCK:
+        _UPLOADS_ATIVOS += 1
 
-    with destino.open("wb") as saida:
-        while chunk := await arquivo.read(1024 * 256):
-            saida.write(chunk)
+    parcial = None
+    try:
+        IMPORTACOES_DIR.mkdir(parents=True, exist_ok=True)
+        destino = IMPORTACOES_DIR / nome
+        parcial = IMPORTACOES_DIR / (nome + ".parcial")
+
+        with parcial.open("wb") as saida:
+            while chunk := await arquivo.read(1024 * 256):
+                saida.write(chunk)
+
+        parcial.replace(destino)
+    finally:
+        if parcial is not None:
+            parcial.unlink(missing_ok=True)
+        with _UPLOADS_LOCK:
+            _UPLOADS_ATIVOS -= 1
+
+    registrar_upload(nome)
 
     return {"filename": nome, "detail": f"Arquivo '{nome}' recebido com sucesso."}
 

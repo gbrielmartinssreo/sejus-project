@@ -656,6 +656,13 @@ $entrada.addEventListener("keydown", function (evento) {
 $arquivo.addEventListener("change", async function () {
   var arquivo = $arquivo.files[0];
   if (!arquivo) return;
+  if (aguardando) {
+    toast("Aguarde o processamento atual antes de enviar outro arquivo.");
+    $arquivo.value = "";
+    return;
+  }
+  aguardando = true;
+  $entrada.disabled = true;
   var form = new FormData();
   form.append("arquivo", arquivo);
   try {
@@ -666,8 +673,12 @@ $arquivo.addEventListener("change", async function () {
     toast("Arquivo '" + dados.filename + "' recebido.");
   } catch (erro) {
     toast("Upload falhou: " + erro.message);
+  } finally {
+    aguardando = false;
+    $entrada.disabled = false;
+    $entrada.focus();
+    $arquivo.value = "";
   }
-  $arquivo.value = "";
 });
 
 $arquivoMelhorar.addEventListener("change", async function () {
