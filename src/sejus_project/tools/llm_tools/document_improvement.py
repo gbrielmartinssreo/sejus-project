@@ -1187,6 +1187,34 @@ def _validar_cobertura(
     return cobertura
 
 
+def _marcar_origem_apontamento(
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+    cobertura: list[dict] | None,
+) -> None:
+    """Anota ``origem_apontamento=True`` nas mudanças que executaram um
+    apontamento aprovado da análise (status 'aplicado' na cobertura).
+
+    O comentário nativo do .docx usa essa marca quando a mudança não tem lastro:
+    ela veio de um apontamento da análise aprovado pela correção do usuário —
+    não é invenção do modelo."""
+    for entrada in cobertura or []:
+        if not isinstance(entrada, dict):
+            continue
+        if (entrada.get("status") or "").strip().casefold() != STATUS_APLICADO:
+            continue
+        referencia = (entrada.get("referencia") or "").strip()
+        if not referencia:
+            continue
+        localizada = _localizar_mudanca(referencia, alteracoes, remocoes, adicoes)
+        if localizada is None:
+            continue
+        item = localizada[1]
+        if isinstance(item, dict):
+            item["origem_apontamento"] = True
+
+
 def _problemas_cobertura(
     apontamentos: list[dict],
     declarada: list[dict] | None,

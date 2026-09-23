@@ -660,6 +660,111 @@ def test_montar_docx_revisado_gera_comentarios_nativos_com_lastro(tmp_path):
     assert ids == refs
 
 
+def test_comentarios_para_toda_mudanca_variando_texto_por_origem():
+    """(4.4) Toda mudança marcada recebe comentário, com texto conforme a
+    origem: lastro validado, aviso de divergência, apontamento aprovado da
+    análise ou iniciativa do modelo ('lastro não localizado')."""
+    alteracoes = [
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 1º",
+            "trecho_original": "Art. 1º Texto original.",
+            "novo_texto": "Art. 1º Texto corrigido.",
+            "lastro": "IN 07/2026, art. 13",
+            "lastro_validado": True,
+        },
+        {
+            "tipo": "alterado",
+            "rotulo": "Art. 2º",
+            "trecho_original": "Art. 2º Texto original.",
+            "novo_texto": "Art. 2º Texto corrigido.",
+            "lastro": "IN 99/2099, art. 1",
+            "lastro_validado": False,
+            "lastro_aviso": (
+                "Lastro 'IN 99/2099, art. 1' nao identifica nenhum ato "
+                "recuperado no acervo (a referencia pode ter sido inventada)."
+            ),
+        },
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º Texto original.",
+            "novo_texto": "Art. 3º Texto corrigido.",
+            "origem_apontamento": True,
+        },
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 4º",
+            "trecho_original": "Art. 4º Texto original.",
+            "novo_texto": "Art. 4º Texto corrigido.",
+        },
+    ]
+    comentarios = docx_builder._comentarios_das_mudancas(alteracoes, [], [])
+    assert len(comentarios) == 4
+    textos = [texto for _, texto in comentarios]
+    assert "Lastro: IN 07/2026, art. 13." in textos[0]
+    assert "nao identifica nenhum ato" in textos[1]
+    assert textos[2] == docx_builder._TEXTO_ORIGEM_APONTAMENTO
+    assert "sem lastro" in textos[3].casefold()
+
+
+def test_montar_docx_revisado_comenta_toda_mudanca_e_bate_com_o_resumo(tmp_path):
+    """(4.4) No .docx final, cada mudança da página de resumo tem um comentário
+    nativo do Word ancorado (verde/tachado): a contagem de comentários bate com
+    o número de linhas da tabela do resumo."""
+    import zipfile
+
+    from docx import Document
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    from sejus_project.tools.document_infra.docx_builder import montar_docx_revisado
+
+    alteracoes = [
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º O artesão deverá manter registro.",
+            "novo_texto": "Art. 3º O artesão deverá manter registro atualizado.",
+            "detalhe": "Ajuste.",
+        }
+    ]
+    remocoes = [
+        {
+            "rotulo": "Art. 4º",
+            "trecho_original": "Art. 4º As unidades penais fornecerão materiais.",
+            "detalhe": "Sob o caput do art. 3º.",
+        }
+    ]
+    adicoes = [
+        {
+            "tipo": "adicionado",
+            "o_que": "Art. 5º",
+            "texto": "Art. 5º As unidades penais manterão as informações atualizadas.",
+            "posicao": "após o art. 4º",
+            "detalhe": "Prestação de contas.",
+        }
+    ]
+    output_path = montar_docx_revisado(
+        _modelo_simples(tmp_path), alteracoes, remocoes, adicoes, tmp_path
+    )
+
+    with zipfile.ZipFile(str(output_path)) as arquivo:
+        tree_comentarios = etree.fromstring(arquivo.read("word/comments.xml"))
+        tree_documento = etree.fromstring(arquivo.read("word/document.xml"))
+
+    n_comentarios = len(list(tree_comentarios.iter(qn("w:comment"))))
+    n_ancoras = len(list(tree_documento.iter(qn("w:commentRangeStart"))))
+    assert n_comentarios == 3
+    assert n_ancoras == n_comentarios
+
+    doc = Document(str(output_path))
+    n_linhas_dados = 0
+    for tbl in doc.element.body.iter(qn("w:tbl")):
+        n_linhas_dados += sum(1 for _ in tbl.iter(qn("w:tr"))) - 1
+    assert n_linhas_dados == n_comentarios
+
+
 def test_validacao_de_lastro_cobre_adicao_estrutural_no_comentario():
     """(2) Adição estrutural com lastro fantasma (só rótulo, sem número de ato)
     também é sinalizada: _validar_lastros anota lastro_aviso e o comentário do
