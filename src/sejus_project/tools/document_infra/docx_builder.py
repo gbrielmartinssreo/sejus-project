@@ -30,6 +30,7 @@ from sejus_project.tools.document_infra.docx_engine import (
     find_reference,
     normalizar_medidas,
     paragraph_text,
+    set_run_text,
     sombrear,
     tachar,
     verde,
@@ -654,6 +655,189 @@ def _aplicar_automatica_inline(w_p, item: dict) -> None:
         w_p.append(_run(depois, best_pr))
 
 
+# ---------------------------------------------------------------------------
+# Preservacao de subdispositivos dentro de um MESMO paragrafo fisico do Word
+# ---------------------------------------------------------------------------
+# No Word, um unico <w:p> pode conter caput + § 1º + § 2º separados por <w:br/>.
+# A extracao enxerga cada dispositivo como uma linha, mas tratar o <w:p> inteiro
+# como alvo fazia a alteracao de so o caput tachar/repor o paragrafo todo — os
+# § sumiam do texto ativo. As funcoes abaixo separam o paragrafo fisico em
+# DISPOSITIVOS e alteram/removem apenas o dispositivo alvo.
+
+_RE_MARCA_SUBITEM_INLINE = re.compile(
+    r"^\s*(§\s*\d+[ºo°]?|par[áa]grafo\s+[úu]nico|[ivxl]{1,4}\s*[-–—]|[a-z]\))",
+    re.IGNORECASE,
+)
+
+
+def _separar_runs_nas_quebras(w_p) -> None:
+    """Deixa cada ``<w:br/>``/``<w:cr/>`` num run proprio.
+
+    Com isso os limites de dispositivo (quebra) coincidem com limites de run,
+    o que permite marcar/inserir sem cortar runs no meio."""
+    for run in list(w_p.findall(qn("w:r"))):
+        filhos = list(run)
+        if not any(c.tag in (qn("w:br"), qn("w:cr")) for c in filhos):
+            continue
+        rpr = run.find(qn("w:rPr"))
+        segmentos: list = []
+        atual: list = []
+        for c in filhos:
+            if c.tag == qn("w:rPr"):
+                continue
+            if c.tag in (qn("w:br"), qn("w:cr")):
+                segmentos.append(atual)
+                atual = []
+                segmentos.append(c)
+            else:
+                atual.append(c)
+        segmentos.append(atual)
+        novos = []
+        for segmento in segmentos:
+            if isinstance(segmento, list) and not segmento:
+                continue
+            novo = w_p.makeelement(qn("w:r"), {})
+            if rpr is not None:
+                novo.append(copy.deepcopy(rpr))
+            if isinstance(segmento, list):
+                for node in segmento:
+                    novo.append(copy.deepcopy(node))
+            else:
+                novo.append(copy.deepcopy(segmento))
+            novos.append(novo)
+        for novo in novos:
+            run.addprevious(novo)
+        w_p.remove(run)
+
+
+def _runs_com_offset(w_p) -> tuple[list, int]:
+    """(run, inicio, fim, tem_quebra) na ordem, com offsets do texto (w:t)."""
+    info: list = []
+    pos = 0
+    for run in w_p.findall(qn("w:r")):
+        tem_quebra = any(c.tag in (qn("w:br"), qn("w:cr")) for c in run)
+        texto = "".join((t.text or "") for t in run.findall(qn("w:t")))
+        info.append((run, pos, pos + len(texto), tem_quebra))
+        pos += len(texto)
+    return info, pos
+
+
+def _texto_do_intervalo(info: list, a: int, b: int) -> str:
+    out: list[str] = []
+    for run, ini, fim, _br in info:
+        if fim <= a or ini >= b:
+            continue
+        texto = "".join((t.text or "") for t in run.findall(qn("w:t")))
+        out.append(texto[max(0, a - ini): max(0, b - ini)])
+    return "".join(out)
+
+
+def _dispositivos_do_paragrafo(w_p) -> tuple[list, list, int]:
+    """Divide o ``w:p`` em dispositivos delimitados por ``<w:br/>``.
+
+    Devolve ``(spans, info, total)`` onde cada span tem ``inicio``/``fim`` em
+    offsets de texto e ``texto`` correspondente."""
+    _separar_runs_nas_quebras(w_p)
+    info, total = _runs_com_offset(w_p)
+    if total <= 0:
+        return [], info, 0
+    limites = {0, total}
+    for _run_, ini, fim, tem_quebra in info:
+        if tem_quebra and ini > 0:
+            limites.add(ini)
+    marcas = sorted(limites)
+    spans = []
+    for a, b in zip(marcas, marcas[1:]):
+        spans.append(
+            {"inicio": a, "fim": b, "texto": _texto_do_intervalo(info, a, b)}
+        )
+    return spans, info, total
+
+
+def _marcar_run(run, cor: str = "C62828") -> None:
+    """Tacha e pinta de vermelho um run (texto substituido/removido)."""
+    rpr = run.get_or_add_rPr()
+    rpr.get_or_add_strike().val = True
+    rpr.get_or_add_color().val = RGBColor.from_string(cor)
+
+
+def _run_verde_como(modelo, texto: str):
+    """Clona ``modelo`` como run verde (sem tachado) com o texto novo."""
+    novo = copy.deepcopy(modelo)
+    rpr = novo.find(qn("w:rPr"))
+    if rpr is not None:
+        for tag in (qn("w:strike"), qn("w:dstrike")):
+            el = rpr.find(tag)
+            if el is not None:
+                rpr.remove(el)
+        color = rpr.find(qn("w:color"))
+        if color is None:
+            color = rpr.makeelement(qn("w:color"), {})
+            rpr.append(color)
+        color.set(qn("w:val"), "2E7D32")
+    set_run_text(novo, (texto or "").strip())
+    return novo
+
+
+def _alterar_dispositivo_inline(w_p, item: dict) -> bool:
+    """Altera/remove SO o dispositivo alvo dentro de um ``w:p`` com varios.
+
+    Devolve True quando aplicou inline (nao se deve tachar/repor o paragrafo
+    inteiro). Falso quando o alvo cobre o paragrafo todo (fluxo normal) ou o
+    paragrafo tem um unico dispositivo."""
+    alvo = (item.get("trecho_original") or item.get("rotulo") or "").strip()
+    if not alvo:
+        return False
+    spans, info, total = _dispositivos_do_paragrafo(w_p)
+    if len(spans) <= 1:
+        return False
+    alvo_chave = _chave_linha(alvo)
+    if not alvo_chave:
+        return False
+
+    idxs: list[int] = []
+    acumulado = ""
+    for k, sp in enumerate(spans):
+        ch = _chave_linha(sp["texto"])
+        if not ch:
+            continue
+        if not idxs:
+            if ch == alvo_chave or ch.startswith(alvo_chave) or alvo_chave.startswith(ch):
+                idxs = [k]
+                acumulado = ch
+        else:
+            combinado = (acumulado + " " + ch).strip()
+            # So avanca quando o ALVO abrange tambem este dispositivo.
+            if alvo_chave.startswith(combinado):
+                idxs.append(k)
+                acumulado = combinado
+            else:
+                break
+    if not idxs:
+        return False
+    # Alvo cobre todos os dispositivos: e substituicao do paragrafo inteiro.
+    if len(idxs) == len(spans):
+        return False
+
+    inicio = spans[idxs[0]]["inicio"]
+    fim = spans[idxs[-1]]["fim"]
+    novo_texto = item.get("novo_texto") if item.get("tipo") != "removido" else None
+    modelo = None
+    ultimo = None
+    for run, ini, run_fim, _br in info:
+        if run_fim <= inicio or ini >= fim or run_fim == ini:
+            continue
+        _marcar_run(run)
+        if modelo is None or _run_text(run) > _run_text(modelo):
+            modelo = run
+        ultimo = run
+    if ultimo is None:
+        return False
+    if novo_texto and (novo_texto or "").strip():
+        ultimo.addnext(_run_verde_como(modelo, novo_texto))
+    return True
+
+
 def _comentarios_das_mudancas(
     alteracoes: list[dict],
     remocoes: list[dict],
@@ -852,14 +1036,25 @@ def montar_docx_revisado(
         return _ancora_rigorosa(textos_miolo, item, usados)
 
     acoes: dict[int, dict] = {}
+
+    def _alvos_usados() -> set[int]:
+        # Paragrafos ja tratados via inline continuam disponiveis: dois
+        # dispositivos diferentes do MESMO <w:p> podem ter alteracoes distintas.
+        return {i for i, acao in acoes.items() if acao.get("tipo") != "inline"}
+
     for item in alteracoes:
         if not isinstance(item, dict):
             continue
-        i = _encontrar(item, set(acoes))
+        i = _encontrar(item, _alvos_usados())
         if i is None:
             continue
         if item.get("automatica"):
             acoes[i] = {"tipo": "automatica", "item": item}
+            continue
+        # Paragrafo fisico com varios dispositivos (caput + §): altera SO o
+        # dispositivo alvo, preservando os §/incisos nao abrangidos.
+        if _alterar_dispositivo_inline(miolo_pars[i], item):
+            acoes.setdefault(i, {"tipo": "inline"})
             continue
         acoes[i] = {
             "tipo": "alterado",
@@ -871,9 +1066,15 @@ def montar_docx_revisado(
     for item in remocoes:
         if not isinstance(item, dict):
             continue
-        i = _encontrar(item, set(acoes))
-        if i is not None:
-            acoes[i] = {"tipo": "removido"}
+        i = _encontrar(item, _alvos_usados())
+        if i is None:
+            continue
+        removido = dict(item)
+        removido["tipo"] = "removido"
+        if _alterar_dispositivo_inline(miolo_pars[i], removido):
+            acoes.setdefault(i, {"tipo": "inline"})
+            continue
+        acoes[i] = {"tipo": "removido"}
 
     pendentes: list[object] = []
     for i in sorted(acoes):
@@ -881,6 +1082,8 @@ def montar_docx_revisado(
         acao = acoes[i]
         if acao["tipo"] == "automatica":
             _aplicar_automatica_inline(wp, acao["item"])
+            continue
+        if acao["tipo"] == "inline":
             continue
         if acao["tipo"] in ("alterado", "removido", "absorvido"):
             tachar(wp)

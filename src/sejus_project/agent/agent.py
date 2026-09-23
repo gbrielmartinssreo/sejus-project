@@ -16,6 +16,7 @@ from sejus_project.tools.llm_tools.document_generation import (
     arquivo_para_correcao_sem_analise,
     cancelar_pendencia,
     comparacao_definition,
+    documento_em_analise,
     documento_para_analise,
     gerar_documento_normativo,
     has_pending_document,
@@ -39,6 +40,7 @@ from sejus_project.tools.llm_tools.retrieval import consultar_atos_sejus
 from sejus_project.tools.llm_tools.retrieval import definition as retrieval_definition
 from sejus_project.tools.llm_tools.user_files import (
     _list_available_files,
+    _ultimo_arquivo_importado,
     analisar_arquivo_usuario,
     upload_sessao,
 )
@@ -662,6 +664,92 @@ def _tratar_melhoria_direta(question):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Botão "Revisar e gerar DOCX": atalho para o MESMO fluxo análise -> correção
+# ---------------------------------------------------------------------------
+
+_RE_REVISAO_BOTAO = re.compile(
+    r"^revise e gere o docx(?: do arquivo)?\s+['\"]?(?P<nome>.+?)['\"]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _analise_isolada(filename: str) -> None:
+    """Executa o motor de análise do agente em histórico isolado.
+
+    Reaproveita o mesmo loop de tools/LLM (é a análise normal do agente), mas
+    sem poluir o histórico da conversa: o objetivo é consolidar os apontamentos
+    do documento para a melhoria seguinte. A análise é persistida no
+    ``analysis_registry`` (sessão + arquivo + hash) pelo próprio loop."""
+    global messages
+    guardadas = messages
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f"Analise o arquivo '{filename}' percorrendo o checklist "
+                "normativo e liste os apontamentos de correção (um problema por "
+                "bullet, com o porquê e a sugestão). Não gere nem reescreva o "
+                "arquivo nesta etapa."
+            ),
+        }
+    ]
+    try:
+        _executar_loop_agente()
+    finally:
+        messages = guardadas
+
+
+def _revisar_gerar(filename: str | None = None) -> str:
+    """Prepara a revisão de um documento e gera o DOCX pelo motor de melhoria.
+
+    Sem análise registrada para a MESMA versão do arquivo, roda primeiro a
+    análise (reaproveitando o motor do agente) e consolida os apontamentos; com
+    análise existente, reutiliza os apontamentos (inclusive aprofundamentos).
+    A associação é por sessão + documento + hash, validada por
+    ``analise_para_correcao``."""
+    if not filename:
+        filename = _ultimo_arquivo_importado()
+    if not filename:
+        return (
+            "Não encontrei nenhum arquivo enviado para revisar. Anexe o "
+            "documento pelo botão **Revisar e gerar DOCX**."
+        )
+
+    analise = analise_para_correcao(filename)
+    if not analise:
+        _analise_isolada(filename)
+        analise = analise_para_correcao(filename)
+
+    if analise:
+        return _executar_melhoria(
+            filename=analise.get("filename") or filename,
+            diretrizes=(
+                "Aplique os apontamentos da análise e entregue o DOCX revisado "
+                "com a comparação antes/depois."
+            ),
+            apontamentos=analise.get("apontamentos"),
+        )
+
+    # Sem análise consolidada: ainda entrega a revisão pelo MESMO motor de
+    # melhoria (não cai em geração de ato novo nem pede confirmação).
+    return _executar_melhoria(
+        filename=filename,
+        diretrizes="Revise e gere o DOCX do documento enviado.",
+    )
+
+
+def _tratar_revisao_direta(question):
+    """Rota do clique em 'Revisar e gerar DOCX'."""
+    match = _RE_REVISAO_BOTAO.match((question or "").strip())
+    if not match:
+        return None
+    nome = match.group("nome").strip()
+    if nome.casefold() in ("", "arquivo", "documento"):
+        nome = ""
+    return _revisar_gerar(nome or None)
+
+
 def _is_afirmacao(question: str) -> bool:
     """Confirmação curta do usuário ("sim", "pode", "concordo"...).
 
@@ -1010,6 +1098,12 @@ def executar(question):
 
     # 4. Trata melhoria direta de documentos.
     resposta = _tratar_melhoria_direta(question)
+
+    if resposta is not None:
+        return resposta
+
+    # 4b. Botão "Revisar e gerar DOCX": análise (se necessário) + melhoria.
+    resposta = _tratar_revisao_direta(question)
 
     if resposta is not None:
         return resposta

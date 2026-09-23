@@ -690,8 +690,8 @@ $arquivoMelhorar.addEventListener("change", async function () {
     var resposta = await fetch("/api/upload", { method: "POST", body: form });
     var dados = await resposta.json();
     if (!resposta.ok) throw new Error(dados.detail || "falha no upload");
-    criarBubbleArquivo("Arquivo enviado para melhoria", dados.filename);
-    enviar("Melhore e compare o arquivo '" + dados.filename + "'");
+    criarBubbleArquivo("Arquivo enviado para revisão", dados.filename);
+    enviar("Revise e gere o DOCX do arquivo '" + dados.filename + "'");
   } catch (erro) {
     toast("Upload falhou: " + erro.message);
   }
@@ -753,8 +753,8 @@ criarBubble("agente",
   "Olá! Sou o agente da SEJUS. Posso responder sobre os atos normativos " +
   "recuperados do acervo e **gerar minutas** (portarias, instruções normativas, " +
   "decretos etc.) — o documento aparece aqui como anexo, pronto para baixar em " +
-  "DOCX ou PDF. Você também pode enviar um ato para **análise** ou para " +
-  "**melhorar e comparar**: eu reescrevo o mesmo documento com melhorias e " +
-  "adequações, e mostro a comparação antes/depois. Definir um ato existente " +
+  "DOCX ou PDF. Você também pode enviar um ato para **análise** ou usar " +
+  "**Revisar e gerar DOCX**: eu analiso o documento, aplico as correções e " +
+  "mostro a comparação antes/depois. Definir um ato existente " +
   "como **modelo** faz a nova minuta seguir exatamente o formato enviado.\n\n" +
   "Ex.: *Gere uma portaria sobre limpeza das unidades.*");

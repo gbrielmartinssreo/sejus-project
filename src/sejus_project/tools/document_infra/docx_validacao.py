@@ -102,6 +102,7 @@ def _paragrafos_do_corpo(conteudo: str, caminho) -> list[dict]:
                 "chave": _chave_linha(texto),
                 "tachado": _tem_tachado(ch),
                 "verde": _tem_verde(ch),
+                "ativo": _texto_ativo(ch),
             }
         )
     return parags
@@ -110,6 +111,29 @@ def _paragrafos_do_corpo(conteudo: str, caminho) -> list[dict]:
 def _texto_do_paragrafo(w_p) -> str:
     partes: list[str] = []
     for run in w_p.iter(_NS + "r"):
+        for filho in run:
+            if filho.tag == _NS + "t" and filho.text:
+                partes.append(filho.text)
+            elif filho.tag == _NS + "br":
+                partes.append("\n")
+    return "".join(partes)
+
+
+def _texto_ativo(w_p) -> str:
+    """Texto de um parágrafo SEM os runs tachados.
+
+    Permite reconhecer subdispositivos preservados dentro de um parágrafo que
+    tem outro trecho tachado (alteração inline de só o caput, por exemplo)."""
+    partes: list[str] = []
+    for run in w_p.iter(_NS + "r"):
+        rpr = run.find(_NS + "rPr")
+        strike = rpr.find(_NS + "strike") if rpr is not None else None
+        tachado = (
+            strike is not None
+            and (strike.get(_NS + "val") or "") not in ("0", "false")
+        )
+        if tachado:
+            continue
         for filho in run:
             if filho.tag == _NS + "t" and filho.text:
                 partes.append(filho.text)
@@ -404,9 +428,16 @@ def _passagem_art15(conteudo: str, parags: list[dict], aplicado: bool,
             passo, objetivo, True, "sem § do art. 15 no original.", t0
         )
     ativas_chaves = [p["chave"] for p in _ativas(parags)]
+    ativos_chaves = [
+        _chave_linha(p.get("ativo") or "") for p in parags if (p.get("ativo") or "").strip()
+    ]
     perdidos: list[str] = []
     for alvo in alvos:
-        no_ativo = any(alvo in k for k in ativas_chaves)
+        # Subitem preservado se aparece no TEXTO ATIVO (mesmo em um parágrafo
+        # que tenha outro trecho tachado — alteração inline só do caput).
+        no_ativo = any(alvo in k for k in ativos_chaves) or any(
+            alvo in k for k in ativas_chaves
+        )
         if no_ativo:
             continue
         # Substituído explicitamente: tachado com verde logo em seguida.
