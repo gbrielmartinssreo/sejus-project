@@ -49,7 +49,11 @@ SKILL_RULES = {
         "keywords": (
             "revisar", "revisão", "revisao", "auditar", "conformidade",
             "inconsistência", "inconsistencia", "antes da publicação",
-            "antes da publicacao", "minuta",
+            "antes da publicacao", "minuta", "análise", "analise",
+            "analisar", "o que está ruim", "o que esta ruim",
+            "pontos fortes", "ponto forte", "pontos fracos", "ponto fraco",
+            "pontos de atenção", "pontos de atencao", "fraqueza",
+            "aprimoramento",
         ),
     },
     "melhorar_documento": {

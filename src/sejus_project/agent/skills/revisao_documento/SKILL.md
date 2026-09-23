@@ -18,6 +18,54 @@ consistente, antes de ser usado como fonte de verdade ou publicado.
 Sempre rode mentalmente a skill `estrutura_ato_normativo` primeiro para
 ter tipo, número, ementa, considerandos, artigos e revogações extraídos.
 
+## Estrutura padrão da resposta de análise
+
+A análise de documento deve sair, **por padrão**, centrada nos problemas e
+lacunas — mas **completa e densa**, não enxuta nem um panorama genérico.
+Ordem fixa:
+
+1. **Pontos fortes (bloco curto no início).** 3–5 bullets de **uma linha
+   cada** sobre o que está realmente sólido (ex.: estrutura em capítulos,
+   fundamentação legal na LEP, cobertura temática dos capítulos). Só isso é
+   breve. Serve de contexto — não é o corpo da análise.
+
+2. **Pontos fracos / apontamentos de correção (corpo principal).** Braço
+   principal da resposta, **desenvolvido por item**. Cada bullet tem:
+   - **Um problema por bullet**, anunciado já na abertura com verbo direto
+     (ex.: *"Falta cláusula de vigência..."*, *"Não há previsão de recurso
+     administrativo..."*, *"Terminologia inconsistente: ora 'DGA-5', ora
+     'DGA 5' no Anexo II."*, *"Ausente previsão de monitoramento/prestação
+     de contas..."*). NÃO comente com tom vago ou suave (ex.: *"poderia ser
+     incluído...", "seria interessante..."*).
+   - **Por que é ruim**: consequência/risco concreto do problema (ex.: gera
+     subjetividade, cria retificação futura, fragiliza o controle, risco de
+     questionamento jurídico).
+   - **Referência** sempre que possível (Art. X / Anexo Y / considerando).
+   - **Sugestão de correção** objetiva ao final.
+   Cada item pode ter **várias frases** — a exigência é objetividade e um
+   único problema por bullet, não brevidade. Como cada bullet alimenta um
+   apontamento acionável da correção (`analysis_registry`), mantenha-o
+   autossuficiente (não depender de contexto que só aparece em outro bullet).
+
+   Exemplo:
+   > ⚠️ **[Vigência]** — Ausência de cláusula de vigência no final do ato.
+   > Sem ela fica indefinido quando a norma passa a produzir efeitos, risco
+   > comum de retificação posterior. Sugestão: acrescentar "Esta Portaria
+   > entra em vigor na data de sua publicação".
+
+3. **Cobertura obrigatória do checklist.** A análise completa deve percorrer
+   **todas** as seções do checklist abaixo (numeração/formatação, ementa↔corpo,
+   fundamentação legal, revogações/vigência, assinaturas/competência,
+   consistência de nomes/matrículas), além de lacunas de conteúdo que afetem
+   a segurança jurídica do ato (prazo de validade, recurso administrativo,
+   monitoramento/prestação de contas, terminologia). Se uma seção não tem
+   problema, diga em uma linha (ex.: "Numeração sequencial: ok") — não a
+   omita. Se a minuta não tiver problemas, afirme isso em uma linha e encerre.
+
+Este formato vale quando o usuário pede análise/revisão de um documento
+enviado. Não se aplica a pergunta geral sobre normas nem a pedido de
+geração de minuta nova — nesses casos responda normalmente.
+
 ## Checklist de revisão
 
 ### 1. Numeração e formatação
@@ -65,14 +113,22 @@ ter tipo, número, ementa, considerandos, artigos e revogações extraídos.
 - [ ] Não há duplicidade de titular/suplente para o mesmo cargo.
 
 ## Como reportar problemas
-Ao encontrar uma inconsistência, reporte no formato:
 
-> ⚠️ **[Categoria]** — Art. X / Anexo Y: [descrição objetiva do problema].
-> Sugestão: [correção proposta, se houver].
+A resposta **começa pelo bloco curto de pontos fortes e segue com os
+apontamentos de correção** (ver "Estrutura padrão da resposta de análise"),
+nunca por panorama geral raso. Cada inconsistência encontrada vira **um
+bullet, um problema por item, desenvolvido** no formato:
+
+> ⚠️ **[Categoria]** — Art. X / Anexo Y: [descrição objetiva da lacuna].
+> [Por que é ruim: consequência/risco.] Sugestão: [correção proposta].
 
 Não reescreva o ato inteiro automaticamente — aponte os pontos e peça
 confirmação antes de gerar uma versão corrigida, pois alterações em atos
-normativos têm efeito jurídico.
+normativos têm efeito jurídico. Esses bullets são exatamente o que alimenta
+a lista de apontamentos acionáveis usada na correção (`analysis_registry`):
+portanto, frase direta desde a abertura, um problema por item e item
+autossuficiente, para que nenhum apontamento fique vago nem seja descartado
+como mera constatação de conformidade.
 
 Quando o usuário confirmar e pedir o **arquivo corrigido**, encaminhe para a
 ferramenta `melhorar_documento_usuario` (fluxo "melhorar e comparar"): ela

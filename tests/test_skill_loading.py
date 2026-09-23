@@ -59,6 +59,38 @@ def test_document_skills_are_selected_by_request(monkeypatch):
     assert "revisao_documento" in selected
 
 
+def test_analise_completa_aciona_skill_revisao_documento(monkeypatch):
+    loader._loaded_skills.clear()
+    monkeypatch.setattr(
+        agent,
+        "messages",
+        [{
+            "role": "user",
+            "content": "quero uma analise completa do documento que enviei",
+        }],
+    )
+
+    selected = loader.skills_for_messages(agent.messages)
+
+    assert "revisao_documento" in selected
+
+
+def test_pedido_de_foco_no_ruim_aciona_skill_revisao_documento(monkeypatch):
+    loader._loaded_skills.clear()
+    monkeypatch.setattr(
+        agent,
+        "messages",
+        [{
+            "role": "user",
+            "content": "foca no que está ruim e nos pontos fracos da norma",
+        }],
+    )
+
+    selected = loader.skills_for_messages(agent.messages)
+
+    assert "revisao_documento" in selected
+
+
 def test_skill_loader_is_outside_agent_module():
     assert not hasattr(agent, "SKILL_RULES")
     assert not hasattr(agent, "_load_skill")
