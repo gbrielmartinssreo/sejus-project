@@ -33,9 +33,39 @@ MAX_CHARS = int(os.getenv("USER_FILES_MAX_CHARS", "60000"))
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 
+# Upload mais recente registrado na sessão de conversa. O /api/upload grava
+# aqui DEPOIS de salvar o arquivo completo, para a tool de análise saber qual
+# arquivo o usuário acabou de enviar sem depender do nome aparecer no texto da
+# mensagem. O registro é limpo junto com o estado da conversa
+# (document_generation.limpar_estado) e é INVALIDADO automaticamente se o
+# arquivo sair da pasta.
+_UPLOAD_SESSAO: str | None = None
+
 
 class UserFileError(Exception):
     pass
+
+
+def registrar_upload(nome: str) -> None:
+    """Registra o arquivo recém-enviado como upload da sessão."""
+    global _UPLOAD_SESSAO
+    _UPLOAD_SESSAO = Path(nome or "").name or None
+
+
+def upload_sessao() -> str | None:
+    """Arquivo registrado como upload da sessão, se ainda existir na pasta."""
+    if not _UPLOAD_SESSAO:
+        return None
+    caminho = IMPORTACOES_DIR / _UPLOAD_SESSAO
+    if caminho.is_file() and caminho.suffix.lower() in SUPPORTED_EXTENSIONS:
+        return _UPLOAD_SESSAO
+    return None
+
+
+def limpar_upload_sessao() -> None:
+    """Descarta o upload registrado (novo ciclo de conversa)."""
+    global _UPLOAD_SESSAO
+    _UPLOAD_SESSAO = None
 
 
 def _list_available_files() -> list[str]:
@@ -48,7 +78,14 @@ def _list_available_files() -> list[str]:
 
 
 def _ultimo_arquivo_importado() -> str | None:
-    """Nome do arquivo importado mais recentemente (por modificação)."""
+    """Upload registrado na sessão; senão o arquivo mais recente (por mtime).
+
+    O registro da sessão tem prioridade para que um upload posterior de outro
+    fluxo (ex.: modelo de formatação via /api/modelo) não "sequestre" o
+    arquivo que o usuário acabou de enviar para análise."""
+    registrado = upload_sessao()
+    if registrado:
+        return registrado
     if not IMPORTACOES_DIR.exists():
         return None
     arquivos = [
@@ -194,7 +231,11 @@ definition = {
             "Lê um arquivo enviado pelo usuário (armazenado na pasta "
             "importacoes_usuario/) e devolve o conteúdo extraído em texto. "
             "Use esta ferramenta quando o usuário pedir para avaliar, revisar "
-            "ou verificar uma minuta/documento que ele enviou. A leitura é "
+            "ou verificar uma minuta/documento que ele enviou. O upload mais "
+            "recente fica registrado na sessão: mesmo que 'filename' esteja "
+            "errado ou incompleto, a ferramenta lê o arquivo enviado e avisa "
+            "no campo 'aviso' qual nome real foi usado (confie no 'filename' "
+            "devolvido — não peça o nome ao usuário de novo). A leitura é "
             "paginada: se o resultado trouxer 'has_more': true, chame a "
             "ferramenta de novo passando 'offset' = 'next_offset' até ler o "
             "documento inteiro antes de concluir a análise. Depois de ler "
@@ -211,8 +252,10 @@ definition = {
                         "Nome do arquivo dentro da pasta importacoes_usuario/ "
                         "(ex: 'minuta_contrato.pdf'). OPCIONAL: se o usuario "
                         "acabou de importar/enviar e nao informou o nome, "
-                        "NAO preencha — a tool usa a importacao mais recente "
-                        "e lista as alternativas."
+                        "NAO preencha — a tool usa o upload registrado na "
+                        "sessao. Se o nome informado nao existir, a tool "
+                        "tambem cai para o upload da sessao e sinaliza no "
+                        "campo 'aviso'."
                     ),
                 },
                 "offset": {
@@ -235,23 +278,46 @@ def analisar_arquivo_usuario(filename: str | None = None, offset: int = 0) -> st
     nunca lança exceção para o chamador, para o agente conseguir reagir
     ao erro (ex: pedir o nome certo do arquivo) em vez de quebrar.
 
-    Sem ``filename``, usa a importação mais recente da pasta (útil quando
-    o usuário acabou de enviar o arquivo e não sabe o nome). A leitura é
-    paginada por ``offset`` para documentos maiores que a janela: o agente
-    continua a partir de ``next_offset`` enquanto ``has_more`` for true."""
-    if not filename:
-        filename = _ultimo_arquivo_importado()
-        if not filename:
-            return json.dumps({
-                "error": "Nenhum arquivo importado ainda.",
-                "available_files": [],
-            }, ensure_ascii=False)
+    Sem ``filename``, usa o upload registrado na sessão (ou, na falta dele, a
+    importação mais recente da pasta). Com ``filename`` inexistente (nome
+    inventado/partial pelo LLM), NÃO falha: cai para o mesmo upload da sessão
+    e devolve o campo ``aviso`` com o nome real lido — assim a análise
+    reconhece o arquivo já no primeiro turno, sem exigir que o usuário repita
+    o nome. A leitura é paginada por ``offset`` para documentos maiores que a
+    janela: o agente continua a partir de ``next_offset`` enquanto
+    ``has_more`` for true."""
+    solicitado = str(filename).strip() if filename else None
+    alvo = solicitado or _ultimo_arquivo_importado()
+
+    if not alvo:
+        return json.dumps({
+            "error": "Nenhum arquivo importado ainda.",
+            "available_files": [],
+        }, ensure_ascii=False)
 
     try:
-        result = read_user_file(filename, offset=offset)
-        return json.dumps(result, ensure_ascii=False)
-    except UserFileError as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
+        result = read_user_file(alvo, offset=offset)
+    except UserFileError as erro:
+        # Nome citado não existe: em vez de devolver "arquivo não encontrado"
+        # (loop em que o usuário precisa repetir o nome), usa o upload da
+        # sessão/documento e avisa qual arquivo foi lido de fato.
+        fallback = _ultimo_arquivo_importado()
+        if not solicitado or not fallback or fallback == Path(alvo).name:
+            return json.dumps({"error": str(erro)}, ensure_ascii=False)
+        try:
+            result = read_user_file(fallback, offset=offset)
+        except UserFileError as erro_fallback:
+            return json.dumps(
+                {"error": str(erro_fallback)},
+                ensure_ascii=False,
+            )
+        result["filename_solicitado"] = solicitado
+        result["aviso"] = (
+            f"Arquivo '{solicitado}' não encontrado; usando o upload mais "
+            f"recente da sessão: '{fallback}'."
+        )
+
+    return json.dumps(result, ensure_ascii=False)
 
 
 if __name__ == "__main__":

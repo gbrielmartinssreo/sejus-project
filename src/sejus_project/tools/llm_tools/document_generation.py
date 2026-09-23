@@ -21,6 +21,7 @@ from sejus_project.tools.llm_tools.user_files import (
     _resolve_file,
     _ultimo_arquivo_importado,
     extract_file_text,
+    limpar_upload_sessao,
 )
 from sejus_project.web.render_html import minuta_para_texto
 
@@ -297,8 +298,10 @@ def limpar_estado():
     _pendencia_mudou_no_turno = False
     _melhoria_no_turno = False
     _ultima_comparacao = None
-    # Nova sessão: as análises da conversa anterior não se aplicam à nova.
+    # Nova sessão: as análises da conversa anterior não se aplicam à nova
+    # e o upload registrado volta a ser descoberto por mtime, se ainda existir.
     analysis_registry.nova_sessao()
+    limpar_upload_sessao()
 
 
 # ---------------------------------------------------------------------------
