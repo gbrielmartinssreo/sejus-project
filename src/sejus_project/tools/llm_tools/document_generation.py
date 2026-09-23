@@ -1325,7 +1325,7 @@ def _descartar_itens_por_rotulo(
     adicoes: list[dict],
     rotulos: set[str],
     descartados: list[str],
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[str]]:
     """Remove itens cujo rótulo está no conjunto; rótulos removidos entram em
     ``descartados`` para constar no relatório da entrega."""
     descartados_novos = list(descartados)
@@ -1343,7 +1343,7 @@ def _descartar_itens_por_rotulo(
     alteracoes = _filtrar(alteracoes, "rotulo", "o_que")
     remocoes = _filtrar(remocoes, "rotulo", None)
     adicoes = _filtrar(adicoes, "o_que", "rotulo")
-    return alteracoes, remocoes, adicoes
+    return alteracoes, remocoes, adicoes, descartados_novos
 
 
 class _SemSaidaDeValidacao(Exception):
@@ -1387,6 +1387,9 @@ def _melhorar_e_relatar(
     if analise_completa:
         valores["analise_completa"] = analise_completa
     valores = valores or None
+    # Declarações de cobertura do modelo (ID -> status/referência) preservadas
+    # para recomputar a cobertura quando o patch for parcialmente descartado.
+    declarada_modelo: list[dict] = []
     # Uma falha de geração/validação do patch NÃO pode barrar a entrega: cai no
     # fallback (cópia intacta) com os apontamentos marcados como falha.
     try:
@@ -1401,6 +1404,7 @@ def _melhorar_e_relatar(
         )
         # Cobertura dos apontamentos da análise (validada contra o patch efetivo).
         cobertura = estrutura.pop("_cobertura_analise", None) or []
+        declarada_modelo = estrutura.pop("_declarada", None) or []
         descartados = estrutura.pop("_descartados", None) or []
         # Marca as mudanças que vieram de um apontamento aprovado da análise,
         # para o comentário do .docx indicar a origem quando não houver lastro.
@@ -1412,7 +1416,8 @@ def _melhorar_e_relatar(
         estrutura = document_improvement._estruturar_original(conteudo)
         alteracoes, remocoes, adicoes, lacunas, descartados = [], [], [], [], []
         cobertura = document_improvement._validar_cobertura(
-            conteudo, [], [], [], apontamentos or [], []
+            conteudo, [], [], [], apontamentos or [], declarada_modelo,
+            patch_descartado=True,
         )
     # Identifica o documento especifico do RAG referenciado pelo 'lastro' de
     # cada mudanca e sinaliza divergencias no relatorio (sem bloquear); em
@@ -1433,7 +1438,8 @@ def _melhorar_e_relatar(
         ]
         alteracoes, remocoes, adicoes = [], [], []
         cobertura = document_improvement._validar_cobertura(
-            conteudo, [], [], [], apontamentos or [], []
+            conteudo, [], [], [], apontamentos or [], declarada_modelo,
+            patch_descartado=True,
         )
     # Persistir propostas com estado pendente
     doc_hash = _hash_documento(filename)
@@ -1498,14 +1504,15 @@ def _melhorar_e_relatar(
                     rotulos = docx_validacao.responsaveis(passagens)
                     if not rotulos or not (alteracoes or remocoes or adicoes):
                         break
-                    alteracoes, remocoes, adicoes = _descartar_itens_por_rotulo(
+                    alteracoes, remocoes, adicoes, descartados = _descartar_itens_por_rotulo(
                         alteracoes, remocoes, adicoes, set(rotulos), descartados
                     )
                     if not (alteracoes or remocoes or adicoes):
                         break
                     cobertura = document_improvement._validar_cobertura(
                         conteudo, alteracoes, remocoes, adicoes,
-                        apontamentos or [], descartados,
+                        apontamentos or [], declarada_modelo,
+                        patch_descartado=True,
                     )
                     output_path = docx_builder.montar_docx_revisado(
                         perfil, alteracoes, remocoes, adicoes, OUTPUTS_DIR
@@ -1530,7 +1537,8 @@ def _melhorar_e_relatar(
             ]
             alteracoes, remocoes, adicoes = [], [], []
             cobertura = document_improvement._validar_cobertura(
-                conteudo, [], [], [], apontamentos or [], []
+                conteudo, [], [], [], apontamentos or [], declarada_modelo,
+                patch_descartado=True,
             )
             passagens = docx_validacao.validar_docx_gerado(
                 conteudo, output_path, [], [], [], aplicado=False
@@ -1546,7 +1554,8 @@ def _melhorar_e_relatar(
             ]
             alteracoes, remocoes, adicoes = [], [], []
             cobertura = document_improvement._validar_cobertura(
-                conteudo, [], [], [], apontamentos or [], []
+                conteudo, [], [], [], apontamentos or [], declarada_modelo,
+                patch_descartado=True,
             )
             passagens = docx_validacao.validar_docx_gerado(
                 conteudo, output_path, [], [], [], aplicado=False
@@ -1606,7 +1615,7 @@ def _melhorar_e_relatar(
     nao_aplicados = [
         c
         for c in cobertura
-        if c.get("status") in ("nao_aplicado", "falhou", "pendente")
+        if c.get("status") in ("nao_aplicado", "falhou", "pendente", "descartado")
     ]
     if apontamentos and nao_aplicados:
         avisos.append(

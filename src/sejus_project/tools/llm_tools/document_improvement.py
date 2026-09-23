@@ -614,6 +614,11 @@ _MELHORIA_MAX_TOKENS_DEFAULT = 8192
 _MELHORIA_JANELA_CHARS_DEFAULT = 60_000
 _MELHORIA_JANELA_OVERLAP_CHARS = 2_000
 
+# Tentativas de geração do patch por janela. Cada tentativa pode reprocessar o
+# JSON quando a sanidade do patch ou a cobertura dos apontamentos fica
+# incompleta/vaga (IDs de apontamento precisam ser ecoados com fidelidade).
+_MAX_TENTATIVAS_PATCH = 3
+
 
 def _tamanho_janela() -> int:
     valor = os.getenv("MELHORIA_JANELA_CHARS")
@@ -1236,6 +1241,10 @@ STATUS_APLICADO = "aplicado"
 STATUS_PENDENTE = "pendente"
 STATUS_NAO_APLICADO = "nao_aplicado"
 STATUS_FALHOU = "falhou"
+# A mudança chegou a ser proposta/executada, mas foi removida depois
+# (validação pós-geração, rede de duplicação) — não é falha de execução do
+# modelo e não deve ser reportada como "não encaminhado".
+STATUS_DESCARTADO = "descartado"
 
 # Motivo genérico NÃO é impedimento: "não foi alterado" não justifica nada.
 _RE_MOTIVO_VAGO = re.compile(
@@ -1393,6 +1402,109 @@ def _marcar_origem(
             )
 
 
+def _normalizar_apontamento_id(valor) -> str:
+    """Normaliza um ID de apontamento para casamento tolerante.
+
+    O modelo pode devolver o ID com espaços, caixa diferente ou pequenos
+    desvios; comparamos a versão alfanumérica em caixa baixa."""
+    return re.sub(r"[^a-z0-9]", "", str(valor or "").casefold())
+
+
+def _procurar_declaracao(
+    por_id: dict[str, dict],
+    por_id_norm: dict[str, dict],
+    identificador,
+) -> dict | None:
+    """Localiza a declaração do modelo para o ID, tolerando variações."""
+    chave = str(identificador or "").strip()
+    if chave in por_id:
+        return por_id[chave]
+    normalizado = _normalizar_apontamento_id(chave)
+    if not normalizado:
+        return None
+    if normalizado in por_id_norm:
+        return por_id_norm[normalizado]
+    # Desvio parcial: o ID declarado contém/é contido no real (prefixo).
+    if len(normalizado) >= 5:
+        for chave_real, declaracao in por_id_norm.items():
+            if chave_real.startswith(normalizado) or normalizado.startswith(chave_real):
+                return declaracao
+    return None
+
+
+_RE_ART_NUM_COBERTURA = re.compile(r"art(?:igo)?\.?\s*(\d{1,3})", re.IGNORECASE)
+
+
+def _localizar_mudanca_por_apontamento(
+    apontamento_texto: str,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> tuple[str, dict, str] | None:
+    """Vincula um apontamento a uma mudança de MESMO teor (última tentativa).
+
+    Usado quando a declaração de cobertura veio ausente ou com referência
+    divergente: em vez de acusar falha de execução, procura no patch uma
+    mudança que trate do mesmo assunto. É conservador — exige sinal forte:
+    número de artigo em comum, termo citado entre aspas, ou tokens relevantes
+    compartilhados (>= 3, ou >= 2 com ao menos um termo longo de domínio)."""
+    texto = apontamento_texto or ""
+    tokens_ap = _tokens_relevantes_apontamento(texto)
+    artigos_ap = set(_RE_ART_NUM_COBERTURA.findall(_remover_acentos(texto)))
+    citados = {
+        _chave_texto(t)
+        for t in re.findall(r"['\u201c\u201d\"]([^'\u201c\u201d\"]{3,60})['\u201c\u201d\"]", texto)
+    }
+    for tipo, grupo in (("alteracao", alteracoes), ("remocao", remocoes), ("adicao", adicoes)):
+        for item in grupo or []:
+            if not isinstance(item, dict):
+                continue
+            rotulo = item.get("rotulo") or item.get("o_que") or ""
+            corpo = " ".join(
+                str(item.get(k) or "")
+                for k in ("rotulo", "o_que", "trecho_original", "novo_texto", "texto")
+            )
+            if artigos_ap and artigos_ap & set(
+                _RE_ART_NUM_COBERTURA.findall(_remover_acentos(corpo))
+            ):
+                return (tipo, item, rotulo)
+            corpo_chave = _chave_texto(corpo)
+            if citados and any(c in corpo_chave for c in citados if c):
+                return (tipo, item, rotulo)
+            comuns = _tokens_relevantes_apontamento(corpo) & tokens_ap
+            if len(comuns) >= 3 or (
+                len(comuns) >= 2 and any(len(p) >= 8 for p in comuns)
+            ):
+                return (tipo, item, rotulo)
+    return None
+
+
+def _tokens_relevantes_apontamento(texto: str) -> set[str]:
+    palavras = re.findall(
+        r"[a-z0-9]{4,}", _remover_acentos((texto or "").casefold())
+    )
+    return {p for p in palavras if p not in _STOPWORDS_TEMA}
+
+
+def _apontamentos_relevantes_janela(
+    apontamentos: list[dict], conteudo_janela: str
+) -> list[dict]:
+    """Apontamentos cujo teor toca o trecho da janela.
+
+    Em documentos multi-janela, cada bloco deve ser cobrado apenas pelos
+    apontamentos cujo assunto aparece nele — exigir a cobertura dos demais
+    forçaria o modelo a 'não aplicar' o que está em outro trecho."""
+    tokens_janela = _tokens_relevantes_apontamento(conteudo_janela)
+    relevantes: list[dict] = []
+    for apontamento in apontamentos or []:
+        if not isinstance(apontamento, dict):
+            continue
+        tokens_ap = _tokens_relevantes_apontamento(apontamento.get("texto") or "")
+        if not tokens_ap or (tokens_ap & tokens_janela):
+            relevantes.append(apontamento)
+    return relevantes
+
+
 def _validar_cobertura(
     conteudo: str,
     alteracoes: list[dict],
@@ -1400,6 +1512,7 @@ def _validar_cobertura(
     adicoes: list[dict],
     apontamentos: list[dict],
     declarada: list[dict] | None,
+    patch_descartado: bool = False,
 ) -> list[dict]:
     """Reconstrói a cobertura a partir dos IDs e das mudanças EFETIVAS.
 
@@ -1411,6 +1524,8 @@ def _validar_cobertura(
     - ``pendente``: mudança inserida, mas requer decisão jurídica (lastro) —
       só para itens de ``iniciativa_modelo``; apontamento aprovado não cai em
       pendente apenas por ausência de lastro no acervo;
+    - ``descartado``: a mudança foi proposta, mas removida depois (validação
+      pós-geração/rede de duplicação) — ``patch_descartado`` ativa esse status;
     - ``falhou``: apontamento não encaminhado, referência inexistente, âncora
       não localizada ou justificativa vaga ('não foi alterado' não justifica);
     - ``nao_aplicado``: impedimento CONCRETO informado pela melhoria.
@@ -1419,6 +1534,11 @@ def _validar_cobertura(
         str(d.get("apontamento_id") or "").strip(): d
         for d in (declarada or [])
         if isinstance(d, dict)
+    }
+    por_id_norm = {
+        _normalizar_apontamento_id(d.get("apontamento_id")): d
+        for d in (declarada or [])
+        if isinstance(d, dict) and _normalizar_apontamento_id(d.get("apontamento_id"))
     }
     cobertura: list[dict] = []
     for apontamento in apontamentos or []:
@@ -1433,8 +1553,25 @@ def _validar_cobertura(
             "referencia": "",
             "motivo": "",
         }
-        declaracao = por_id.get(str(identificador))
+        declaracao = _procurar_declaracao(por_id, por_id_norm, identificador)
         if declaracao is None:
+            # Sem declaração: antes de acusar falha, tenta vincular por teor a
+            # uma mudança efetiva de mesmo assunto (evita falso 'não encaminhado').
+            achado = _localizar_mudanca_por_apontamento(
+                entrada["apontamento"], alteracoes, remocoes, adicoes
+            )
+            if achado is not None:
+                tipo, item, rotulo = achado
+                status, motivo_tecnico = _mudanca_aplicada(conteudo, tipo, item)
+                entrada["referencia"] = rotulo
+                entrada["status"] = status
+                entrada["motivo"] = (
+                    "vinculado por teor à mudança do patch; declaração de "
+                    "cobertura ausente na melhoria"
+                    + (f" ({motivo_tecnico})" if motivo_tecnico else "")
+                )
+                cobertura.append(entrada)
+                continue
             entrada["motivo"] = (
                 "o apontamento não foi encaminhado pela melhoria "
                 "(falha de execução)"
@@ -1451,6 +1588,12 @@ def _validar_cobertura(
             if _motivo_concreto(motivo):
                 entrada["status"] = STATUS_NAO_APLICADO
                 entrada["motivo"] = motivo
+            elif patch_descartado:
+                entrada["status"] = STATUS_DESCARTADO
+                entrada["motivo"] = (
+                    "a mudança declarada foi removida na validação pós-geração "
+                    "para preservar a integridade do documento"
+                )
             else:
                 entrada["status"] = STATUS_FALHOU
                 entrada["motivo"] = (
@@ -1463,12 +1606,23 @@ def _validar_cobertura(
 
         localizada = _localizar_mudanca(referencia, alteracoes, remocoes, adicoes)
         if localizada is None:
-            entrada["referencia"] = referencia
-            entrada["status"] = STATUS_FALHOU
-            entrada["motivo"] = (
-                "a referência informada não corresponde a nenhuma mudança "
-                "aplicada no patch (falha de execução)"
+            localizada = _localizar_mudanca_por_apontamento(
+                entrada["apontamento"], alteracoes, remocoes, adicoes
             )
+        if localizada is None:
+            entrada["referencia"] = referencia
+            if patch_descartado:
+                entrada["status"] = STATUS_DESCARTADO
+                entrada["motivo"] = (
+                    "a mudança declarada foi removida na validação pós-geração "
+                    "para preservar a integridade do documento"
+                )
+            else:
+                entrada["status"] = STATUS_FALHOU
+                entrada["motivo"] = (
+                    "a referência informada não corresponde a nenhuma mudança "
+                    "aplicada no patch (falha de execução)"
+                )
             cobertura.append(entrada)
             continue
 
@@ -2038,19 +2192,21 @@ def gerar_estrutura_melhoria(
     descartados = descartados_renumeracao + descartados
 
     # Cobertura dos apontamentos validada UMA vez sobre o patch consolidado.
+    declarada_consolidada = _dedupe_declarada(declarada)
     cobertura = _validar_cobertura(
         conteudo,
         alteracoes,
         remocoes,
         adicoes,
         apontamentos,
-        _dedupe_declarada(declarada),
+        declarada_consolidada,
     )
     cobertura = _reconciliar_cobertura_automatica(
         cobertura, alteracoes, apontamentos
     )
     estrutura = _construir_estrutura(conteudo, alteracoes, remocoes, numero, ementa)
     estrutura["_cobertura_analise"] = cobertura
+    estrutura["_declarada"] = declarada_consolidada
     estrutura["_descartados"] = descartados
     return estrutura, alteracoes, remocoes, adicoes, lacunas
 
@@ -2069,16 +2225,26 @@ def _gerar_patch_janela(
 
     Devolve (dados, alteracoes, remocoes, adicoes, lacunas, declarada). A
     sanidade do patch (``_problemas_do_patch``) é validada contra o texto da
-    janela e, em caso de falha, re-tenta uma vez com a mensagem direcionada. A
-    cobertura dos apontamentos só é exigida em janela única (``rotulo_janela``
-    vazio): em documentos multi-janela ela é validada sobre o patch consolidado.
+    janela e, em caso de falha, re-tenta com a mensagem direcionada. A cobertura
+    dos apontamentos é exigida em janela única; em documentos multi-janela é
+    cobrada apenas pelos apontamentos cujo assunto aparece na janela (e o
+    consolidado ainda é validado em ``gerar_estrutura_melhoria``).
     """
+    apontamentos_janela = (
+        _apontamentos_relevantes_janela(apontamentos, conteudo)
+        if rotulo_janela
+        else apontamentos
+    )
+    valores_janela = valores
+    if valores is not None and (valores.get("apontamentos") is not None):
+        valores_janela = dict(valores)
+        valores_janela["apontamentos"] = apontamentos_janela
     mensagens = [
         {"role": "system", "content": _sistema_melhoria()},
         {
             "role": "user",
             "content": _usuario_melhoria(
-                conteudo, tipo_ato, perfil, contexto, valores, rotulo_janela
+                conteudo, tipo_ato, perfil, contexto, valores_janela, rotulo_janela
             ),
         },
     ]
@@ -2090,7 +2256,7 @@ def _gerar_patch_janela(
     lacunas: list[dict] = []
     declarada: list[dict] = []
 
-    for tentativa in range(2):
+    for tentativa in range(_MAX_TENTATIVAS_PATCH):
         dados = _extrair_json_com_retry(
             mensagens,
             MELHORIA_DEFINITION,
@@ -2117,7 +2283,8 @@ def _gerar_patch_janela(
         # Origem deterministica por item: muda o tratamento do lastro. Itens que
         # a cobertura vincula a um apontamento da analise sao 'aprovados' e nao
         # sao bloqueados pela ausencia de lastro; o restante e 'iniciativa do
-        # modelo' e mantem a exigencia atual de lastro forte.
+        # modelo' e mantem a exigencia atual de lastro forte. A vinculacao usa a
+        # lista COMPLETA de apontamentos (não apenas os da janela).
         _marcar_origem(alteracoes, remocoes, adicoes, declarada, apontamentos)
         # Identifica o documento especifico do RAG referenciado pelo 'lastro'
         # de cada mudanca (sinaliza divergencias sem bloquear a melhoria) e
@@ -2129,22 +2296,21 @@ def _gerar_patch_janela(
         _checar_coerencia_lastros(alteracoes, remocoes, adicoes, contexto)
 
         problemas = _problemas_do_patch(conteudo, alteracoes, remocoes)
-        problemas_cob = (
-            _problemas_cobertura(apontamentos, declarada) if not rotulo_janela else []
-        )
+        problemas_cob = _problemas_cobertura(apontamentos_janela, declarada)
         if not problemas and not problemas_cob:
             break
 
-        if tentativa == 0:
+        if tentativa < _MAX_TENTATIVAS_PATCH - 1:
             mensagens_retry = []
             if problemas:
                 mensagens_retry.append(_mensagem_retry_especifica(problemas))
             if problemas_cob:
                 mensagens_retry.append(_mensagem_retry_cobertura(problemas_cob))
-            mensagens.append(
-                {"role": "user", "content": "\n".join(mensagens_retry)}
-            )
+            if mensagens_retry:
+                mensagens.append(
+                    {"role": "user", "content": "\n".join(mensagens_retry)}
+                )
 
-    # As duas tentativas podem falhar: entrega o melhor esforço mesmo incompleto,
+    # As tentativas podem falhar: entrega o melhor esforço mesmo incompleto,
     # para que o arquivo sempre seja gerado e entregue ao usuário.
     return dados, alteracoes, remocoes, adicoes, lacunas, declarada

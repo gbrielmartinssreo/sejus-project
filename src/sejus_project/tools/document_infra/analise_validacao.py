@@ -422,7 +422,19 @@ _RE_INSTRUCAO = re.compile(
 _RE_CONFORMIDADE = re.compile(
     r"\b(abrangente|atualizada|atualizado|pertinentes?|equilibrad[oa]s?|"
     r"consistente|coerente|bem\s+(?:delinead|definid|regulamentad)|"
-    r"boas?\s+pr[áa]ticas?|pre[é]via)\b",
+    r"boas?\s+pr[áa]ticas?|pre[é]via|"
+    r"estabelece\s+crit[ée]rios|previs[ãa]o\s+detalhada|"
+    r"promovendo\s+(?:transpar[êe]ncia|seguran[çc]a)|"
+    r"estrutura\s+(?:clara|organizada)|crit[ée]rios\s+objetivos)\b",
+    re.IGNORECASE,
+)
+# Falas de abertura/encerramento e resumos do analista: não pedem alteração.
+_RE_INTRO_CONCLUSAO = re.compile(
+    r"(^\s*(?:aqui\s+est[áa]|segue\s+(?:a|o)\s|esta\s+[ée]\s+a|"
+    r"conclus[ãa]o\b|em\s+s[íi]ntese\b|resumo\b|s[íi]ntese\b)|"
+    r"crit[ée]rios\s+de\s+revis|"
+    r"\bo\s+documento\s+(?:est[áa]|foi|permanece|encontra).{0,240}"
+    r"\brecomenda-?se\b)",
     re.IGNORECASE,
 )
 # Contraste/condicional que indica que o item, apesar do elogio, PEDE mudança.
@@ -674,6 +686,11 @@ def _motivo_descarte_constatacao(apontamento: str) -> str | None:
     Não dispara quando há verbo de instrução, negação/ausência ou contraste
     ('mas', 'porém'), que indicam que o item, apesar do tom, pede mudança."""
     texto = apontamento or ""
+    if _RE_INTRO_CONCLUSAO.search(texto):
+        return (
+            "fala de abertura/encerramento ou resumo da análise, não é "
+            "instrução de alteração — mantida apenas na análise."
+        )
     if not _RE_CONFORMIDADE.search(texto):
         return None
     if _RE_INSTRUCAO.search(texto):

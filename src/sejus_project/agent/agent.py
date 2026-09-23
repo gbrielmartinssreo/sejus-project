@@ -331,6 +331,7 @@ def _cobertura_para_texto(cobertura) -> str:
         ("aplicado", "Aplicados"),
         ("pendente", "Pendentes de decisão jurídica"),
         ("nao_aplicado", "Não aplicados (impedimento)"),
+        ("descartado", "Mudanças descartadas na validação"),
         ("falhou", "Falhas de execução"),
     )
     linhas = ["Cobertura dos apontamentos da análise:"]
