@@ -1,4 +1,5 @@
 # SEJUS Project
+![Status do Projeto](https://img.shields.io/badge/Status-Em andamento-yellow)
 
 Agente para consulta de atos normativos da SEJUS usando RAG e para geracao de
 minutas. A interacao principal e via chat no navegador (localhost); a CLI
