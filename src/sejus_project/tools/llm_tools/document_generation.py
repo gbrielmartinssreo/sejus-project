@@ -1480,7 +1480,11 @@ def _melhorar_e_relatar(
         a
         for grupo in (alteracoes, remocoes, adicoes)
         for a in grupo
-        if (a.get("lastro") or "").strip() and a.get("lastro_validado") is not True
+        if (
+            (a.get("lastro") or "").strip()
+            and a.get("lastro_validado") is not True
+            and a.get("origem") != document_improvement.ORIGEM_ANALISE_APROVADA
+        )
     ]
     if lastros_divergentes:
         labels = []
@@ -1496,6 +1500,7 @@ def _melhorar_e_relatar(
         for grupo in (alteracoes, adicoes)
         for a in grupo
         if a.get("coerencia_aviso")
+        and a.get("origem") != document_improvement.ORIGEM_ANALISE_APROVADA
     ]
     if incoerentes:
         labels = ", ".join(

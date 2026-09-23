@@ -340,7 +340,12 @@ def test_melhoria_definition_tem_remocoes_adicoes_e_lacunas():
     assert props["alteracoes"]["items"]["properties"]["tipo"]["description"].startswith(
         "'alterado'"
     )
-    assert props["remocoes"]["items"]["required"] == ["rotulo", "trecho_original", "detalhe"]
+    assert props["remocoes"]["items"]["required"] == [
+        "rotulo",
+        "trecho_original",
+        "detalhe",
+        "origem",
+    ]
 
 
 def test_padronizar_mantem_itens_capitulo_em_ordem():
@@ -407,6 +412,18 @@ def test_schema_estende_lastro_e_requer_decisao_juridica():
     assert "lastro" in remocoes
     assert "requer_decisao_juridica" in adicoes
     assert "[PRAZO A DEFINIR PELA SECRETARIA]" in minuta._sistema_melhoria()
+    # Origem por item (apontamento aprovado vs. iniciativa do modelo).
+    for grupo in (alteracoes, remocoes, adicoes):
+        assert grupo["origem"]["enum"] == [
+            minuta.ORIGEM_ANALISE_APROVADA,
+            minuta.ORIGEM_INICIATIVA_MODELO,
+        ]
+    assert "origem" in props["alteracoes"]["items"]["required"]
+    assert "origem" in props["remocoes"]["items"]["required"]
+    assert "origem" in props["adicoes_estruturais"]["items"]["required"]
+    sistema = minuta._sistema_melhoria()
+    assert "origem_analise_aprovada" in sistema
+    assert "iniciativa_modelo" in sistema
 
 
 def test_validar_lastros_tambem_anota_alteracoes_e_remocoes():

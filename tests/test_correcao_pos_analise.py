@@ -183,6 +183,179 @@ def test_cobertura_pendente_quando_lastro_invalido():
     assert "lastro" in cobertura[0]["motivo"]
 
 
+def test_marcar_origem_vincula_item_ao_apontamento_aprovado():
+    """Mudança que a cobertura vincula a um apontamento da análise vira
+    'origem_analise_aprovada'; as demais ficam 'iniciativa_modelo'."""
+    alteracoes = [
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 1º",
+            "trecho_original": "Art. 1º Texto original do artigo.",
+            "novo_texto": "Art. 1º Texto corrigido.",
+            "detalhe": "x",
+        },
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 2º",
+            "trecho_original": "Art. 2º Outro texto.",
+            "novo_texto": "Art. 2º Ajuste próprio do modelo.",
+            "detalhe": "y",
+        },
+    ]
+    minuta._marcar_origem(
+        alteracoes,
+        [],
+        [],
+        [{"apontamento_id": "ap-1", "status": "aplicado", "referencia": "Art. 1º"}],
+        [{"id": "ap-1", "texto": "corrigir o art. 1º"}],
+    )
+    assert alteracoes[0]["origem"] == minuta.ORIGEM_ANALISE_APROVADA
+    assert alteracoes[1]["origem"] == minuta.ORIGEM_INICIATIVA_MODELO
+
+
+def test_marcar_origem_nao_aceita_rotulo_declarado_sem_vinculo():
+    """A origem é determinística: declaração do modelo sem vínculo real na
+    cobertura não escapa da exigência de lastro (cai em iniciativa_modelo)."""
+    alteracoes = [
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 1º",
+            "trecho_original": "Art. 1º Texto original do artigo.",
+            "novo_texto": "Art. 1º Texto com invento próprio.",
+            "detalhe": "x",
+            "origem": minuta.ORIGEM_ANALISE_APROVADA,
+        }
+    ]
+    minuta._marcar_origem(alteracoes, [], [], [], [{"id": "ap-1", "texto": "x"}])
+    assert alteracoes[0]["origem"] == minuta.ORIGEM_INICIATIVA_MODELO
+
+
+def test_cobertura_aprovado_com_lastro_ausente_nao_vira_pendente():
+    """Apontamento aprovado pelo usuário: ausência de lastro no acervo não
+    rebaixa a cobertura para pendente (o item é aplicado)."""
+    alteracoes = [
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 1º",
+            "trecho_original": "Art. 1º Texto original do artigo.",
+            "novo_texto": "Art. 1º Texto com prazo novo.",
+            "detalhe": "x",
+            "lastro": "IN fantasma 99/9999",
+            "lastro_validado": False,
+            "origem": minuta.ORIGEM_ANALISE_APROVADA,
+        }
+    ]
+    cobertura = minuta._validar_cobertura(
+        _DOC,
+        alteracoes,
+        [],
+        [],
+        [{"id": "ap-1", "texto": "prever prazo"}],
+        [{"apontamento_id": "ap-1", "status": "aplicado", "referencia": "Art. 1º"}],
+    )
+    assert cobertura[0]["status"] == "aplicado"
+    assert cobertura[0]["motivo"] == ""
+
+
+def test_cobertura_iniciativa_modelo_sem_lastro_continua_pendente():
+    """Item sem vínculo com apontamento mantém a exigência antiga de lastro."""
+    alteracoes = [
+        {
+            "tipo": "corrigido",
+            "rotulo": "Art. 2º",
+            "trecho_original": "Art. 2º Outro texto.",
+            "novo_texto": "Art. 2º Texto com exigência nova.",
+            "detalhe": "x",
+            "lastro": "IN fantasma 99/9999",
+            "lastro_validado": False,
+            "origem": minuta.ORIGEM_INICIATIVA_MODELO,
+        }
+    ]
+    cobertura = minuta._validar_cobertura(
+        _DOC,
+        alteracoes,
+        [],
+        [],
+        [{"id": "ap-1", "texto": "prever prazo"}],
+        [{"apontamento_id": "ap-1", "status": "aplicado", "referencia": "Art. 2º"}],
+    )
+    assert cobertura[0]["status"] == "pendente"
+    assert "lastro" in cobertura[0]["motivo"]
+
+
+def test_validar_lastros_aprovado_registra_origem_em_vez_de_inventada():
+    itens = [
+        {
+            "rotulo": "Art. 3º",
+            "lastro": "Decreto 99/9999",
+            "origem": minuta.ORIGEM_ANALISE_APROVADA,
+        }
+    ]
+    minuta._validar_lastros(itens, [])
+    assert itens[0]["lastro_validado"] is False
+    assert itens[0]["lastro_aviso"] == (
+        "Origem: apontamento da análise, aprovado pelo usuário."
+    )
+    assert "inventada" not in itens[0]["lastro_aviso"]
+
+
+def test_validar_lastros_iniciativa_modelo_mantem_aviso_de_inventada():
+    itens = [{"rotulo": "Art. 3º", "lastro": "Decreto 99/9999"}]
+    minuta._validar_lastros(itens, [])
+    assert itens[0]["lastro_validado"] is False
+    assert "nao identifica nenhum ato" in itens[0]["lastro_aviso"]
+
+
+def test_checar_coerencia_exclui_item_aprovado():
+    """Apontamento aprovado: lastro descoerente não gera requer_decisao_juridica
+    automático nem pendência por coerência."""
+    alteracoes = [
+        {
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º Cabe recurso em caso de negativa.",
+            "novo_texto": "Art. 3º Cabe recurso em caso de negativa administrativa.",
+            "lastro": "IN 07/2026, art. 13",
+            "requer_decisao_juridica": False,
+            "origem": minuta.ORIGEM_ANALISE_APROVADA,
+        }
+    ]
+    contexto = [
+        {
+            "source_file": "IN_07-2026.docx",
+            "act_type": "IN",
+            "act_number": "07/2026",
+            "text": "O registro terá validade de 02 anos, renovável por igual período.",
+        }
+    ]
+    minuta._checar_coerencia_lastros(alteracoes, [], [], contexto)
+    assert alteracoes[0].get("requer_decisao_juridica") is False
+    assert "coerencia_aviso" not in alteracoes[0]
+
+
+def test_checar_coerencia_mantem_marca_para_iniciativa_modelo():
+    alteracoes = [
+        {
+            "rotulo": "Art. 3º",
+            "trecho_original": "Art. 3º Cabe recurso em caso de negativa.",
+            "novo_texto": "Art. 3º Cabe recurso em caso de negativa administrativa.",
+            "lastro": "IN 07/2026, art. 13",
+            "requer_decisao_juridica": False,
+            "origem": minuta.ORIGEM_INICIATIVA_MODELO,
+        }
+    ]
+    contexto = [
+        {
+            "source_file": "IN_07-2026.docx",
+            "act_type": "IN",
+            "act_number": "07/2026",
+            "text": "O registro terá validade de 02 anos, renovável por igual período.",
+        }
+    ]
+    minuta._checar_coerencia_lastros(alteracoes, [], [], contexto)
+    assert alteracoes[0].get("requer_decisao_juridica") is True
+    assert "coerencia_aviso" in alteracoes[0]
+
+
 def test_cobertura_apontamento_sem_declaracao_falhou():
     cobertura = minuta._validar_cobertura(
         _DOC, [], [], [], [{"id": "ap-1", "texto": "corrigir algo"}], []
