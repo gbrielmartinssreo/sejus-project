@@ -47,7 +47,15 @@ Abra `http://localhost:8000`.
 - `GET /api/minuta/pdf` — converte esse DOCX em PDF via LibreOffice.
 - `GET /api/arquivo/{nome}` — baixa um arquivo de `importacoes_usuario/` (usado
   na comparação antes/depois).
+- `POST /api/modelo` — define um `.docx` enviado pelo usuário como modelo de
+  formatação ativo para a próxima geração.
 - `POST /api/conversa/limpar` — reseta o histórico e o estado de geração.
+- O botão **Revisar e gerar DOCX** (estrela na barra de ações) dispara de uma
+  vez o fluxo análise → correção: analisa o arquivo enviado e já entrega o DOCX
+  corrigido com a comparação antes/depois.
+- O botão **Usar como modelo** define um `.docx` como modelo de formatação
+  ativo (endpoint `POST /api/modelo`); a próxima minuta segue exatamente aquele
+  layout.
 - No chat, peca uma minuta; o agente pergunta se voce quer informar os campos
   (numero, data, signatario, cargo, ementa) ou se prefere que ela seja
   preenchida automaticamente com dados plausiveis para revisao.
@@ -67,7 +75,8 @@ não reescreve o documento — ele devolve apenas as mudanças ancoradas ao text
 original (`alteracoes`, `remocoes` e `adicoes_estruturais`). O sistema copia o
 original e aplica o patch, então parágrafos não citados permanecem intactos e o
 resultado nunca é truncado por limite de tokens. A página mostra a comparação
-antes/depois (alterações, remoções, adições estruturais e lacunas).
+antes/depois (alterações, remoções, adições estruturais, lacunas e mudanças
+descartadas na validação).
 
 Para entradas `.docx`, o resultado servido por `GET /api/minuta/docx` é uma
 **cópia do arquivo original com as mudanças já marcadas**:
@@ -76,6 +85,9 @@ Para entradas `.docx`, o resultado servido por `GET /api/minuta/docx` é uma
 - texto alterado/removido fica visível com tachado;
 - um parágrafo coberto por um novo texto que **funde** caput + subitem sai
   tachado, sem o subitem ser reinserido (evita duplicação);
+- quando só um dispositivo de um parágrafo físico com vários (caput + §/incisos
+  no mesmo `<w:p>`) é alterado ou removido, apenas o dispositivo-alvo é marcado
+  e reposto — os subdispositivos não abrangidos são preservados;
 - parágrafos iguais permanecem intactos.
 
 A melhoria também inclui:
@@ -94,6 +106,12 @@ não foi fixado) e não permite revogação genérica sem citar a norma. Um `las
 cujo assunto não coincida com o do texto alterado também marca o item com
 `requer_decisao_juridica` e adiciona um aviso de divergência temática.
 
+Uma mudança que executa um **apontamento aprovado da análise** (origem
+`origem_analise_aprovada`) não depende de ato no acervo: a ausência de lastro
+no RAG não bloqueia a aplicação nem gera `requer_decisao_juridica` automático —
+só critério jurídico de fato (depende de decisão explícita, conflita com norma
+superior ou cria despesa sem previsão).
+
 `GET /api/minuta/pdf` converte essa cópia marcada em PDF (via LibreOffice),
 então as marcas verdes/tachado aparecem também no PDF. O arquivo original
 continua disponível em `GET /api/arquivo/{nome}` para conferência.
@@ -109,6 +127,13 @@ documento, pede uma análise e em seguida pede para **corrigir e entregar o
 arquivo corrigido** (ex.: "consegue fazer a correção?", "me dê o arquivo
 corrigido"), o pedido vai **direto para a melhoria do documento enviado** — não
 abre o formulário de geração de um ato novo.
+
+O botão **Revisar e gerar DOCX** da interface é um atalho exatamente para esse
+fluxo, sem depender de pedido em texto: com análise registrada para a mesma
+versão do arquivo ele reutiliza os apontamentos existentes (inclusive
+aprofundamentos); sem análise, roda uma **análise isolada** (o motor do agente,
+em histórico separado, para não poluir a conversa) e já executa a melhoria com
+os apontamentos consolidados.
 
 - A análise completa do documento é preservada por **sessão e documento**,
   versionada pelo hash do conteúdo. Só a versão efetivamente analisada é usada
@@ -133,6 +158,9 @@ abre o formulário de geração de um ato novo.
     ou justificativa vaga ("não foi alterado" não justifica);
   - **não aplicado**: impedimento concreto informado (ex.: depende de decisão
     jurídica, conflita com norma superior, cria despesa sem previsão).
+  - **descartado**: mudança proposta, mas removida na validação pós-geração
+    (âncora inexistente, duplicação ou contradição com o original) — não é
+    rebaixado para outro status nem contado como falha.
 - **A entrega nunca fica sem arquivo**: se todas as correções funcionarem, sai o
   DOCX corrigido; se só algumas, sai o DOCX parcialmente corrigido com as
   pendências listadas; se nenhuma, sai uma **cópia intacta** do original com o
@@ -251,3 +279,10 @@ uv run pytest tests/ -q
   e a não duplicação de parágrafo fundido; em `test_minuta_melhoria`: o lastro
   estendido a `alteracoes`/`remocoes`, o `requer_decisao_juridica` e a
   checagem de coerência temática.
+- `tests/test_correcao_pos_analise.py` — fluxo análise → correção: apontamentos
+  acionáveis com ID estável, registro por sessão/documento/hash, cobertura
+  conferida contra o patch efetivo (inclusive o status `descartado`) e o
+  encaminhamento direto para a melhoria.
+- `tests/test_revisar_gerar_subdispositivos.py` — botão "Revisar e gerar DOCX"
+  (atalho análise → correção) e a preservação de §/incisos quando a alteração
+  atinge só o caput de um parágrafo físico do Word.
