@@ -437,34 +437,60 @@ def _ancora_para_comentario(item: dict) -> str:
     return ""
 
 
+_TEXTO_ORIGEM_APONTAMENTO = "Origem: apontamento da análise, aprovado pelo usuário."
+
+_TEXTO_SEM_LASTRO = (
+    "Mudança sem lastro identificado no acervo (a referência pode ter sido "
+    "inventada ou a correção é apenas redacional)."
+)
+
+
+def _texto_comentario(item: dict) -> str:
+    """Texto do comentário nativo de uma mudança, conforme a origem dela.
+
+    * Com ``lastro``: mantém o texto atual — 'Lastro: <ato>.' mais as ressalvas
+      de validação/coerência quando houver (lastro validado ou aviso de
+      divergência), para a equipe jurídica conferir a fonte.
+    * Sem lastro, mas com origem em apontamento da análise aprovado: registra a
+      origem da mudança.
+    * Sem lastro e sem origem de análise (iniciativa do modelo): aviso
+      equivalente ao de 'lastro não localizado'.
+    """
+    lastro = (item.get("lastro") or "").strip()
+    if lastro:
+        texto = f"Lastro: {lastro}."
+        for ressalva in (
+            (item.get("lastro_aviso") or "").strip(),
+            (item.get("coerencia_aviso") or "").strip(),
+        ):
+            if ressalva:
+                texto += f" {ressalva}"
+        return texto
+    if item.get("origem_apontamento"):
+        return _TEXTO_ORIGEM_APONTAMENTO
+    return _TEXTO_SEM_LASTRO
+
+
 def _comentarios_das_mudancas(
     alteracoes: list[dict],
     remocoes: list[dict],
     adicoes: list[dict],
 ) -> list[tuple[str, str]]:
-    """(âncora, texto do comentário) para cada mudança com ``lastro``.
+    """(âncora, texto do comentário) para CADA mudança marcada.
 
-    O comentário nativo do Word carrega o lastro identificado (e a ressalva,
-    quando houver), para a equipe jurídica conferir a fonte antes da publicação."""
+    Diferente de antes (apenas mudanças com ``lastro`` identificado), agora todo
+    trecho que vai marcado verde/tachado recebe comentário nativo do Word, para
+    a equipe localizar rapidamente o que mudou. O texto varia conforme a origem:
+    lastro validado, aviso de divergência, apontamento aprovado da análise ou
+    iniciativa do modelo (``_texto_comentario``)."""
     comentarios: list[tuple[str, str]] = []
     for item in (*alteracoes, *remocoes, *adicoes):
         if not isinstance(item, dict):
             continue
-        lastro = (item.get("lastro") or "").strip()
-        if not lastro:
-            continue
         ancora = _ancora_para_comentario(item)
         if not ancora:
             continue
-        texto = f"Lastro: {lastro}."
-        ressalvas = [
-            (item.get("lastro_aviso") or "").strip(),
-            (item.get("coerencia_aviso") or "").strip(),
-        ]
-        for ressalva in ressalvas:
-            if ressalva:
-                texto += f" {ressalva}"
-        comentarios.append((ancora, texto))
+        comentarios.append((ancora, _texto_comentario(item)))
     return comentarios
 
 
@@ -611,8 +637,10 @@ def montar_docx_revisado(
     No topo do arquivo é inserida uma página de resumo (4.1): título, legenda
     das cores, tabela com uma linha por mudança e quebra de página. Parágrafos
     com ``requer_decisao_juridica=True`` ganham fundo amarelo (4.2) e um aviso
-    em destaque em itálico logo abaixo (4.3). Alterações/adições com ``lastro``
-    viram comentários nativos do Word ancorados no texto (4.4).
+    em destaque em itálico logo abaixo (4.3). Toda mudança marcada
+    verde/tachado recebe comentário nativo do Word ancorado no texto (4.4),
+    carregando o lastro validado, o aviso de divergência ou a origem
+    (apontamento aprovado da análise / iniciativa do modelo).
     """
     doc = _abrir_ou_criar(perfil.file)
     refs = _referencias(doc, perfil)

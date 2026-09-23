@@ -1071,6 +1071,28 @@ def test_fluxo_completo_analise_aprofundamento_correcao_docx(monkeypatch, tmp_pa
     ]
     assert len(novos) == 1
 
+    # A mudança veio do apontamento aprovado da análise: o comentário nativo
+    # do .docx registra a origem (mesmo sem lastro) e bate com o resumo.
+    import zipfile
+
+    from lxml import etree
+
+    assert _ALTERACAO19.get("origem_apontamento") is True
+    with zipfile.ZipFile(str(output_path)) as arquivo:
+        tree_comentarios = etree.fromstring(arquivo.read("word/comments.xml"))
+    textos_comentarios = [
+        " ".join(t.text or "" for t in c.iter(ns + "t")) for c in tree_comentarios.iter(ns + "comment")
+    ]
+    assert any(
+        t and "Origem: apontamento da análise, aprovado pelo usuário." in t
+        for t in textos_comentarios
+    )
+    n_comentarios = len(list(tree_comentarios.iter(ns + "comment")))
+    n_linhas_dados = 0
+    for tbl in doc_final.element.body.iter(ns + "tbl"):
+        n_linhas_dados += sum(1 for _ in tbl.iter(ns + "tr")) - 1
+    assert n_linhas_dados == n_comentarios
+
 
 # ---------------------------------------------------------------------------
 # Fallback de entrega: sempre disponibiliza um arquivo

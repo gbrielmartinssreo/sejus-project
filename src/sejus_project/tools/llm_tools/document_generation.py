@@ -1308,6 +1308,11 @@ def _melhorar_e_relatar(
         # Cobertura dos apontamentos da análise (validada contra o patch efetivo).
         cobertura = estrutura.pop("_cobertura_analise", None) or []
         descartados = estrutura.pop("_descartados", None) or []
+        # Marca as mudanças que vieram de um apontamento aprovado da análise,
+        # para o comentário do .docx indicar a origem quando não houver lastro.
+        document_improvement._marcar_origem_apontamento(
+            alteracoes, remocoes, adicoes, cobertura
+        )
     except Exception:  # noqa: BLE001 - entrega a cópia intacta em vez de falhar
         estrutura = document_improvement._estruturar_original(conteudo)
         alteracoes, remocoes, adicoes, lacunas, descartados = [], [], [], [], []
