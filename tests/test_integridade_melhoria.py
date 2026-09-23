@@ -692,6 +692,30 @@ def test_validacao_de_lastro_cobre_adicao_estrutural_no_comentario():
     assert "nao identifica nenhum ato" in texto
 
 
+def test_comentario_de_item_aprovado_registra_origem_em_vez_de_aviso_de_lastro():
+    """(2/4.4) Item de origem_analise_aprovada sem lastro no acervo: o comentário
+    nativo registra a origem ('apontamento da análise, aprovado pelo usuário')
+    e NÃO o aviso de 'a referência pode ter sido inventada'."""
+    adicoes = [
+        {
+            "o_que": "Art. 4º-A",
+            "texto": "Art. 4º-A Independentemente de consulta, recurso tempestivo.",
+            "lastro": "EDITAL DEFERIMENTO [tema: recurso_administrativo]",
+            "origem": minuta.ORIGEM_ANALISE_APROVADA,
+        }
+    ]
+
+    minuta._validar_lastros(adicoes, [])
+    assert adicoes[0]["lastro_validado"] is False
+    assert "apontamento da análise, aprovado pelo usuário" in adicoes[0]["lastro_aviso"]
+
+    comentarios = docx_builder._comentarios_das_mudancas([], [], adicoes)
+    assert len(comentarios) == 1
+    _, texto = comentarios[0]
+    assert "Origem: apontamento da análise, aprovado pelo usuário" in texto
+    assert "inventada" not in texto
+
+
 # ---------------------------------------------------------------------------
 # Regressão: DOCX com medidas float (margens/recuos) não quebra o python-docx
 # ---------------------------------------------------------------------------

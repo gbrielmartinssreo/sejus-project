@@ -41,6 +41,15 @@ ESTADO_APLICADA = "aplicada"
 # Estados antigos para compatibilidade (pode remover depois)
 _ESTADO_ANTIGOS = (ESTADO_PENDENTE, ESTADO_ACEITA, ESTADO_REJEITADA, ESTADO_APLICADA)
 
+# Origem de cada mudança do patch: diferencia a exigência de lastro.
+#   - ORIGEM_ANALISE_APROVADA: o item executa um apontamento da análise que o
+#     usuário aprovou pedindo a correção — ausência de lastro no acervo NÃO
+#     bloqueia a aplicação nem gera 'requer_decisao_juridica' automático.
+#   - ORIGEM_INICIATIVA_MODELO: o item não corresponde a nenhum apontamento —
+#     iniciativa própria do modelo; mantém a exigência atual de lastro forte.
+ORIGEM_ANALISE_APROVADA = "origem_analise_aprovada"
+ORIGEM_INICIATIVA_MODELO = "iniciativa_modelo"
+
 # Schema de melhoria em modo patch: o LLM NAO reescreve o documento -- devolve
 # apenas as mudancas (alteracoes/remocoes/adicoes) ancoradas ao texto original.
 # A estrutura final e montada por _construir_estrutura (original + patch), o que
@@ -122,11 +131,26 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                     "Obrigatorio. True quando a mudanca altera exigencia, "
                     "prazo, percentual ou alcance inovando em relacao ao "
                     "original e o lastro nao esta garantido pelo sistema -- "
-                    "sinaliza revisao da equipe juridica antes da publicacao."
+                    "sinaliza revisao da equipe juridica antes da publicacao. "
+                    "Em itens de 'origem' = 'origem_analise_aprovada', a "
+                    "ausencia de lastro no acervo NAO gera true (so criterio "
+                    "juridico de fato: depende de decisao explicita, conflita "
+                    "com norma superior ou cria despesa sem previsao)."
+                ),
+            },
+            "origem": {
+                "type": "string",
+                "enum": [ORIGEM_ANALISE_APROVADA, ORIGEM_INICIATIVA_MODELO],
+                "description": (
+                    "Origem da mudanca. 'origem_analise_aprovada' quando o item "
+                    "executa um apontamento da ANALISE que o usuario aprovou "
+                    "pedindo a correcao; 'iniciativa_modelo' quando nao "
+                    "corresponde a nenhum apontamento (decisao propria do "
+                    "modelo ao gerar o patch)."
                 ),
             },
         },
-        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe", "requer_decisao_juridica"],
+        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe", "requer_decisao_juridica", "origem"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
@@ -160,8 +184,19 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
                     "revogou o dispositivo)."
                 ),
             },
+            "origem": {
+                "type": "string",
+                "enum": [ORIGEM_ANALISE_APROVADA, ORIGEM_INICIATIVA_MODELO],
+                "description": (
+                    "Origem da mudanca. 'origem_analise_aprovada' quando o item "
+                    "executa um apontamento da ANALISE que o usuario aprovou "
+                    "pedindo a correcao; 'iniciativa_modelo' quando nao "
+                    "corresponde a nenhum apontamento (decisao propria do "
+                    "modelo ao gerar o patch)."
+                ),
+            },
         },
-        "required": ["rotulo", "trecho_original", "detalhe"],
+        "required": ["rotulo", "trecho_original", "detalhe", "origem"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais"] = {
@@ -220,11 +255,26 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
                     "Obrigatorio. True quando a adicao amplia exigencia, prazo, "
                     "percentual ou alcance alem do que o lastro garante "
                     "textualmente -- sinaliza revisao da equipe juridica antes "
-                    "da publicacao."
+                    "da publicacao. Em itens de 'origem' = "
+                    "'origem_analise_aprovada', a ausencia de lastro no acervo "
+                    "NAO gera true (so criterio juridico de fato: depende de "
+                    "decisao explicita, conflita com norma superior ou cria "
+                    "despesa sem previsao)."
+                ),
+            },
+            "origem": {
+                "type": "string",
+                "enum": [ORIGEM_ANALISE_APROVADA, ORIGEM_INICIATIVA_MODELO],
+                "description": (
+                    "Origem da mudanca. 'origem_analise_aprovada' quando o item "
+                    "executa um apontamento da ANALISE que o usuario aprovou "
+                    "pedindo a correcao; 'iniciativa_modelo' quando nao "
+                    "corresponde a nenhum apontamento (decisao propria do "
+                    "modelo ao gerar o patch)."
                 ),
             },
         },
-        "required": ["o_que", "posicao", "detalhe"],
+        "required": ["o_que", "posicao", "detalhe", "origem"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["lacunas_identificadas"] = {
@@ -385,20 +435,28 @@ def _sistema_melhoria():
         "art. 13'). Quando o acervo nao sustentar um numero concreto, use o "
         "marcador literal [PRAZO A DEFINIR PELA SECRETARIA] no lugar do valor "
         "no 'novo_texto'/'texto' e NUNCA invente o numero. Correcoes puramente "
-        "redacionais nao precisam de lastro.\n"
+        "redacionais nao precisam de lastro. Em itens de 'origem' = "
+        "'origem_analise_aprovada', a falta de lastro no acervo NAO impede a "
+        "aplicacao: execute a correcao do apontamento e registre a origem.\n"
         "12. REVOGACAO SO COM NORMA ESPECIFICA: proponha revogacao (em "
         "'remocoes' ou 'alteracoes') apenas quando indicar a norma concreta a "
         "ser revogada, citando nome, tipo, numero e ano (ex.: 'Decreto "
         "2.541/2008'). NUNCA proponha clausula generica do tipo 'ficam "
         "revogadas as disposicoes em contrario' ou revogacao implicita sem essa "
-        "citacao.\n"
+        "citacao. Essa regra vale para as duas origens -- inclusive em itens "
+        "'origem_analise_aprovada'.\n"
         "13. REQUER_DECISAO_JURIDICA: marque 'requer_decisao_juridica' = true "
-        "em qualquer alteracao ou adicao que INOVE em relacao ao original (novo "
-        "prazo, nova exigencia, novo percentual, ampliacao de alcance) ou "
-        "quando o lastro nao estiver explicito no acervo; nesses casos o "
-        "sistema destaca o paragrafo em amarelo e o sinaliza para validacao da "
-        "equipe juridica antes da publicacao. Se o lastro cobrir integralmente "
-        "o conteudo, marque false.\n"
+        "em qualquer alteracao ou adicao de 'origem' = 'iniciativa_modelo' que "
+        "INOVE em relacao ao original (novo prazo, nova exigencia, novo "
+        "percentual, ampliacao de alcance) ou quando o lastro nao estiver "
+        "explicito no acervo; nesses casos o sistema destaca o paragrafo em "
+        "amarelo e o sinaliza para validacao da equipe juridica antes da "
+        "publicacao. Em itens de 'origem' = 'origem_analise_aprovada', a "
+        "ausencia de lastro no acervo NAO gera 'requer_decisao_juridica': "
+        "marque true somente por criterio juridico de fato (a mudanca depende "
+        "de decisao juridica explicita, conflita com norma superior ou cria "
+        "despesa sem previsao legal). Se o lastro cobrir integralmente o "
+        "conteudo, marque false.\n"
         "14. APONTAMENTOS DA ANALISE (quando informados): trate cada apontamento "
         "como uma TAREFA a executar no documento original. Aplique a alteracao "
         "correspondente e registre-a em 'alteracoes'/'remocoes'/"
@@ -420,6 +478,15 @@ def _sistema_melhoria():
         "claro o motivo tecnico no 'motivo' — o sistema marcara como falha.\n"
         "Aplicar outras melhorias NAO substitui cumprir os apontamentos "
         "anteriores.\n"
+        "15. ORIGEM DE CADA MUDANCA: preencha 'origem' em todo item de "
+        "'alteracoes'/'remocoes'/'adicoes_estruturais'. Use "
+        "'origem_analise_aprovada' quando a mudanca executa um apontamento da "
+        "ANALISE aprovado pelo usuario (pedido de correcao, ex.: 'isso, agora "
+        "me de o documento com as correcoes') e 'iniciativa_modelo' quando a "
+        "mudanca nao corresponde a nenhum apontamento (decisao propria sua ao "
+        "gerar o patch). A origem define a exigencia de lastro: itens "
+        "'origem_analise_aprovada' sao aplicados mesmo sem ato no acervo; "
+        "itens 'iniciativa_modelo' exigem lastro valido.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -1036,8 +1103,13 @@ def _mudanca_aplicada(conteudo: str, tipo: str, item: dict) -> tuple[str, str]:
     A declaração do modelo não basta: a mudança precisa existir no patch, estar
     ancorada no original e, quando tiver lastro, ter passado na validação de
     lastro/coerência. Falha de âncora é FALHA de execução; lastro divergente é
-    PENDÊNCIA de decisão jurídica."""
-    if (item.get("lastro_validado") is False) or item.get("coerencia_aviso"):
+    PENDÊNCIA de decisão jurídica. Exceção: item de ``origem_analise_aprovada``
+    (apontamento aprovado pelo usuário) não é rebaixado a pendente pela simples
+    ausência de lastro no acervo — a ausência só bloqueia itens de iniciativa do
+    modelo."""
+    if (item.get("origem") != ORIGEM_ANALISE_APROVADA) and (
+        (item.get("lastro_validado") is False) or item.get("coerencia_aviso")
+    ):
         return (
             STATUS_PENDENTE,
             (
@@ -1101,6 +1173,51 @@ def _localizar_mudanca(
     return melhor
 
 
+def _marcar_origem(
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+    declarada: list[dict],
+    apontamentos: list[dict],
+) -> None:
+    """Atribui deterministicamente a 'origem' de cada mudanca do patch.
+
+    A declaração do modelo não basta: um item só é ``origem_analise_aprovada``
+    quando a cobertura (``apontamentos_analise``, status 'aplicado') vincula a
+    mudança a um apontamento REAL da análise que o usuário aprovou. Tudo o mais
+    vira ``iniciativa_modelo`` — impede que o modelo fuja da exigência de lastro
+    rotulando uma mudança por conta própria como 'aprovado pelo usuário'."""
+    ids_apontamentos = {
+        str(a.get("id")).strip()
+        for a in apontamentos
+        if isinstance(a, dict)
+    }
+    vinculadas: set[str] = set()
+    for d in declarada or []:
+        if not isinstance(d, dict):
+            continue
+        if (d.get("status") or "").strip().casefold() != "aplicado":
+            continue
+        identificador = str(d.get("apontamento_id") or "").strip()
+        if identificador not in ids_apontamentos:
+            continue
+        localizada = _localizar_mudanca(
+            d.get("referencia") or "", alteracoes, remocoes, adicoes
+        )
+        if localizada is not None:
+            vinculadas.add(_chave_linha(localizada[2]))
+    for grupo in (alteracoes, remocoes, adicoes):
+        for item in grupo:
+            if not isinstance(item, dict):
+                continue
+            rotulo = _chave_linha(item.get("rotulo") or item.get("o_que") or "")
+            item["origem"] = (
+                ORIGEM_ANALISE_APROVADA
+                if rotulo and rotulo in vinculadas
+                else ORIGEM_INICIATIVA_MODELO
+            )
+
+
 def _validar_cobertura(
     conteudo: str,
     alteracoes: list[dict],
@@ -1116,7 +1233,9 @@ def _validar_cobertura(
     o modelo não pode omitir apontamentos nem trocá-los por outras sugestões.
 
     - ``aplicado``: mudança existe, está ancorada e sem pendência de lastro;
-    - ``pendente``: mudança inserida, mas requer decisão jurídica (lastro);
+    - ``pendente``: mudança inserida, mas requer decisão jurídica (lastro) —
+      só para itens de ``iniciativa_modelo``; apontamento aprovado não cai em
+      pendente apenas por ausência de lastro no acervo;
     - ``falhou``: apontamento não encaminhado, referência inexistente, âncora
       não localizada ou justificativa vaga ('não foi alterado' não justifica);
     - ``nao_aplicado``: impedimento CONCRETO informado pela melhoria.
@@ -1313,7 +1432,10 @@ def _validar_lastros(itens: list[dict], contexto: list[dict]) -> None:
     relatorio quando o lastro nao identificar nenhum documento real.
       - ``lastro_validado``: True quando casa com um ato do contexto.
       - ``lastro_fonte``: source_file do ato identificado (vazio se nao casou).
-      - ``lastro_aviso``: mensagem legivel quando o lastro nao casa.
+      - ``lastro_aviso``: mensagem legivel quando o lastro nao casa. Para itens
+        de ``origem_analise_aprovada`` (apontamento aprovado), em vez do aviso
+        de 'lastro inventado' registra a origem, pois a ausência de lastro não
+        bloqueia a aplicação nesse caso.
     """
     documentos = _documentos_do_contexto(contexto)
     for item in itens:
@@ -1329,10 +1451,15 @@ def _validar_lastros(itens: list[dict], contexto: list[dict]) -> None:
         else:
             item["lastro_validado"] = False
             item["lastro_fonte"] = ""
-            item["lastro_aviso"] = (
-                f"Lastro '{lastro}' nao identifica nenhum ato recuperado no "
-                "acervo (a referencia pode ter sido inventada)."
-            )
+            if item.get("origem") == ORIGEM_ANALISE_APROVADA:
+                item["lastro_aviso"] = (
+                    "Origem: apontamento da análise, aprovado pelo usuário."
+                )
+            else:
+                item["lastro_aviso"] = (
+                    f"Lastro '{lastro}' nao identifica nenhum ato recuperado no "
+                    "acervo (a referencia pode ter sido inventada)."
+                )
 
 
 _STOPWORDS_TEMA = {
@@ -1418,11 +1545,18 @@ def _checar_coerencia_lastros(
       - ``requer_decisao_juridica`` = True (o generative DOCX vai sombrear em
         amarelo e nao publicar sem validacao da equipe juridica);
       - ``coerencia_aviso`` legivel, que tambem vai no comentario/docx.
+
+    Itens de ``origem_analise_aprovada`` (apontamento aprovado pelo usuario)
+    sao EXCLUIDOS desta checagem: para eles a ausencia de lastro no acervo nao
+    gera 'requer_decisao_juridica' automatico nem pendencia -- a origem e que
+    vai para o comentario.
     """
     documentos = _documentos_do_contexto(contexto)
     textos = _textos_dos_documentos(contexto)
     for item in (*alteracoes, *remocoes, *adicoes):
         if not isinstance(item, dict):
+            continue
+        if item.get("origem") == ORIGEM_ANALISE_APROVADA:
             continue
         lastro = (item.get("lastro") or "").strip()
         if not lastro:
@@ -1616,19 +1750,25 @@ def _gerar_patch_janela(
         for a in adicoes:
             a.setdefault("estado", ESTADO_PENDENTE)
             a.setdefault("requer_decisao_juridica", False)
-        # Identifica o documento especifico do RAG referenciado pelo 'lastro'
-        # de cada mudanca (sinaliza divergencias sem bloquear a melhoria) e
-        # verifica a coerencia TEMATICA entre o dispositivo e a fonte citada
-        # (lastro de outro assunto -> requer_decisao_juridica).
-        for grupo in (alteracoes, remocoes, adicoes):
-            _validar_lastros(grupo, contexto)
-        _checar_coerencia_lastros(alteracoes, remocoes, adicoes, contexto)
         lacunas = [
             l for l in (dados.get("lacunas_identificadas") or []) if isinstance(l, dict)
         ]
         declarada = [
             d for d in (dados.get("apontamentos_analise") or []) if isinstance(d, dict)
         ]
+        # Origem deterministica por item: muda o tratamento do lastro. Itens que
+        # a cobertura vincula a um apontamento da analise sao 'aprovados' e nao
+        # sao bloqueados pela ausencia de lastro; o restante e 'iniciativa do
+        # modelo' e mantem a exigencia atual de lastro forte.
+        _marcar_origem(alteracoes, remocoes, adicoes, declarada, apontamentos)
+        # Identifica o documento especifico do RAG referenciado pelo 'lastro'
+        # de cada mudanca (sinaliza divergencias sem bloquear a melhoria) e
+        # verifica a coerencia TEMATICA entre o dispositivo e a fonte citada
+        # (lastro de outro assunto -> requer_decisao_juridica; exclui itens
+        # 'origem_analise_aprovada').
+        for grupo in (alteracoes, remocoes, adicoes):
+            _validar_lastros(grupo, contexto)
+        _checar_coerencia_lastros(alteracoes, remocoes, adicoes, contexto)
 
         problemas = _problemas_do_patch(conteudo, alteracoes, remocoes)
         problemas_cob = (
