@@ -24,8 +24,60 @@ function splitRow(line) {
   });
 }
 
+/* Normalizacao do Markdown do agente (resgata a formatacao quando o LLM
+   escreve varios bullets na MESMA linha, ex.: "Pontos fortes: - A. - B.").
+   Vira titulo de secao (##) + uma lista, em vez de um paragrafo amontoado. */
+function dividirBulletsInline(texto) {
+  return String(texto)
+    .split(/\s+[-–]\s+|\s+[•‣▪]\s+/)
+    .map(function (p) { return p.trim().replace(/^[-–]\s*/, ""); })
+    .filter(Boolean);
+}
+
+function secaoComBulletsNaLinha(linha) {
+  var m = linha.match(/^(\*{0,2}[^*]{1,90}?\*{0,2}):\s+(?:[-•‣▪]\s+)(.+)$/);
+  if (!m) return null;
+  var rotulo = m[1].replace(/^\*+|\*+$/g, "").trim();
+  if (!rotulo || /^https?:\/\//i.test(rotulo)) return null;
+  var itens = dividirBulletsInline(m[2]);
+  if (itens.length < 2) return null;
+  return { rotulo: rotulo, itens: itens };
+}
+
+function normalizarMarkdown(md) {
+  var linhas = String(md || "").split("\n");
+  var resultado = [];
+  for (var i = 0; i < linhas.length; i++) {
+    var l = linhas[i];
+    // Blocos ja estruturados (titulos, codigo, tabelas) e linhas vazias passam reto.
+    if (/^\s*$/.test(l) || /^\s*#{1,6}\s/.test(l) || /^```/.test(l) || /^\s*\|/.test(l)) {
+      resultado.push(l);
+      continue;
+    }
+    // "Rotulo: - A. - B." -> "## Rotulo" + lista.
+    var secao = secaoComBulletsNaLinha(l);
+    if (secao) {
+      resultado.push("## " + secao.rotulo);
+      secao.itens.forEach(function (item) { resultado.push("- " + item); });
+      resultado.push("");
+      continue;
+    }
+    // Linha unica com varios bullets: "- A. - B." -> dois itens de lista.
+    if (/^\s*[-•‣▪]\s+/.test(l)) {
+      var itens = dividirBulletsInline(l);
+      if (itens.length > 1) {
+        itens.forEach(function (item) { resultado.push("- " + item); });
+        continue;
+      }
+    }
+    resultado.push(l);
+  }
+  return resultado.join("\n");
+}
+
 /* Markdown minimalista (sem CDN, sem dependencias) */
 function renderMarkdown(md) {
+  md = normalizarMarkdown(md);
   var lines = String(md).split("\n");
   var html = "";
   var i = 0;

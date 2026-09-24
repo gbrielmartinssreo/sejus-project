@@ -265,16 +265,26 @@ body {
 }
 
 /* Markdown rendering inside agent lead */
+.mensagem.agente h2 {
+  margin: 1.05em 0 0.5em;
+  font-size: 1.08em;
+  font-weight: 600;
+  color: var(--text-hi);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  letter-spacing: 0.01em;
+}
+.mensagem.agente h2:first-child { margin-top: 0; }
 .mensagem.agente h1,
-.mensagem.agente h2,
 .mensagem.agente h3 {
   margin: 0.7em 0 0.3em;
   font-size: 1.05em;
   color: var(--text-hi);
 }
 .mensagem.agente p { margin: 0.35em 0; }
-.mensagem.agente ul, .mensagem.agente ol { padding-left: 1.5em; margin: 0.4em 0; }
-.mensagem.agente li { margin: 0.15em 0; }
+.mensagem.agente ul, .mensagem.agente ol { padding-left: 1.5em; margin: 0.5em 0; }
+.mensagem.agente li { margin: 0.3em 0; line-height: 1.55; }
+.mensagem.agente li > strong { color: var(--text-hi); }
 
 .mensagem.agente pre {
   background: var(--bg-panel-2);
