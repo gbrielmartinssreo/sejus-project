@@ -9,9 +9,11 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.141.1",
+    "grimp>=3.17",
     "groq>=1.7.0",
     "markitdown[pdf]>=0.1.7",
     "openai>=2.0.0",
+    "pydeps>=3.0.8",
     "pypdf>=6.16.2",
     "python-docx>=1.2.0",
     "python-dotenv>=1.2.3",
@@ -32,7 +34,11 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "code2flow>=2.5.1",
     "custom-tree>=1.7",
+    "grimp>=3.17",
     "httpx>=0.28.1",
+    "networkx>=3.7",
+    "pyan3>=2.8.1",
     "pytest>=9.1.1",
 ]
