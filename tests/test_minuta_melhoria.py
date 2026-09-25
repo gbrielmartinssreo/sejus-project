@@ -333,18 +333,21 @@ def test_melhoria_definition_tem_remocoes_adicoes_e_lacunas():
     props = minuta.MELHORIA_DEFINITION["function"]["parameters"]["properties"]
     adicoes = props["adicoes_estruturais"]["items"]["properties"]
     assert adicoes["o_que"]["description"]
-    assert {"o_que", "posicao", "detalhe"} <= set(
+    assert {"o_que", "posicao", "detalhe", "categoria", "cria_obrigacao", "risco_juridico"} <= set(
         props["adicoes_estruturais"]["items"]["required"]
     )
     assert props["lacunas_identificadas"]["items"]["required"] == ["tema"]
     assert props["alteracoes"]["items"]["properties"]["tipo"]["description"].startswith(
         "'alterado'"
     )
-    assert props["remocoes"]["items"]["required"] == [
+    assert set(props["remocoes"]["items"]["required"]) >= {
         "rotulo",
         "trecho_original",
         "detalhe",
-    ]
+        "categoria",
+        "cria_obrigacao",
+        "risco_juridico",
+    }
 
 
 def test_padronizar_mantem_itens_capitulo_em_ordem():

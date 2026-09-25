@@ -564,12 +564,135 @@ def eh_tarefa_de_correcao(texto: str | None) -> bool:
     return _classificar_item(_Item(texto.strip(), "")).classe == SECAO_PROBLEMAS
 
 
+# ---------------------------------------------------------------------------
+# Oportunidades de melhoria (planner de "Revisar e gerar DOCX")
+# ---------------------------------------------------------------------------
+# A análise distingue três coisas que NÃO devem ser confundidas:
+#   - PROBLEMA  -> tarefa de correção (apontamento acionável, o agente já
+#                  promete corrigir);
+#   - ATENÇÃO   -> pergunta/hipótese. Não é erro, mas é uma OPORTUNIDADE de
+#                  melhoria: pode virar clareza, consolidação ou proposta
+#                  estrutural quando houver lastro;
+#   - ELOGIO / CONFORMIDADE -> não geram nada.
+# O planner precisa enxergar as oportunidades sem que elas virem correção
+# automática — daí uma lista separada, com tipo próprio.
+
+TIPO_ISSUE_CONFIRMADO = "confirmed_issue"
+TIPO_ATENCAO_ACIONAVEL = "actionable_attention"
+TIPO_LACUNA_ESTRUTURAL = "structural_gap"
+
+# Uma atenção só vira oportunidade quando admite ação no texto: pede
+# confirmação, sinaliza trecho a explicitar ou aponta fato procedimental a
+# disciplinar. Pergunta retórica ou constatação ("o documento é claro") não é
+# oportunidade.
+_RE_OPORTUNIDADE_ACIONAVEL = re.compile(
+    r"\b(?:confirm\w*|valid\w*|verific\w*|esclarec\w*|explicit\w*|detalh\w*|"
+    r"reorganiz\w*|consolid\w*|padroniz\w*|uniformiz\w*|harmoniz\w*|"
+    r"reformul\w*|reescrev\w*|acrescent\w*|inclu\w*|inser\w*|disciplin\w*|"
+    r"complement\w*|prever\w*|prevê|preveja|prev[êe]ndo|"
+    r"poderia|pode\s+ser|seria\s+(?:útil|importante|recomend)|"
+    r"convém|recomenda|sugere|caberiam|cabe\s+(?:avaliar|detalhar))\b",
+    re.IGNORECASE,
+)
+
+# Lacunas procedimentais estruturais que valem proposta de artigo/parágrafo
+# quando o próprio ato já traz o fato gerador. Não é a lista de "temas" do
+# RAG: aqui basta o documento sinalizar o fato (ex.: decisão fundamentada sem
+# disciplina de comunicação ao interessado).
+_RE_FATO_GERADOR = re.compile(
+    r"\b(?:comunic\w*|notific\w*|intim\w*|public\w*|ciência\b|"
+    r"registro\s+em\s+controle|registro\b|controle\s+interno|"
+    r"responsabilidade\s+(?:solid[áa]ria|comum|conjunta)|"
+    r"rastreab\w*|auditoria\w*|presta[çc][ãa]o\s+de\s+contas|"
+    r"fiscaliza\w*|monitoramento|decisão\s+fundamentada|"
+    r"ato\s+administrativo|prazo|revoga\w*|vigência|suspens[ãa]o|"
+    r"cancelamento|denega\w*|indefer\w*|defer\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _itens_por_secao(analise: str | None) -> dict[str, list[str]]:
+    """Agrupa os bullets da análise já reestruturada por seção canônica."""
+    secoes: dict[str, list[str]] = {secao: [] for secao in _ORDEM_SECOES}
+    atual = ""
+    for linha in (analise or "").splitlines():
+        cabecalho = _RE_HEADING.match(linha)
+        if cabecalho:
+            atual = _classificar_secao(cabecalho.group("rotulo"))
+            continue
+        if not atual:
+            continue
+        bullet = _RE_BULLET.match(linha)
+        if not bullet:
+            continue
+        texto = (bullet.group("texto") or "").strip()
+        if not texto or _RE_PLACEHOLDER.match(linha):
+            continue
+        secoes[atual].append(texto)
+    return secoes
+
+
+def extrair_oportunidades(analise: str | None) -> list[dict]:
+    """Extrai do texto da análise as OPORTUNIDADES de melhoria.
+
+    Devolve itens ``{"tipo", "secao", "texto"}`` para o planner proactive:
+
+    - ``confirmed_issue``: o próprio item é um PROBLEMA confirmado. Entra
+      também na lista de correções, mas aparece aqui para o planner avaliar
+      as camadas mais ousadas (clareza/estrutural/normativa) sobre ele;
+    - ``actionable_attention``: ponto de atenção que admite ação no texto;
+    - ``structural_gap``: lacuna procedimental estrutural detectada a partir
+      de um FATO já presente no ato (decisão fundamentada sem comunicação,
+      suspensão sem registro, etc.) — a base para artigo/parágrafo novo.
+
+    Nada aqui vira correção automática: são oportunidades avaliadas pelo
+    planner, que decide entre aplicar, propor ou descartar.
+    """
+    if not analise or not analise.strip():
+        return []
+    secoes = _itens_por_secao(analise)
+    vistas: set[str] = set()
+    oportunidades: list[dict] = []
+
+    def _add(tipo: str, secao: str, texto: str) -> None:
+        chave = " ".join(texto.lower().split())
+        if not chave or chave in vistas:
+            return
+        vistas.add(chave)
+        oportunidades.append(
+            {"tipo": tipo, "secao": secao, "texto": texto[:400], "id": f"op-{len(oportunidades)+1}"}
+        )
+
+    for texto in secoes.get(SECAO_PROBLEMAS, []):
+        _add(TIPO_ISSUE_CONFIRMADO, SECAO_PROBLEMAS, texto)
+
+    for texto in secoes.get(SECAO_ATENCAO, []):
+        acionavel = bool(_RE_OPORTUNIDADE_ACIONAVEL.search(texto))
+        fato_gerador = bool(_RE_FATO_GERADOR.search(texto))
+        if acionavel and fato_gerador:
+            # Pede ação E o ato traz o fato que a ação disciplinaria: é a
+            # base mais forte para uma proposta estrutural.
+            _add(TIPO_LACUNA_ESTRUTURAL, SECAO_ATENCAO, texto)
+        elif acionavel:
+            _add(TIPO_ATENCAO_ACIONAVEL, SECAO_ATENCAO, texto)
+        elif fato_gerador:
+            # Fato gerador sem verbo de ação ("não disciplina a comunicação ao
+            # interessado"): lacuna estrutural — cabe artigo/parágrafo novo.
+            _add(TIPO_LACUNA_ESTRUTURAL, SECAO_ATENCAO, texto)
+    return oportunidades
+
+
+
 __all__ = [
     "SECAO_ATENCAO",
     "SECAO_CHECKLIST",
     "SECAO_PONTOS_FORTES",
     "SECAO_PROBLEMAS",
+    "TIPO_ATENCAO_ACIONAVEL",
+    "TIPO_ISSUE_CONFIRMADO",
+    "TIPO_LACUNA_ESTRUTURAL",
     "eh_tarefa_de_correcao",
+    "extrair_oportunidades",
     "parecer_analise",
     "reestruturar_analise",
 ]

@@ -15,6 +15,9 @@ import json
 import os
 import re
 
+from sejus_project.tools.document_infra.analise_validacao import (
+    detectar_correcoes_redacao,
+)
 from sejus_project.tools.document_infra.docx_builder import (
     _ancora_rigorosa,
     _paragrafos_absorvidos,
@@ -22,9 +25,6 @@ from sejus_project.tools.document_infra.docx_builder import (
 )
 from sejus_project.tools.document_infra.docx_builder import (
     _chave_linha as _chave_texto,
-)
-from sejus_project.tools.document_infra.analise_validacao import (
-    detectar_correcoes_redacao,
 )
 from sejus_project.tools.document_infra.modelos import PerfilModelo
 from sejus_project.tools.llm_tools.minuta_generation import (
@@ -54,6 +54,136 @@ _ESTADO_ANTIGOS = (ESTADO_PENDENTE, ESTADO_ACEITA, ESTADO_REJEITADA, ESTADO_APLI
 ORIGEM_ANALISE_APROVADA = "origem_analise_aprovada"
 ORIGEM_INICIATIVA_MODELO = "iniciativa_modelo"
 
+# ---------------------------------------------------------------------------
+# Classificação da mudança (o que decide se ela pode ser APLICADA ou só
+# PROPOSTA). A separação é deliberada: serConservador não é o mesmo que ser
+# tímido. O planner é agressivo em IDENTIFICAR oportunidade e conservador em
+# APLICAR o que é materialmente sensível.
+# ---------------------------------------------------------------------------
+
+# Correção objetiva e de baixo risco: referência, numeração, inconsistência
+# interna, erro de redação, repetição, dispositivo mal formatado. Aplica.
+CAT_SAFE_CORRECTION = "safe_correction"
+
+# Melhora clareza sem mexer no conteúdo normativo essencial: desambigua,
+# reorganiza a frase, explicita sujeito/competência/fluxo já implícito,
+# consolida conceito existente. Aplica quando preserva o sentido.
+CAT_CLARITY_IMPROVEMENT = "clarity_improvement"
+
+# Melhoria estrutural coerente com o documento: parágrafo explicativo, artigo
+# complementar, separar regra longa, procedimento intermediário, consolidar
+# regras dispersas, explicitar comunicação/registro/controle já implícitos.
+# Aplica como proposta; exige validação quando cria obrigação nova.
+CAT_STRUCTURAL_IMPROVEMENT = "structural_improvement"
+
+# Cria regra material nova: prazo, recurso, competência, obrigação, condição
+# de acesso, penalidade, forma de controle, exigência documental. NUNCA é
+# correção automática — sempre proposta, com lastro e decisão jurídica.
+CAT_NORMATIVE_PROPOSAL = "normative_proposal"
+
+# Mudança sem base suficiente. Não aplicar nem sugerir como recomendação.
+CAT_UNSUPPORTED = "unsupported"
+
+CATEGORIAS_MUDANCA = (
+    CAT_SAFE_CORRECTION,
+    CAT_CLARITY_IMPROVEMENT,
+    CAT_STRUCTURAL_IMPROVEMENT,
+    CAT_NORMATIVE_PROPOSAL,
+    CAT_UNSUPPORTED,
+)
+
+# Categorias que o sistema insere no documento. `unsupported` nunca entra.
+CATEGORIAS_APLICAVEIS = (
+    CAT_SAFE_CORRECTION,
+    CAT_CLARITY_IMPROVEMENT,
+    CAT_STRUCTURAL_IMPROVEMENT,
+    CAT_NORMATIVE_PROPOSAL,
+)
+
+# Risco jurídico declarado pelo planner (vai para o relatório; não é usado
+# sozinho para decidir, mas é exibido na revisão da equipe jurídica).
+RISCO_BAIXO = "baixo"
+RISCO_MEDIO = "medio"
+RISCO_ALTO = "alto"
+RISCOS_JURIDICOS = (RISCO_BAIXO, RISCO_MEDIO, RISCO_ALTO)
+
+# Vocabulário canônico do motivo de descarte. O planner escolhe um destes; o
+# texto livre é normalizado para eles. A ausência de motivo canônico é o que
+# mantinha o relatório honesto: "não foi alterado" não passa.
+DESCARTE_SEM_LASTRO = "sem_lastro"
+DESCARTE_JA_RESOLVIDO = "ja_resolvido_no_texto"
+DESCARTE_DESNECESSARIO = "mudanca_desnecessaria"
+DESCARTE_SENSIVEL = "materialmente_sensivel"
+DESCARTE_RISCO_SENTIDO = "risco_de_alterar_sentido"
+DESCARTE_DECISAO_INSTITUCIONAL = "depende_de_decisao_institucional"
+MOTIVOS_DESCARTE = (
+    DESCARTE_SEM_LASTRO,
+    DESCARTE_JA_RESOLVIDO,
+    DESCARTE_DESNECESSARIO,
+    DESCARTE_SENSIVEL,
+    DESCARTE_RISCO_SENTIDO,
+    DESCARTE_DECISAO_INSTITUCIONAL,
+)
+
+# Palavras que ancoram cada motivo canônico no texto livre do modelo. A ordem
+# importa: o primeiro que casar vence.
+_MOTIVOS_TAXONOMIA = (
+    (
+        DESCARTE_JA_RESOLVIDO,
+        re.compile(
+            r"j[áa]\s+(?:resolvid|previst|disciplinad|contemplad|cobert|"
+            r"atendid|consta\s+(?:j[áa]|no)|redundante\s+com)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        DESCARTE_DESNECESSARIO,
+        re.compile(
+            r"(?:n[ãa]o\s+se\s+faz\s+necess|desnecess[áa]ri|n[ãa]o\s+"
+            r"necess[áa]ri|sem\s+necessidade\s+de)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        DESCARTE_SEM_LASTRO,
+        re.compile(
+            r"sem\s+(?:lastro|base|fundament|previs[ãa]o\s+normativ)|"
+            r"falta\s+de\s+(?:lastro|base|fundament)|n[ãa]o\s+identific\w*\s+"
+            r"(?:ato|norma)|lastro\s+n[ãa]o",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        DESCARTE_RISCO_SENTIDO,
+        re.compile(
+            r"risco\s+de\s+alterar\s+o\s+sentido|pode\s+alterar\s+o\s+sentido|"
+            r"alteraria\s+o\s+(?:sentido|objeto)|muda\s+o\s+sentido|"
+            r"distorce\s+o\s+objeto",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        DESCARTE_DECISAO_INSTITUCIONAL,
+        re.compile(
+            r"decis[ãa]o\s+(?:jur[íi]dica|institucional|do\s+titular|"
+            r"da\s+secretaria)|depende\s+de\s+decis[ãa]o|"
+            r"mat[ée]ria\s+reservada|agora\s+de\s+decis[ãa]o",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        DESCARTE_SENSIVEL,
+        re.compile(
+            r"materialmente\s+sens[íi]vel|mudan[çc]a\s+material|"
+            r"altera\s+o\s+alcance|amplia[cç]\w*\s+o\s+alcance|"
+            r"nova\s+(?:obriga[çc][ãa]o|exig[êe]ncia|penalidade)|"
+            r"que\s+cria\s+(?:obriga[çc][ãa]o|exig[êe]ncia)",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+
 # Schema de melhoria em modo patch: o LLM NAO reescreve o documento -- devolve
 # apenas as mudancas (alteracoes/remocoes/adicoes) ancoradas ao texto original.
 # A estrutura final e montada por _construir_estrutura (original + patch), o que
@@ -64,14 +194,21 @@ MELHORIA_DEFINITION["function"]["name"] = "apresentar_documento_melhorado"
 MELHORIA_DEFINITION["function"]["description"] = (
     "Registra as mudancas de melhoria/adequacao juridica de um documento "
     "normativo enviado pelo usuario, SEM reescrever o texto nao alterado. "
-    "Deve devolver: 'alteracoes' com as CORRECOES aplicadas ao texto "
-    "EXISTENTE (cada item com 'rotulo', 'trecho_original' copiado fielmente "
-    "do original e 'novo_texto' completo); 'remocoes' com os paragrafos "
-    "EXISTENTES que devem ser excluidos; 'adicoes_estruturais' com os artigos "
-    "NOVOS propostos para fechar lacunas de aplicabilidade (somente quando "
-    "houver precedente no RAG); e 'lacunas_identificadas' com as lacunas "
-    "pertinentes sem precedente no acervo. O ato deve permanecer o mesmo "
-    "(numero, ementa, objeto e assinaturas preservados)."
+    "Deve devolver: 'alteracoes' com as mudancas aplicadas a paragrafos "
+    "EXISTENTES (cada item com 'rotulo', 'trecho_original' copiado fielmente "
+    "do original, 'novo_texto' completo, 'categoria', 'cria_obrigacao' e "
+    "'risco_juridica'); 'remocoes' com os paragrafos EXISTENTES que devem "
+    "ser excluidos; 'adicoes_estruturais' com os artigos ou paragrafos NOVOS "
+    "propostos (com 'o_que', 'texto' completo e autonomo, 'posicao', "
+    "'fundamento' no proprio ato, 'categoria', 'cria_obrigacao' e "
+    "'risco_juridico'); 'plano_melhoria' com a decisao (aplicar/propor/"
+    "descartar) e o motivo canonico para CADA achado e oportunidade "
+    "avaliados; e 'lacunas_identificadas' com as lacunas pertinentes sem "
+    "fundamento no documento nem no acervo. As categorias vao de "
+    "'safe_correction' e 'clarity_improvement' (aplicacao automatica) a "
+    "'structural_improvement' e 'normative_proposal' (propostas que exigem "
+    "validacao juridica); 'unsupported' nunca e aplicado. O ato deve "
+    "permanecer o mesmo (numero, ementa, objeto e assinaturas preservados)."
 )
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
     "type": "array",
@@ -118,6 +255,45 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                 "type": "string",
                 "description": "Explicacao curta da mudanca e do motivo.",
             },
+            "categoria": {
+                "type": "string",
+                "enum": list(CATEGORIAS_MUDANCA),
+                "description": (
+                    "Obrigatorio. 'safe_correction' (erro objetivo: referencia, "
+                    "numeracao, inconsistencia, redacao, repeticao, dispositivo "
+                    "mal formatado); 'clarity_improvement' (desambigua, "
+                    "reorganiza, explicita sujeito/competencia/fluxo ja "
+                    "implicito, consolida conceito existente, preservando o "
+                    "sentido); 'structural_improvement' (paragrafo "
+                    "explicativo, artigo complementar, procedimento "
+                    "intermediario, consolida regras dispersas); "
+                    "'normative_proposal' (cria prazo, recurso, competencia, "
+                    "obrigacao, condicao de acesso, penalidade, forma de "
+                    "controle ou exigencia documental); 'unsupported' (sem "
+                    "base suficiente -- descreva e NAO sera aplicado)."
+                ),
+            },
+            "cria_obrigacao": {
+                "type": "boolean",
+                "description": (
+                    "Obrigatorio. True quando a mudanca cria, amplia ou "
+                    "endurece OBRIGACAO, prazo, requisito, limite ou "
+                    "consequencia para o destinatario. Se 'categoria' for "
+                    "'safe_correction' ou 'clarity_improvement', este campo "
+                    "tem de ser false: se a mudanca cria obrigacao, ela NAO "
+                    "e correcao nem clareza, e deve ser reclassificada como "
+                    "'structural_improvement' ou 'normative_proposal'."
+                ),
+            },
+            "risco_juridico": {
+                "type": "string",
+                "enum": list(RISCOS_JURIDICOS),
+                "description": (
+                    "Obrigatorio. 'baixo' (corrigir sem mudar efeito); "
+                    "'medio' (esclarece/consolida dispositivos existentes); "
+                    "'alto' (cria ou amplia regra material)."
+                ),
+            },
             "lastro": {
                 "type": "string",
                 "description": (
@@ -156,7 +332,17 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                 ),
             },
         },
-        "required": ["tipo", "rotulo", "trecho_original", "novo_texto", "detalhe", "requer_decisao_juridica"],
+        "required": [
+            "tipo",
+            "rotulo",
+            "trecho_original",
+            "novo_texto",
+            "detalhe",
+            "categoria",
+            "cria_obrigacao",
+            "risco_juridico",
+            "requer_decisao_juridica",
+        ],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
@@ -182,6 +368,38 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
                 "type": "string",
                 "description": "Motivo da remocao.",
             },
+            "categoria": {
+                "type": "string",
+                "enum": list(CATEGORIAS_MUDANCA),
+                "description": (
+                    "Obrigatorio. Em geral 'safe_correction' (duplicidade, "
+                    "dispositivo superado, incoerencia interna) ou "
+                    "'structural_improvement' (quando a remocao e parte de "
+                    "consolidar regras dispersas em um dispositivo geral). "
+                    "'unsupported' quando nao ha base para remover."
+                ),
+            },
+            "cria_obrigacao": {
+                "type": "boolean",
+                "description": (
+                    "Obrigatorio. Quase sempre false: remocao nao cria "
+                    "obrigacao. True apenas se a remocao, ela propria, "
+                    "introduzir nova exigencia ao destinatario."
+                ),
+            },
+            "risco_juridico": {
+                "type": "string",
+                "enum": list(RISCOS_JURIDICOS),
+                "description": "Obrigatorio. 'baixo', 'medio' ou 'alto'.",
+            },
+            "requer_decisao_juridica": {
+                "type": "boolean",
+                "description": (
+                    "Obrigatorio. True quando a remocao altera o alcance ou a "
+                    "regra material do ato, conflita com norma superior ou "
+                    "depende de decisao juridica explicita."
+                ),
+            },
             "lastro": {
                 "type": "string",
                 "description": (
@@ -204,7 +422,15 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
                 ),
             },
         },
-        "required": ["rotulo", "trecho_original", "detalhe"],
+        "required": [
+            "rotulo",
+            "trecho_original",
+            "detalhe",
+            "categoria",
+            "cria_obrigacao",
+            "risco_juridico",
+            "requer_decisao_juridica",
+        ],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais"] = {
@@ -248,6 +474,44 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
                 "type": "string",
                 "description": "Motivo da adicao (qual lacuna fechada).",
             },
+            "categoria": {
+                "type": "string",
+                "enum": list(CATEGORIAS_MUDANCA),
+                "description": (
+                    "Obrigatorio. 'structural_improvement' quando explicita "
+                    "comunicacao, registro, controle, responsabilidade ou "
+                    "procedimento JA implícitos no documento; "
+                    "'normative_proposal' quando cria prazo, recurso, "
+                    "obrigacao, penalidade ou exigencia nova; "
+                    "'unsupported' sem base suficiente (nao sera aplicado)."
+                ),
+            },
+            "cria_obrigacao": {
+                "type": "boolean",
+                "description": (
+                    "Obrigatorio. True quando o artigo novo cria, amplia ou "
+                    "endurece obrigacao, prazo, requisito ou limite. Quando "
+                    "true, o sistema marca automaticamente "
+                    "'requer_decisao_juridica' e trata como proposta, nunca "
+                    "como correcao automatica."
+                ),
+            },
+            "risco_juridico": {
+                "type": "string",
+                "enum": list(RISCOS_JURIDICOS),
+                "description": "Obrigatorio. 'baixo', 'medio' ou 'alto'.",
+            },
+            "fundamento": {
+                "type": "string",
+                "description": (
+                    "Obrigatorio para 'structural_improvement'. O DEVICE do "
+                    "documento que justifica a adicao, com o rotulo: ex.: "
+                    "'Art. 12 (suspensao mediante decisao fundamentada, sem "
+                    "disciplina de comunicacao ao interessado)'. Quando o "
+                    "fundamento for um ato do acervo e nao o proprio "
+                    "documento, registre o ato em 'lastro'."
+                ),
+            },
             "lastro": {
                 "type": "string",
                 "description": (
@@ -284,7 +548,18 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
                 ),
             },
         },
-        "required": ["o_que", "posicao", "detalhe"],
+        # 'texto' e required: sem ele a adicao nao tem o que inserir e seria
+        # descartada em silencio pelo filtro do patch.
+        "required": [
+            "o_que",
+            "texto",
+            "posicao",
+            "detalhe",
+            "categoria",
+            "cria_obrigacao",
+            "risco_juridico",
+            "requer_decisao_juridica",
+        ],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["lacunas_identificadas"] = {
@@ -306,6 +581,94 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["lacunas_identificad
             },
         },
         "required": ["tema"],
+    },
+}
+MELHORIA_DEFINITION["function"]["parameters"]["properties"]["plano_melhoria"] = {
+    "type": "array",
+    "description": (
+        "PLANO DE MELHORIA: uma entrada por ACHADO/OPORTUNIDADE avaliado "
+        "(achados da analise e pontos de atencao informed), mostrando a "
+        "decisao tomada. E o registro de rastreabilidade entre o achado e a "
+        "alteracao. Avalie CADA achado; nao pare na primeira solucao "
+        "encontrada. Nenhum achado pode ficar sem decisao."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "achado_id": {
+                "type": "string",
+                "description": (
+                    "'apontamento_id' do achado, ou o indice/rotulo da "
+                    "oportunidade informada no bloco de oportunidades."
+                ),
+            },
+            "achado": {
+                "type": "string",
+                "description": "Resumo do achado avaliado.",
+            },
+            "dispositivo_alvo": {
+                "type": "string",
+                "description": (
+                    "Dispositivo que a mudanca alcança, ex.: 'Art. 12' ou "
+                    "'novo, apos o art. 12'."
+                ),
+            },
+            "categoria": {
+                "type": "string",
+                "enum": list(CATEGORIAS_MUDANCA),
+                "description": (
+                    "Categoria da mudanca proposta. 'unsupported' quando nao "
+                    "ha base suficiente para mudar."
+                ),
+            },
+            "decisao": {
+                "type": "string",
+                "enum": ["aplicar", "propor", "descartar"],
+                "description": (
+                    "'aplicar' (a mudanca entra no documento), 'propor' "
+                    "(entra como proposta que exige validacao juridica) ou "
+                    "'descartar' (nenhuma mudanca, com 'motivo' obrigatorio)."
+                ),
+            },
+            "risco_juridico": {
+                "type": "string",
+                "enum": list(RISCOS_JURIDICOS),
+                "description": "'baixo', 'medio' ou 'alto'.",
+            },
+            "fundamento": {
+                "type": "string",
+                "description": (
+                    "Dispositivo do documento, trecho da analise ou ato do "
+                    "acervo que sustenta a mudanca."
+                ),
+            },
+            "relacao_com_o_achado": {
+                "type": "string",
+                "description": (
+                    "Como a mudanca resolve o achado. Se nao resolve "
+                    "diretamente, diga por que (ex.: 'consolida 3 artigos "
+                    "dispersos sobre comunicacao')."
+                ),
+            },
+            "referencia": {
+                "type": "string",
+                "description": (
+                    "Rotulo da alteracao/remocao/adicao que executa o plano "
+                    "(ex.: 'Art. 12', 'Art. 12-A')."
+                ),
+            },
+            "motivo": {
+                "type": "string",
+                "description": (
+                    "Obrigatorio quando 'decisao' = 'descartar'. Escolha um "
+                    "dos motivos canonicos: 'sem_lastro', 'ja_resolvido_no_"
+                    "texto', 'mudanca_desnecessaria', 'materialmente_sensivel',"
+                    " 'risco_de_alterar_sentido', 'depende_de_decisao_"
+                    "institucional'. NUNCA escreva 'nao foi alterado'."
+                ),
+            },
+        },
+        "required": ["achado", "categoria", "decisao"],
     },
 }
 MELHORIA_DEFINITION["function"]["parameters"]["properties"]["apontamentos_analise"] = {
@@ -375,34 +738,58 @@ def _sistema_melhoria():
         "MODO DE TRABALHO (PATCH): voce NAO reescreve o documento inteiro. O "
         "sistema parte do texto original e aplica sua lista de mudancas. "
         "Devolva apenas:\n"
-        "- 'alteracoes': paragrafos EXISTENTES corrigidos (tipo 'alterado' ou "
+        "- 'alteracoes': paragrafos EXISTENTS Melhorados (tipo 'alterado' ou "
         "'corrigido'), cada um com 'rotulo', 'trecho_original' copiado "
-        "EXATAMENTE do texto recebido e 'novo_texto' com o paragrafo inteiro "
-        "ja corrigido (incluindo o rotulo, como no original).\n"
+        "EXATAMENTE do texto recebido, 'novo_texto' com o paragrafo inteiro "
+        "ja corrigido (incluindo o rotulo, como no original) e a "
+        "classificacao ('categoria', 'cria_obrigacao', 'risco_juridico').\n"
         "- 'remocoes': paragrafos EXISTENTES que devem sair (rotulo + "
         "trecho_original exato).\n"
-        "- 'adicoes_estruturais': artigos NOVOS propostos para fechar lacunas "
-        "de aplicabilidade (com 'o_que', 'texto' completo e autonomo, "
-        "'posicao' e 'motivo').\n"
+        "- 'adicoes_estruturais': artigos ou paragrafos NOVOS propostos para "
+        "fechar lacuna de aplicabilidade ou explicitar procedimento implicito "
+        "(com 'o_que', 'texto' completo e autonomo, 'posicao', 'fundamento' no "
+        "proprio ato e a classificacao).\n"
+        "- 'plano_melhoria': a decisao (aplicar/propor/descartar) e o motivo "
+        "para cada achado e oportunidade avaliados.\n"
         "ORIENTACOES DE MELHORIA E ADEQUACAO:\n"
+        "PRINCIPIO GERAL: seja AGRESSIVO em identificar oportunidades de "
+        "melhoria e CONSERVADOR apenas em aplicar automaticamente mudanca "
+        "materialmente sensivel. Nao confunda 'ser conservador com mudanca sem "
+        "base' com 'ser timido diante de melhoria bem fundamentada'. O sistema "
+        "nao deve se limitar a corrigir erro obvio: procure ativamente "
+        "melhorar redacao, eliminar ambiguidade, tornar procedimentos mais "
+        "objetivos, explicitar responsabilidades, melhorar rastreabilidade, "
+        "reforcar controles, adicionar procedimento complementar, consolidar "
+        "regra dispersa e inserir dispositivo estrutural coerente com o "
+        "conteudo existente.\n"
+        "BUSQUE OPORTUNIDADE EM TODO O DOCUMENTO. Para cada problema ou ponto "
+        "de atencao relevante, responda internamente, sem parar na primeira "
+        "solucao: (1) existe correcao objetiva? (2) existe melhoria de "
+        "clareza? (3) existe melhoria estrutural util? (4) existe proposta "
+        "normativa justificavel? (5) existe lastro no PROPRIO documento? "
+        "(6) existe lastro em documentos recuperados? (7) a proposta resolve "
+        "diretamente o achado? (8) o impacto juridico e baixo, medio ou alto? "
+        "E permitido e desejavel propor VARIAS categorias para o mesmo "
+        "achado.\n"
         "1. Preserve o esqueleto do documento: numero, ementa, estrutura de "
         "artigos, titulos de capitulo e assinaturas. Aprimore o texto onde ele "
         "estiver fragil.\n"
-        "2. Capitulos: nao crie capitulos que o original nao tinha.\n"
+        "2. Capitulos: nao crie capitulos que o original nao tinha. Artigos, "
+        "paragrafos e incisos novos sao bem-vindos (ver regra 7).\n"
         "3. Fundamentacao legal: confira e ajuste o preambulo e os considerandos "
         "usando as normas e fundamentos presentes nos atos recuperados no RAG "
         "(nao invente referencias que nao possa sustentar nos atos recuperados).\n"
-        "5. NUMERACAO DE ARTIGOS NOVOS (LC 95/1998, art. 12, §§ 2o-3o): ao "
+        "4. NUMERACAO DE ARTIGOS NOVOS (LC 95/1998, art. 12, §§ 2o-3o): ao "
         "inserir um artigo no MEIO da sequencia, NUNCA renumerar os "
         "existentes. Use o numero do artigo que o precede acrescido de sufixo "
         "de letra: inserido apos o 'Art. 6o', vira 'Art. 6o-A'; depois "
         "'Art. 6o-B', e assim por diante. So usa numeracao continua "
         "('Art. 34', 'Art. 35') para artigos acrescentados apos o ULTIMO "
         "artigo do ato.\n"
-        "6. Fechamento: garanta artigo de vigencia e, quando o original revoga "
+        "5. Fechamento: garanta artigo de vigencia e, quando o original revoga "
         "algo, preserve a revogacao nos termos corretos (via 'alteracoes' ou "
         "'remocoes').\n"
-        "7. ANALISE DE APLICABILIDADE (LACUNAS): revise o ato como quem vai "
+        "6. ANALISE DE APLICABILIDADE (LACUNAS): revise o ato como quem vai "
         "aplica-lo no dia a dia e avalie cada lacuna: "
         "(a) 'recurso_administrativo' -- recurso ou pedido de reconsideracao "
         "quando a norma der a uma autoridade poder de vedar/negar mediante "
@@ -415,47 +802,81 @@ def _sistema_melhoria():
         "(e) 'seguranca_epi' -- seguranca do trabalho/EPI quando a atividade "
         "envolver risco; "
         "(f) 'publicacao_vigencia' -- veiculo de publicacao e regime de "
-        "vigencia. Se a lacuna existir E houver precedente no RAG rotulado "
-        "com o MESMO tema, acrescente UM artigo simples (nao uma serie), no "
-        "capitulo adequado, com numero por sufixo, e registre-o SOMENTE em "
-        "'adicoes_estruturais' com 'o_que' (rotulo), 'texto' (texto completo e "
-        "autonomo), 'posicao' (onde entra), motivo e lastro. Se a lacuna "
-        "existir MAS nao houver precedente rotulado, NAO proponha artigo -- "
-        "apenas registre o tema em 'lacunas_identificadas'. Nao encha o "
-        "documento de artigos novos: so adicione o que fechar omissao real de "
-        "aplicacao.\n"
-        "8. TEXTOS NOVOS SAO AUTONOMOS: nao cite ato SEJUS lateral (de outro "
+        "vigencia.\n"
+        "7. ADICOES ESTRUTURAIS: sempre que a lacuna existir, avalie se ha "
+        "fundamento em UM destes dois lugares: (A) o conteudo do proprio "
+        "documento (o ato ja traz o fato que a disciplina completaria -- "
+        "ex.: o art. 12 suspende a autorizacao mediante decisao fundamentada, "
+        "logo cabe artigo sobre COMUNICACAO AO INTERESSADO); ou (B) "
+        "precedente no RAG com o MESMO tema. Havendo fundamento A OU B, "
+        "acrescente UM artigo ou paragrafo simples (nao uma serie), no "
+        "capitulo adequado, com numero por sufixo, em "
+        "'adicoes_estruturais', preenchendo 'fundamento' com o dispositivo do "
+        "proprio ato que justifica a adicao e 'lastro' quando a base for um "
+        "ato do acervo. Se a lacuna criar OBRIGACAO nova, classifique como "
+        "'normative_proposal' (o sistema marca para decisao juridica). Se criar "
+        "apenas procedimento, registro, controle ou responsabilidade JA "
+        "exigidos implicitamente, classifique como 'structural_improvement'. "
+        "Se a lacuna existir mas NAO houver fundamento A nem B, registre em "
+        "'lacunas_identificadas'. Nao encha o documento de artigos novos: "
+        "proponha apenas o que fechar omissao real de aplicacao.\n"
+        "8. CONSOLIDACAO DE REGRAS DISPERSAS: se varios artigos repetem "
+        "regras sobre o mesmo assunto (comunicacao, registro, decisao "
+        "administrativa, responsabilidade), considere um dispositivo geral que "
+        "as reuna. Avalie o impacto sobre as referencias internas antes de "
+        "propor e registre essa avaliacao em 'relacao_com_o_achado'. Se a "
+        "consolidacao exigir mexer em referencia de outros dispositivos, "
+        "proponha tambem essas alteracoes.\n"
+        "9. TEXTOS NOVOS SAO AUTONOMOS: nao cite ato SEJUS lateral (de outro "
         "assunto) no corpo do artigo -- a base de estilo vai apenas no campo "
         "'lastro' do relatorio. Citacoes VERTICAIS ja embasadas no preambulo "
         "(ex.: LEP, Decreto 548/2016) e citacoes SUBSTANTIVAS (ex.: o ato "
         "concreto a ser revogado) podem entrar no texto.\n"
-        "9. Mude apenas o necessario: se um trecho ja esta adequado, NAO o "
-        "liste em lugar algum (o sistema mantem o original intacto). Nao altere "
-        "apenas tipografia (travessao por hifen, aspas, espacos). 'trecho_original' "
-        "DEVE casar com o texto do documento recebido -- copie fielmente, sem "
-        "reescrever, sem encurtar alem do paragrafo exato.\n"
-        "10. SEM SUGESTOES VAGAS OU COSMETICAS: nao proponha mudancas por "
-        "estilo, sinonimo ou preferencia pessoal; nao troque acentuacao, "
-        "pontuacao ou termo equivalente quando o sentido nao muda. Se a "
-        "'detalhe' nao aponta beneficio normativo concreto (clareza de "
-        "exigencia, prazo, competencia, alcance), DESCARTE a sugestao.\n"
-        "11. LASTRO EM TODA MUDANCA QUE INOVE: toda alteracao, remocao ou "
-        "adiccao que introduz prazo, percentual, exigencia ou penalidade nova "
+        "10. Mude o que precisa mudar: se um trecho ja esta adequado E "
+        "correto, NAO o liste em lugar algum (o sistema mantem o original "
+        "intacto). Nao altere apenas tipografia isolada (travessao por hifen, "
+        "aspas, espacos) sem efeito de clareza. 'trecho_original' DEVE casar "
+        "com o texto do documento recebido -- copie fielmente, sem reescrever, "
+        "sem encurtar alem do paragrafo exato.\n"
+        "11. MELHORIA DE CLAREZA E VALIDA: uma mudanca de 'clarity_improvement' "
+        "que desambigua, reorganiza a frase, explicita sujeito/competencia/"
+        "fluxo/responsabilidade ja implicitos ou consolida um conceito que o "
+        "proprio ato ja usa E ACEITAVEL, mesmo sem ser estritamente "
+        "necessaria. Melhorar clareza, coerencia, seguranca operacional, "
+        "previsibilidade, rastreabilidade, governanca, execucao pratica, "
+        "padronizacao e facilidade de fiscalizacao sao motivos validos. "
+        "Descartar essas melhoras por 'nao ser estritamente necessaria' e "
+        "TIMIDEZ, nao prudencia. O que NAO e aceitavel e mudar por estilo, "
+        "sinonimo ou preferencia pessoal sem ganho de clareza.\n"
+        "12. CLASSIFICACAO OBRIGATORIA DE TODA MUDANCA: em cada item de "
+        "'alteracoes'/'remocoes'/'adicoes_estruturais' preencha 'categoria', "
+        "'cria_obrigacao' e 'risco_juridico'. Regra de coerencia: se a mudanca "
+        "cria, amplia ou endurece obrigacao, prazo, requisito, limite ou "
+        "consequencia, ela NAO e 'safe_correction' nem "
+        "'clarity_improvement' -- classifique como 'structural_improvement' ou "
+        "'normative_proposal' e marque 'cria_obrigacao' = true. O sistema "
+        "reclassifica e escala para decisao juridica quando detectar a "
+        "incoerencia, mas nao descarte a mudanca: ela e valuable. "
+        "'unsupported' significa 'descreva o que motivou a ideia, mas nao ha "
+        "base para mudar' -- o sistema nao aplica itens 'unsupported'.\n"
+        "13. LASTRO EM TODA MUDANCA QUE INOVE: toda alteracao, remocao ou "
+        "adicao que introduz prazo, percentual, exigencia ou penalidade nova "
         "deve informar em 'lastro' o ato do RAG que embasa (ex.: 'IN 07/2026, "
         "art. 13'). Quando o acervo nao sustentar um numero concreto, use o "
         "marcador literal [PRAZO A DEFINIR PELA SECRETARIA] no lugar do valor "
         "no 'novo_texto'/'texto' e NUNCA invente o numero. Correcoes puramente "
-        "redacionais nao precisam de lastro. Em itens de 'origem' = "
-        "'origem_analise_aprovada', a falta de lastro no acervo NAO impede a "
-        "aplicacao: execute a correcao do apontamento e registre a origem.\n"
-        "12. REVOGACAO SO COM NORMA ESPECIFICA: proponha revogacao (em "
+        "redacionais e melhoras de clareza nao precisam de lastro. Em itens de "
+        "'origem' = 'origem_analise_aprovada', a falta de lastro no acervo NAO "
+        "impede a aplicacao: execute a correcao do apontamento e registre a "
+        "origem.\n"
+        "14. REVOGACAO SO COM NORMA ESPECIFICA: proponha revogacao (em "
         "'remocoes' ou 'alteracoes') apenas quando indicar a norma concreta a "
         "ser revogada, citando nome, tipo, numero e ano (ex.: 'Decreto "
         "2.541/2008'). NUNCA proponha clausula generica do tipo 'ficam "
         "revogadas as disposicoes em contrario' ou revogacao implicita sem essa "
         "citacao. Essa regra vale para as duas origens -- inclusive em itens "
         "'origem_analise_aprovada'.\n"
-        "13. REQUER_DECISAO_JURIDICA: marque 'requer_decisao_juridica' = true "
+        "15. REQUER_DECISAO_JURIDICA: marque 'requer_decisao_juridica' = true "
         "em qualquer alteracao ou adicao de 'origem' = 'iniciativa_modelo' que "
         "INOVE em relacao ao original (novo prazo, nova exigencia, novo "
         "percentual, ampliacao de alcance) ou quando o lastro nao estiver "
@@ -466,38 +887,53 @@ def _sistema_melhoria():
         "marque true somente por criterio juridico de fato (a mudanca depende "
         "de decisao juridica explicita, conflita com norma superior ou cria "
         "despesa sem previsao legal). Se o lastro cobrir integralmente o "
-        "conteudo, marque false.\n"
-        "14. APONTAMENTOS DA ANALISE (quando informados): trate cada apontamento "
-        "como uma TAREFA a executar no documento original. Aplique a alteracao "
+        "conteudo, marque false. O sistema reforca este sinalizador: toda "
+        "'normative_proposal' e toda mudanca com 'cria_obrigacao' = true "
+        "vira pendencia juridica automaticamente.\n"
+        "16. PLANO DE MELHORIA (obrigatorio): devolva 'plano_melhoria' com UMA "
+        "entrada por achado e por oportunidade avaliados, e para TODOS os "
+        "apontamentos informados. E o registro de rastreabilidade entre o "
+        "achado e a alteracao. Campos: 'achado', 'categoria' da mudanca "
+        "proposta, 'decisao' ('aplicar' quando a mudanca entra no documento, "
+        "'propor' quando entra como proposta que exige validacao juridica, "
+        "'descartar' quando nenhuma mudanca resolve o achado), "
+        "'dispositivo_alvo', 'fundamento' (o que sustenta a mudanca), "
+        "'risco_juridico', 'relacao_com_o_achado' (como a mudanca resolve o "
+        "achado) e 'referencia' (rotulo da mudanca que executa o plano). "
+        "Quando 'decisao' = 'descartar', 'motivo' e OBRIGATORIO e deve ser um "
+        "destes motivos canonicos: 'sem_lastro', 'ja_resolvido_no_texto', "
+        "'mudanca_desnecessaria', 'materialmente_sensivel', "
+        "'risco_de_alterar_sentido', 'depende_de_decisao_institucional'. "
+        "NUNCA escreva 'nao foi alterado' ou 'nao se aplica': nao ha motivo "
+        "valido para avaliacao ausente. Um achado que voce avaliou e decidiu "
+        "propor aparece no plano com 'decisao' = 'propor' mesmo sem 'status' "
+        "'aplicado' na cobertura. O sistema cruza o plano com o patch efetivo: "
+        "uma decisao sem mudanca correspondente sera marcada como nao "
+        "aplicada.\n"
+        "17. APONTAMENTOS DA ANALISE (quando informados): trate cada apontamento "
+        "como uma TAREFA a executar no documento original, E como ponto de "
+        "partida para buscar melhorias adicionais. Aplique a alteracao "
         "correspondente e registre-a em 'alteracoes'/'remocoes'/"
-        "'adicoes_estruturais'. Nao faca uma revisao independente que ignore ou "
-        "substitua esses apontamentos; nao invente correcoes alem deles e das "
-        "diretrizes explicitas do usuario. Se a analise nao apontar nenhuma "
-        "alteracao acionavel, devolva as listas de mudancas vazias. Para CADA "
-        "apontamento informado, devolva uma entrada em 'apontamentos_analise' "
-        "com o mesmo 'apontamento_id':\n"
-        "   - 'status' = 'aplicado' SOMENTE quando a mudanca existir de fato em "
-        "'alteracoes'/'remocoes'/'adicoes_estruturais' e estiver ancorada no "
-        "documento, com 'referencia' = rótulo da mudança;\n"
-        "   - 'status' = 'nao_aplicado' apenas com um IMPEDIMENTO CONCRETO no "
-        "'motivo' (ex.: depende de decisao juridica; conflita com a norma X; "
-        "cria despesa sem previsao legal; materia reservada a lei "
-        "complementar). NUNCA use 'nao foi alterado', 'nao se aplica' ou "
-        "'nao aplicavel' como justificativa;\n"
-        "   - se a execucao falhou (trecho nao localizado, por exemplo), deixe "
-        "claro o motivo tecnico no 'motivo' — o sistema marcara como falha.\n"
-        "Aplicar outras melhorias NAO substitui cumprir os apontamentos "
-        "anteriores.\n"
-        "15. ORIGEM DE CADA MUDANCA: preencha 'origem' em todo item de "
+        "'adicoes_estruturais'. Depois de atender a tarefa, pergunte se ha "
+        "oportunidade de MELHORA (clareza, estrutural, proposta normativa) no "
+        "mesmo trecho ou em trecho proximo e, se houver base, inclua essa "
+        "melhoria tambem -- de preferencia de iniciativa propria, marcada em "
+        "'plano_melhoria'. Se a analise nao apontar nenhuma alteracao "
+        "acionavel, ainda assim avalie as oportunidades informadas e as "
+        "melhorias que o proprio documento permitir.\n"
+        "18. ORIGEM DE CADA MUDANCA: preencha 'origem' em todo item de "
         "'alteracoes'/'remocoes'/'adicoes_estruturais'. Use "
         "'origem_analise_aprovada' quando a mudanca executa um apontamento da "
         "ANALISE aprovado pelo usuario (pedido de correcao, ex.: 'isso, agora "
         "me de o documento com as correcoes') e 'iniciativa_modelo' quando a "
         "mudanca nao corresponde a nenhum apontamento (decisao propria sua ao "
-        "gerar o patch). A origem define a exigencia de lastro: itens "
+        "gerar o patch, como uma melhoria de clareza ou proposta estrutural "
+        "que vocao identificou). A origem define a exigencia de lastro: itens "
         "'origem_analise_aprovada' sao aplicados mesmo sem ato no acervo; "
-        "itens 'iniciativa_modelo' exigem lastro valido.\n"
-        "16. PRESERVE O OBJETIVO DO ACHADO: cada apontamento da analise tem "
+        "itens 'iniciativa_modelo' de categoria 'safe_correction' ou "
+        "'clarity_improvement' tambem sao aplicados, mas os que inovam sobem "
+        "para decisao juridica.\n"
+        "19. PRESERVE O OBJETIVO DO ACHADO: cada apontamento da analise tem "
         "um objetivo especifico (corrigir grafia, sanar lacuna, renumerar "
         "capitulos, revisar fundamento, etc.). Aplique a mudanca que CUMPRA "
         "esse objetivo no trecho apontado — nao troque o alvo (nao use um "
@@ -551,7 +987,10 @@ def _usuario_melhoria(
             "rotulados com '[tema: ...]' indicam precedentes de lacuna "
             "(recurso_administrativo, prazo_validade, prestacao_contas, "
             "revogacao, seguranca_epi, publicacao_vigencia) e podem embasar "
-            "artigos novos em 'adicoes_estruturais':"
+            "artigos novos em 'adicoes_estruturais'. O acervo NAO e a unica "
+            "fonte de fundamento: o proprio documento tambem fundamenta "
+            "adicao estrutural quando ja contem o fato que a disciplina "
+            "completaria (ver regra 7)."
         ),
         _resumir_contexto(contexto),
     ]
@@ -581,13 +1020,50 @@ def _usuario_melhoria(
                 [
                     "",
                     (
-                        "ANALISE ANTERIOR DO PROPRIO DOCUMENTO (contexto; se nao "
-                        "houver apontamento acionavel, nao crie mudancas apenas "
-                        "para 'atende-la'):"
+                        "ANALISE ANTERIOR DO PROPRIO DOCUMENTO (contexto; "
+                        "avalia as oportunidades indicadas abaixo antes de "
+                        "concluir que nao ha mudanca):"
                     ),
                     str(analise_completa)[:20_000],
                 ]
             )
+
+        oportunidades = valores.get("oportunidades") or []
+        if oportunidades:
+            partes.extend(
+                [
+                    "",
+                    (
+                        "OPORTUNIDADES DE MELHORIA identificadas na analise "
+                        "(NAO sao erros a corrigir obrigatoriamente: sao pontos "
+                        "onde uma MELHORIA pode valer -- clareza, procedimento "
+                        "estrutural ou proposta normativa -- se houver "
+                        "fundamento no documento ou no acervo). Avalie CADA uma, "
+                        "proponha a mudanca que resolver e registre a decisao em "
+                        "'plano_melhoria'. Nao descarte por serem 'apenas "
+                        "melhoria': a melhoria de clareza, governanca, "
+                        "rastreabilidade e seguranca operacional e um objetivo "
+                        "valido deste fluxo."
+                    ),
+                ]
+            )
+            _rotulos_tipo = {
+                "confirmed_issue": "problema confirmado",
+                "actionable_attention": "ponto de atencao acionavel",
+                "structural_gap": "lacuna estrutural",
+            }
+            for ordem, oportunidade in enumerate(oportunidades, start=1):
+                texto = str(oportunidade.get("texto") or "").strip()
+                if not texto:
+                    continue
+                rotulo = _rotulos_tipo.get(
+                    str(oportunidade.get("tipo") or ""),
+                    str(oportunidade.get("tipo") or "oportunidade"),
+                )
+                identificador = oportunidade.get("id") or f"op-{ordem}"
+                partes.append(
+                    f"- [{identificador}] ({rotulo}) {texto}"
+                )
 
         if diretrizes:
             partes.extend(
@@ -1084,6 +1560,153 @@ def _marcas_subitens(texto: str) -> set[str]:
     return {_chave_texto(m.group(1)) for m in _RE_MARCA_SUBITEM.finditer(texto or "")}
 
 
+# ===========================================================================
+# Politica de aplicacao por categoria da mudanca
+# ===========================================================================
+
+
+def _categoria_declarada(item: dict) -> str:
+    """Categoria declarada pelo modelo, ja validada contra a lista canonica.
+
+    Ausente ou invalida NAO vira 'safe_correction' por omissao: nesse caso o
+    item e tratado como ``clarity_improvement`` (presumido nao material) e o
+    sistema ainda assim escala para decisao juridica quando a mudanca cria
+    obrigacao. O que nao pode acontecer e o contrario: um item material nunca
+    pode ser aceito como correcao por omissao de campo.
+    """
+    valor = str(item.get("categoria") or "").strip().casefold()
+    if valor in CATEGORIAS_MUDANCA:
+        return valor
+    return CAT_CLARITY_IMPROVEMENT
+
+
+def _cria_obrigacao(item: dict) -> bool:
+    return bool(item.get("cria_obrigacao"))
+
+
+def _risco_declarado(item: dict) -> str:
+    valor = str(item.get("risco_juridico") or "").strip().casefold()
+    return valor if valor in RISCOS_JURIDICOS else RISCO_MEDIO
+
+
+def normalizar_motivo_descarte(motivo: str | None) -> str | None:
+    """Mapeia o texto livre do motivo para o motivo canonico de descarte.
+
+    Devolve ``None`` quando o texto nao aponta nenhum dos motivos canonicos --
+    e um motivo vago ("nao foi alterado", "nao se aplica") continua sem
+    lastro, como antes. Aceitar texto livre e perigoso demais: o modelo
+    aprenderia a justificar descarte com qualquer frase.
+    """
+    texto = (motivo or "").strip()
+    if not texto:
+        return None
+    for canonico, padrao in _MOTIVOS_TAXONOMIA:
+        if padrao.search(texto):
+            return canonico
+    return None
+
+
+def _descricao_motivo(canonico: str) -> str:
+    return {
+        DESCARTE_SEM_LASTRO: (
+            "descartado: sem lastro — nenhuma base no documento nem no acervo "
+            "sustenta a mudança"
+        ),
+        DESCARTE_JA_RESOLVIDO: (
+            "descartado: já resolvido no texto — o dispositivo alvo já "
+            "disciplina o ponto"
+        ),
+        DESCARTE_DESNECESSARIO: (
+            "descartado: mudança desnecessária — o texto atual já é claro "
+            "e a mudança não agrega"
+        ),
+        DESCARTE_SENSIVEL: (
+            "descartado: materialmente sensível — cria ou amplia regra "
+            "material e depende de validação jurídica"
+        ),
+        DESCARTE_RISCO_SENTIDO: (
+            "descartado: risco de alterar o sentido do dispositivo original"
+        ),
+        DESCARTE_DECISAO_INSTITUCIONAL: (
+            "descartado: depende de decisão institucional/jurídica"
+        ),
+    }.get(canonico, "descartado")
+
+
+def aplicar_politica_categorias(
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> list[str]:
+    """Aplica a politica categoria -> tratamento e devolve os descartes.
+
+    Tres garantias, nesta ordem:
+
+    1. ``unsupported`` NUNCA entra no documento (e some do relatório de
+       comparacao, para nao parecer recomendacao segura).
+    2. ``normative_proposal`` e qualquer mudanca com ``cria_obrigacao`` sobem
+       para ``requer_decisao_juridica``: proposta material nao e correcao
+       automatica, por mais bem justificada que esteja.
+    3. Coerencia de classificacao: se o modelo disser 'safe_correction' ou
+       'clarity_improvement' mas a mudanca cria obrigacao, o item e
+       reclassificado (escalado), nao aceito como correcao. O principio e
+       conservador na APLICACAO, agressivo na IDENTIFICACAO: nao se descarta a
+       mudanca, so se marca para decisao.
+
+    Devolve os rótulos descartados (para constar na entrega).
+    """
+    descartados: list[str] = []
+
+    def _rotulo(item: dict) -> str:
+        return item.get("rotulo") or item.get("o_que") or "?"
+
+    for grupo in (alteracoes, remocoes, adicoes):
+        for item in grupo:
+            if not isinstance(item, dict):
+                continue
+            categoria = _categoria_declarada(item)
+            item["categoria"] = categoria
+            item.setdefault("risco_juridico", _risco_declarado(item))
+            if categoria == CAT_UNSUPPORTED:
+                item["descartado_motivo"] = DESCARTE_SEM_LASTRO
+                continue
+            cria = _cria_obrigacao(item)
+            if categoria in (CAT_SAFE_CORRECTION, CAT_CLARITY_IMPROVEMENT) and cria:
+                # Declarou correcao/clareza, mas cria obrigacao: nao e uma das
+                # duas. Sobe para estrutural e ganha decisao juridica.
+                item["categoria"] = CAT_STRUCTURAL_IMPROVEMENT
+                item["categoria_escalada"] = True
+                item["risco_juridico"] = RISCO_ALTO
+            if categoria == CAT_NORMATIVE_PROPOSAL or cria:
+                item["requer_decisao_juridica"] = True
+
+    def _sem_categoria_aplicavel(grupo: list[dict]) -> list[dict]:
+        return [
+            i
+            for i in grupo
+            if isinstance(i, dict)
+            and _categoria_declarada(i) not in CATEGORIAS_APLICAVEIS
+        ]
+
+    # Remove 'unsupported' das tres listas de forma Effective (o filtro do
+    # patch so depois), registrando o descarte.
+    for nome, grupo in (
+        ("alteracoes", alteracoes),
+        ("remocoes", remocoes),
+        ("adicoes", adicoes),
+    ):
+        apoio = _sem_categoria_aplicavel(grupo)
+        if not apoio:
+            continue
+        for item in apoio:
+            descartados.append(
+                f"{_rotulo(item)} ({_descricao_motivo(item.get('descartado_motivo') or DESCARTE_SEM_LASTRO)})"
+            )
+        grupo[:] = [i for i in grupo if i not in apoio]
+
+    return descartados
+
+
 def _subitens_perdidos(item: dict) -> list[str]:
     """Subitens citados em ``trecho_original`` que sumiriam da versão ativa.
 
@@ -1316,10 +1939,19 @@ def _motivo_concreto(motivo: str) -> bool:
     """Diz se o motivo é um impedimento concreto (não uma justificativa vaga).
 
     Exige um motivo minimamente descritivo e que não seja apenas 'não foi
-    alterado'/'não se aplica'. Se apontar uma causa concreta, aceita."""
+    alterado'/'não se aplica'. Se apontar uma causa concreta, aceita.
+
+    Os motivos canônicos de descarte ('sem lastro', 'já resolvido no texto',
+    'mudança desnecessária', ...) valem por si: são a resposta esperada para
+    um achado que foi avaliado e não virou mudança. 'Mudança desnecessária'
+    só é aceito acompanhado da evidência de que o texto já está adequado
+    (ver ``_MOTIVOS_TAXONOMIA``), senão seria atalho para descartar tudo.
+    """
     texto = (motivo or "").strip()
     if len(texto) < 20:
         return False
+    if normalizar_motivo_descarte(texto):
+        return True
     if _RE_IMPEDIMENTO_CONCRETO.search(texto):
         return True
     # Motivo descritivo, porém sem palavra-chave conhecida: só vale se não for
@@ -1683,6 +2315,177 @@ def _validar_cobertura(
         entrada["motivo"] = motivo_tecnico
         cobertura.append(entrada)
     return cobertura
+
+
+def reconciliar_plano(
+    plano_declarado: list[dict] | None,
+    oportunidades: list[dict] | None,
+    alteracoes: list[dict],
+    remocoes: list[dict],
+    adicoes: list[dict],
+) -> list[dict]:
+    """Reconstroi o plano de melhoria a partir do que o patch EFETIVAMENTE faz.
+
+    Tres responsabilidades:
+
+    1. Só entra linha de plano para o que existe de fato no patch — uma
+       decisão 'aplicar' sem mudança correspondente vira 'descartado', nunca
+       'aplicado' (mesma disciplina da cobertura de apontamentos).
+    2. Garante rastreabilidade completa: cada oportunidade informada que não
+       virou mudança aparece com o motivo canônico do descarte, ou
+       explicitamente como 'nao avaliada' — o que denuncia o planner sem
+       cobrir todos os achados.
+    3. Preserva a relação declarada entre achado e alteração
+       ('relacao_com_o_achado', 'dispositivo_alvo', 'fundamento', risco).
+
+    Oportunidades que o modelo não declarou entram como 'nao avaliada' para que
+    a lacuna de cobertura fique visível em vez de silenciosa.
+    """
+    declarados = [d for d in (plano_declarado or []) if isinstance(d, dict)]
+    # Janelas sobrepostas fazem o mesmo achado ser declarado mais de uma vez.
+    # Mantém uma linha por achado, preferindo a declaração que aponta uma
+    # mudança concreta (a primeira pode ter sido "descartar" por estar fora da
+    # janela, e a segunda, dentro dela, ter proposto o patch).
+    _dedupe: dict[str, dict] = {}
+    for d in declarados:
+        if not (d.get("achado") or "").strip():
+            continue
+        chave = _chave_texto(
+            str(d.get("achado_id") or "") + "|" + str(d.get("achado") or "")
+        )
+        anterior = _dedupe.get(chave)
+        if anterior is None or (
+            not (anterior.get("referencia") or "").strip()
+            and (d.get("referencia") or "").strip()
+        ):
+            _dedupe[chave] = d
+    declarados = list(_dedupe.values())
+    linhas: list[dict] = []
+    vistas: set[str] = set()
+
+    def _chave(entrada: dict) -> str:
+        return _chave_texto(
+            str(entrada.get("achado_id") or "") + "|" + str(entrada.get("achado") or "")
+        )
+
+    def _chave_id(achado_id: str) -> str:
+        return "id:" + _chave_texto(achado_id) if achado_id else ""
+
+    # O planner pode citar o ID da oportunidade e parafrasear o texto; casar
+    # pelo ID evita marcar como "nao avaliada" um achado que ele de fato
+    #_avaliou (o texto exato do plano raramente e identico ao da analise).
+    ids_oportunidade = {
+        str(o.get("id") or "").strip()
+        for o in (oportunidades or [])
+        if isinstance(o, dict) and str(o.get("id") or "").strip()
+    }
+
+    def _casou_oportunidade(declaracao: dict) -> bool:
+        achado_id = str(declaracao.get("achado_id") or "").strip()
+        return bool(achado_id) and achado_id in ids_oportunidade
+
+    for d in declarados:
+        achado = (d.get("achado") or "").strip()
+        if not achado:
+            continue
+        decisao = (d.get("decisao") or "").strip().casefold()
+        referencia = (d.get("referencia") or "").strip()
+        localizada = _localizar_mudanca(referencia, alteracoes, remocoes, adicoes)
+        canonico = normalizar_motivo_descarte(d.get("motivo"))
+
+        if localizada is not None:
+            _tipo, item, rotulo = localizada
+            if item.get("requer_decisao_juridica"):
+                efetiva = STATUS_PENDENTE
+                status_txt = (
+                    "proposta inserida e marcada para validação jurídica "
+                    f"({_categoria_declarada(item)})"
+                )
+                decisao = decisao or "propor"
+            else:
+                efetiva = STATUS_APLICADO
+                status_txt = f"aplicada ({_categoria_declarada(item)})"
+                decisao = decisao or "aplicar"
+            linhas.append(
+                {
+                    "achado_id": d.get("achado_id") or "",
+                    "achado": achado,
+                    "categoria": _categoria_declarada(item),
+                    "risco_juridico": _risco_declarado(item),
+                    "decisao": decisao,
+                    "dispositivo_alvo": (d.get("dispositivo_alvo") or rotulo or ""),
+                    "referencia": rotulo or referencia,
+                    "fundamento": (d.get("fundamento") or d.get("lastro") or ""),
+                    "relacao_com_o_achado": (d.get("relacao_com_o_achado") or ""),
+                    "status": efetiva,
+                    "status_detalhe": status_txt,
+                }
+            )
+            vistas.add(_chave(d))
+            continue
+
+        # Declarou, mas a mudança não está no patch efetivo.
+        if canonico:
+            efetiva = STATUS_NAO_APLICADO
+            status_txt = _descricao_motivo(canonico)
+        elif decisao == "descartar" and _motivo_concreto(d.get("motivo") or ""):
+            canonico = (d.get("motivo") or "").strip()
+            efetiva = STATUS_NAO_APLICADO
+            status_txt = "descartado: " + canonico
+        else:
+            canonico = ""
+            efetiva = STATUS_FALHOU
+            status_txt = (
+                "a decisão declarada não encontrou mudança efetiva no patch"
+                + (f" (motivo: '{d.get('motivo')}')" if d.get("motivo") else "")
+            )
+        linhas.append(
+            {
+                "achado_id": d.get("achado_id") or "",
+                "achado": achado,
+                "categoria": _categoria_declarada(d),
+                "risco_juridico": _risco_declarado(d),
+                "decisao": decisao or "descartar",
+                "dispositivo_alvo": (d.get("dispositivo_alvo") or ""),
+                "referencia": referencia,
+                "fundamento": (d.get("fundamento") or d.get("lastro") or ""),
+                "relacao_com_o_achado": (d.get("relacao_com_o_achado") or ""),
+                "status": efetiva,
+                "status_detalhe": status_txt,
+                "motivo_canonico": canonico,
+            }
+        )
+        vistas.add(_chave(d))
+        if _casou_oportunidade(d):
+            vistas.add(_chave_id(str(d.get("achado_id") or "").strip()))
+
+    for o in oportunidades or []:
+        if not isinstance(o, dict):
+            continue
+        entrada = {"achado_id": o.get("id") or "", "achado": o.get("texto") or ""}
+        if _chave(entrada) in vistas or _chave_id(
+            str(entrada.get("achado_id") or "").strip()
+        ) in vistas:
+            continue
+        linhas.append(
+            {
+                "achado_id": entrada["achado_id"],
+                "achado": entrada["achado"],
+                "categoria": "",
+                "risco_juridico": "",
+                "decisao": "",
+                "dispositivo_alvo": "",
+                "referencia": "",
+                "fundamento": "",
+                "relacao_com_o_achado": "",
+                "status": STATUS_FALHOU,
+                "status_detalhe": (
+                    f"oportunidade '{o.get('tipo', '')}' não avaliada pelo "
+                    "planner (sem decisão e sem mudança no patch)"
+                ),
+            }
+        )
+    return linhas
 
 
 # ===========================================================================
@@ -2171,11 +2974,25 @@ def gerar_estrutura_melhoria(
     apontamentos = [
         a for a in ((valores or {}).get("apontamentos") or []) if isinstance(a, dict)
     ]
+    oportunidades = [
+        o
+        for o in ((valores or {}).get("oportunidades") or [])
+        if isinstance(o, dict)
+    ]
+    plano_declarado: list[dict] = []
 
     janelas = _janelas_conteudo(conteudo)
 
     if len(janelas) == 1:
-        dados, alteracoes, remocoes, adicoes, lacunas, declarada = _gerar_patch_janela(
+        (
+            dados,
+            alteracoes,
+            remocoes,
+            adicoes,
+            lacunas,
+            declarada,
+            plano_declarado,
+        ) = _gerar_patch_janela(
             janelas[0], tipo_ato, perfil, contexto, valores, apontamentos, max_tokens
         )
         numero = dados.get("numero") or ""
@@ -2193,7 +3010,15 @@ def gerar_estrutura_melhoria(
         declarada = []
         total = len(janelas)
         for indice, janela in enumerate(janelas, start=1):
-            dados, alts, rems, adds, lacs, decl = _gerar_patch_janela(
+            (
+                dados,
+                alts,
+                rems,
+                adds,
+                lacs,
+                decl,
+                plano_janela,
+            ) = _gerar_patch_janela(
                 janela,
                 tipo_ato,
                 perfil,
@@ -2212,6 +3037,7 @@ def gerar_estrutura_melhoria(
             adicoes.extend(adds)
             lacunas.extend(lacs)
             declarada.extend(decl)
+            plano_declarado.extend(plano_janela)
         alteracoes = _dedupe_mudancas(alteracoes)
         remocoes = _dedupe_mudancas(remocoes)
         adicoes = _dedupe_mudancas(adicoes)
@@ -2234,12 +3060,22 @@ def gerar_estrutura_melhoria(
         conteudo, alteracoes, canonicas
     )
 
+    # Política de categoria: 'unsupported' nunca entra no documento; proposta
+    # normativa ou mudança que cria obrigação sobe para decisão jurídica. Roda
+    # ANTES do filtro de patch para que 'unsupported' não consuma uma vaga de
+    # ancoragem e não apareça como recomendação na comparação.
+    descartados_categoria = aplicar_politica_categorias(
+        alteracoes, remocoes, adicoes
+    )
+
     # Não aplica patch inválido: descarta itens sem âncora ou que causariam
     # duplicação. Se nada sobrar, a entrega será a cópia intacta do original.
     alteracoes, remocoes, adicoes, descartados = _filtrar_patch_valido(
         conteudo, alteracoes, remocoes, adicoes
     )
-    descartados = descartados_renumeracao + descartados
+    descartados = (
+        descartados_renumeracao + descartados_categoria + descartados
+    )
 
     # Cobertura dos apontamentos validada UMA vez sobre o patch consolidado.
     declarada_consolidada = _dedupe_declarada(declarada)
@@ -2254,8 +3090,22 @@ def gerar_estrutura_melhoria(
     cobertura = _reconciliar_cobertura_automatica(
         cobertura, alteracoes, apontamentos
     )
+    # Plano de melhoria reconciliado com o patch efetivo: cada achado e
+    # oportunidade avaliados entram com categoria, risco, decisão e motivo.
+    plano = reconciliar_plano(
+        plano_declarado,
+        oportunidades,
+        alteracoes,
+        remocoes,
+        adicoes,
+    )
     estrutura = _construir_estrutura(conteudo, alteracoes, remocoes, numero, ementa)
     estrutura["_cobertura_analise"] = cobertura
+    estrutura["_plano_melhoria"] = plano
+    # Plano DECLARADO pelo modelo, preservado para permitir reconciliar de
+    # novo quando o patch for parcialmente descartado na validação pós-geração
+    # (o plano reconciliado reflecte um patch que já mudou).
+    estrutura["_plano_declarado"] = plano_declarado
     estrutura["_declarada"] = declarada_consolidada
     estrutura["_descartados"] = descartados
     return estrutura, alteracoes, remocoes, adicoes, lacunas
@@ -2270,11 +3120,11 @@ def _gerar_patch_janela(
     apontamentos: list[dict],
     max_tokens: int,
     rotulo_janela: str = "",
-) -> tuple[dict, list[dict], list[dict], list[dict], list[dict], list[dict]]:
+) -> tuple[dict, list[dict], list[dict], list[dict], list[dict], list[dict], list[dict]]:
     """Executa o LLM em modo patch para UMA janela do documento.
 
-    Devolve (dados, alteracoes, remocoes, adicoes, lacunas, declarada). A
-    sanidade do patch (``_problemas_do_patch``) é validada contra o texto da
+    Devolve (dados, alteracoes, remocoes, adicoes, lacunas, declarada, plano).
+    A sanidade do patch (``_problemas_do_patch``) é validada contra o texto da
     janela e, em caso de falha, re-tenta com a mensagem direcionada. A cobertura
     dos apontamentos é exigida em janela única; em documentos multi-janela é
     cobrada apenas pelos apontamentos cujo assunto aparece na janela (e o
@@ -2305,6 +3155,7 @@ def _gerar_patch_janela(
     adicoes: list[dict] = []
     lacunas: list[dict] = []
     declarada: list[dict] = []
+    plano: list[dict] = []
 
     for tentativa in range(_MAX_TENTATIVAS_PATCH):
         dados = _extrair_json_com_retry(
@@ -2320,6 +3171,7 @@ def _gerar_patch_janela(
         remocoes = [r for r in (dados.get("remocoes") or []) if isinstance(r, dict)]
         for r in remocoes:
             r.setdefault("estado", ESTADO_PENDENTE)
+            r.setdefault("requer_decisao_juridica", False)
         adicoes = [a for a in (dados.get("adicoes_estruturais") or []) if isinstance(a, dict)]
         for a in adicoes:
             a.setdefault("estado", ESTADO_PENDENTE)
@@ -2330,6 +3182,13 @@ def _gerar_patch_janela(
         declarada = [
             d for d in (dados.get("apontamentos_analise") or []) if isinstance(d, dict)
         ]
+        plano = [
+            d for d in (dados.get("plano_melhoria") or []) if isinstance(d, dict)
+        ]
+        # Política de categoria ANTES de qualquer outra checagem: 'unsupported'
+        # sai do patch, e proposta normativa/que cria obrigação já entra
+        # marcada para decisão jurídica.
+        aplicar_politica_categorias(alteracoes, remocoes, adicoes)
         # Origem deterministica por item: muda o tratamento do lastro. Itens que
         # a cobertura vincula a um apontamento da analise sao 'aprovados' e nao
         # sao bloqueados pela ausencia de lastro; o restante e 'iniciativa do
@@ -2363,4 +3222,4 @@ def _gerar_patch_janela(
 
     # As tentativas podem falhar: entrega o melhor esforço mesmo incompleto,
     # para que o arquivo sempre seja gerado e entregue ao usuário.
-    return dados, alteracoes, remocoes, adicoes, lacunas, declarada
+    return dados, alteracoes, remocoes, adicoes, lacunas, declarada, plano

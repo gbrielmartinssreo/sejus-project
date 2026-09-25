@@ -10,9 +10,15 @@ import traceback
 import uuid
 from pathlib import Path
 
-from sejus_project.tools.document_infra import analise_validacao, docx_builder, docx_validacao, modelos
+from sejus_project.tools.document_infra import (
+    analise_validacao,
+    docx_builder,
+    docx_validacao,
+    modelos,
+)
 from sejus_project.tools.document_infra.docx_templates import OUTPUTS_DIR
 from sejus_project.tools.llm_tools import (
+    analise_formatacao,
     analysis_registry,
     document_improvement,
     minuta_generation,
@@ -1386,10 +1392,23 @@ def _melhorar_e_relatar(
         valores["apontamentos"] = apontamentos
     if analise_completa:
         valores["analise_completa"] = analise_completa
+    # Oportunidades de melhoria derivadas da própria análise (pontos de atenção
+    # acionáveis e lacunas estruturais). NÃO viram tarefa de correção: entram
+    # como base para o planner propor melhoria de clareza, proposta estrutural
+    # ou normativa. É o que impede o fluxo de ficar artificialmente limitado a
+    # corrigir os erros objetivos.
+    oportunidades = analise_formatacao.extrair_oportunidades(analise_completa)
+    if oportunidades:
+        valores["oportunidades"] = oportunidades
     valores = valores or None
     # Declarações de cobertura do modelo (ID -> status/referência) preservadas
     # para recomputar a cobertura quando o patch for parcialmente descartado.
     declarada_modelo: list[dict] = []
+    # Plano reconciliado + declaração bruta do modelo: o plano é reconciliado
+    # de novo ao final, contra o patch que SOBREVIVEU às redes de segurança
+    # (a reconciliação inicial ainda assume o patch que o modelo devolveu).
+    plano_melhoria: list[dict] = []
+    plano_declarado: list[dict] = []
     # Uma falha de geração/validação do patch NÃO pode barrar a entrega: cai no
     # fallback (cópia intacta) com os apontamentos marcados como falha.
     try:
@@ -1404,6 +1423,8 @@ def _melhorar_e_relatar(
         )
         # Cobertura dos apontamentos da análise (validada contra o patch efetivo).
         cobertura = estrutura.pop("_cobertura_analise", None) or []
+        plano_melhoria = estrutura.pop("_plano_melhoria", None) or []
+        plano_declarado = estrutura.pop("_plano_declarado", None) or []
         declarada_modelo = estrutura.pop("_declarada", None) or []
         descartados = estrutura.pop("_descartados", None) or []
         # Marca as mudanças que vieram de um apontamento aprovado da análise,
@@ -1465,6 +1486,9 @@ def _melhorar_e_relatar(
     # Adições estruturais viram artigos de verdade no corpo (posição correta),
     # tanto para o arquivo quanto para a prévia antes/depois.
     insercoes |= _integrar_adicoes_estruturais(estrutura, adicoes)
+    # Aplicar política de categorias a todas as listas de uma vez
+    document_improvement.aplicar_politica_categorias(alteracoes, remocoes, adicoes)
+
     # Entrega SEMPRE um arquivo: com correções, parcial ou a cópia intacta.
     sem_correcao = not (alteracoes or remocoes or adicoes)
     fallback = False
@@ -1563,6 +1587,13 @@ def _melhorar_e_relatar(
     depois = minuta_para_texto(estrutura)
     textos = _textos_antes_depois(conteudo, depois)
     lacunas_sem = _filtrar_lacunas_sem_precedente(lacunas, precedente or {})
+
+    # Reconciliação FINAL do plano contra o patch que SOBREVIVEU a TODAS as
+    # redes de segurança (filtro, lastro, duplicação, validação DOCX 5 passagens).
+    plano_melhoria = document_improvement.reconciliar_plano(
+        plano_declarado, oportunidades, alteracoes, remocoes, adicoes
+    )
+
     _ultima_minuta = {
         "estructura": estrutura,
         "modelo": perfil.name,
@@ -1580,6 +1611,7 @@ def _melhorar_e_relatar(
         "lacunas": lacunas_sem,
         "textos": textos,
         "apontamentos_analise": cobertura,
+        "plano_melhoria": plano_melhoria,
         "fallback": fallback,
         "descartados": descartados,
         "passagens": passagens,
@@ -1598,6 +1630,7 @@ def _melhorar_e_relatar(
         "lacunas": lacunas_sem,
         "textos": textos,
         "apontamentos_analise": cobertura,
+        "plano_melhoria": plano_melhoria,
         "fallback": fallback,
         "descartados": descartados,
         "passagens": passagens,
