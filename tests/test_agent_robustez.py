@@ -315,6 +315,65 @@ def test_apos_confirmacao_analisa_arquivo_no_proximo_turno(monkeypatch, tmp_path
     assert "minuta_saeb.md" in registros
 
 
+def test_analise_e_reorganizada_nas_quatro_classes(monkeypatch, tmp_path):
+    """A resposta de análise volta nas 4 classes canônicas, com a constatação
+    de conformidade no checklist e fora dos problemas — sem nova chamada ao
+    modelo."""
+    pasta = _preparar_pasta(monkeypatch, tmp_path)
+    (pasta / "minuta_saeb.md").write_text("Art. 1º Conteudo da minuta enviada.")
+    user_files.registrar_upload("minuta_saeb.md")
+    monkeypatch.setattr(agent, "messages", [])
+
+    respostas = [
+        None,
+        (
+            "## Pontos fortes\n- Estrutura em capitulos bem organizada.\n\n"
+            "## Pontos fracos\n- Competencia e assinaturas: adequadas.\n"
+            "- Numeracao: ok.\n- Falta incluir artigo de vigencia.\n"
+        ),
+    ]
+    chamadas = {"n": 0}
+
+    def perguntar_falso(messages, tools):
+        chamadas["n"] += 1
+        ultima = messages[-1]
+        if ultima.get("role") == "tool":
+            return _resposta_analise(_MsgAnalise(respostas[-1], None))
+        tool_call = SimpleNamespace(
+            id="c1",
+            function=SimpleNamespace(
+                name="analisar_arquivo_usuario",
+                arguments=json.dumps({"filename": "saeb-2026.pdf"}),
+            ),
+        )
+        return _resposta_analise(_MsgAnalise(None, [tool_call]))
+
+    monkeypatch.setattr(agent, "perguntar", perguntar_falso)
+
+    agent.executar("Faça uma análise da IN que enviei")
+    resposta = agent.executar("Sim, é este")
+
+    # 2 chamadas: o 1º turno nem chega ao LLM (confirmação do upload) e o 2º
+    # faz tool + resposta. A reestruturação é determinística, sem LLM extra.
+    assert chamadas["n"] == 2
+    for secao in (
+        "Pontos fortes",
+        "Problemas identificados",
+        "Pontos de atenção / validações necessárias",
+        "Checklist de conformidade",
+    ):
+        assert f"## {secao}" in resposta, secao
+    checklist = resposta.split("## Checklist de conformidade")[1]
+    assert "Competencia e assinaturas: adequadas." in checklist
+    assert "Numeracao: ok." in checklist
+    problemas = resposta.split("## Problemas identificados")[1].split("## ")[0]
+    assert "adequadas" not in problemas
+    assert "Numeracao: ok." not in problemas
+    assert "Falta incluir artigo de vigencia." in problemas
+    # A mensagem persistida no histórico é a mesma exibida.
+    assert agent.messages[-1]["content"] == resposta
+
+
 def test_resposta_do_llm_que_pede_reenvio_vira_confirmacao(monkeypatch, tmp_path):
     """Rede de segurança: mesmo que o LLM responda em texto 'envie o arquivo'
     (sem chamar a tool), o agente troca a resposta pela confirmação do upload

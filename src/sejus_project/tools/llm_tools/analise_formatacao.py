@@ -51,6 +51,11 @@ _ORDEM_SECOES = [
     SECAO_CHECKLIST,
 ]
 
+# Chave interna: bullets que vieram de um cabeçalho NÃO canônico (ex.:
+# "## Análise da IN"). Não é uma classe de saída — os itens são classificados
+# pelo conteúdo.
+_SECAO_SOLTA = "\x00soltos"
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -58,6 +63,9 @@ _ORDEM_SECOES = [
 _RE_HEADING = re.compile(r"^\s*#{1,6}\s+(?P<rotulo>.+?)\s*:?\s*$")
 _RE_HEADING_BOLD = re.compile(r"^\s*\*{1,2}(?P<rotulo>[^*]{2,80})\*{1,2}\s*:?\s*$")
 _RE_LABEL_LINHA = re.compile(r"^\s*(?P<rotulo>[A-Za-zÀ-ÿ0-9][^:]{0,80}?)\s*:\s*$")
+# Rótulo de categoria solto na linha, sem "##" e sem ":" (o modelo às vezes
+# escreve só "Pontos fortes"). Só vale se a linha inteira for o rótulo.
+_RE_ROTULO_LIVRE = re.compile(r"^\s*\*{0,2}(?P<rotulo>[^#*\n]{2,60})\*{0,2}\s*$")
 _RE_BULLET = re.compile(r"^\s*(?:[-*•‣▪]|\d{1,2}[.)])\s+(?P<texto>.+)$")
 
 # Rotulo da secao -> classe alvo
@@ -87,7 +95,7 @@ _RE_CLASSE_CHECKLIST = re.compile(
 class _Item:
     """Um bullet/linha da análise, com sua seção de origem e classificação."""
 
-    __slots__ = ("texto", "secao", "classe", "introducao")
+    __slots__ = ("classe", "introducao", "secao", "texto")
 
     def __init__(self, texto: str, secao: str):
         self.texto = texto
@@ -127,11 +135,12 @@ def _parecer_analise(texto: str | None) -> bool:
     for l in linhas:
         if not l.strip():
             continue
-        if _RE_HEADING.match(l) or _RE_HEADING_BOLD.match(l) or _RE_LABEL_LINHA.match(l):
-            if _classificar_secao(
-                _rotulo_do(l)
-            ):
-                return True
+        if (
+            _RE_HEADING.match(l)
+            or _RE_HEADING_BOLD.match(l)
+            or _RE_LABEL_LINHA.match(l)
+        ) and _classificar_secao(_rotulo_do(l)):
+            return True
         if _RE_BULLET.match(l):
             bullets += 1
     return bullets >= 1
@@ -145,6 +154,28 @@ def _rotulo_do(linha: str) -> str:
     return (linha or "").strip()
 
 
+def _declara_classes_canonicas(linhas: list[str]) -> bool:
+    """O texto nomeia ao menos uma das classes canônicas (em qualquer forma).
+
+    Ex.: "## Pontos fortes", "**Pontos fracos**", "Pontos de atenção" ou
+    "Checklist de conformidade". Nesse caso a resposta é uma análise de
+    documento e os bullets sem cabeçalho devem ser classificados.
+    """
+    for linha in linhas:
+        s = linha.strip()
+        if not s:
+            continue
+        m = (
+            _RE_HEADING.match(s)
+            or _RE_HEADING_BOLD.match(s)
+            or _RE_LABEL_LINHA.match(s)
+            or _RE_ROTULO_LIVRE.match(s)
+        )
+        if m and _classificar_secao((m.group("rotulo") or "").strip()):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Classificação de cada bullet
 # ---------------------------------------------------------------------------
@@ -152,7 +183,9 @@ def _rotulo_do(linha: str) -> str:
 # Fundamentos concretos citados no próprio item: ART/LEI/DECRETO/PORTARIA com
 # número, ou divergência interna observável no documento.
 _RE_FUNDAMENTO = re.compile(
-    r"\b(?:art\.?\s*[0-9ivxIVX]+|artigo\s+[0-9ivx]|lei\s*(?:n[ºo]?\.?\s*)?\d|"
+    # \b no fim é obrigatório: sem ele, "atividades artesanais" casava "arti"
+    # como se fosse citação de artigo (fundo falso).
+    r"\b(?:art\.?\s*[0-9ivxIVX]+\b|artigo\s+[0-9ivx]|lei\s*(?:n[ºo]?\.?\s*)?\d|"
     r"decreto\s*(?:n[ºo]?\.?\s*)?\d|(?:no|em|cfe?)\s+art\b|"
     r"(?:ementa|corpo|anexos?)\s+(?:menciona|prev[êe]|traz|disp[õo]e|"
     r"estabelece|cobre|exige)|est[áa]\s+previst\w*\s+em\b|"
@@ -164,20 +197,48 @@ _RE_FUNDAMENTO = re.compile(
 # Ausencia SEM verbo de confirmação (não há/consta/prevê...).
 _RE_AUSENCIA = re.compile(
     r"\b(?:n[ãa]o\s+(?:h[áa]|existe|consta|prev[êe]|contempla|considera|traz|"
-    r"traz|menciona|aborda|cita|discorre|trata|estabelece|disp[õo]e|"
-    r"previs[ãa]o|including)|aus[êe]ncia\s+de|falt[ao]\s+(?:prever|incluir|"
-    r"constar|previs)|sem\s+(?:previs[ãa]o|cl[áa]usula|dispositivo|prazo|"
-    r"revoga[çc][ãa]o|recurso|anexo|vig[êe]ncia|prever)|omiss[ãa]o\s+de|"
-    r"n[ãa]o\s+est[áa]\s+(?:previst|inclu[íi]d|previsto))",
+    r"menciona|aborda|cita|discorre|trata|estabelece|disp[õo]e|define|indica|"
+    r"especifica|previs[ãa]o|including)|aus[êe]ncia\s+de|ausente\b|"
+    r"falt[ao]\s+(?:prever|"
+    r"incluir|constar|previs)|falt[ãa]\s+\w+|sem\s+(?:previs[ãa]o|cl[áa]usula|"
+    r"dispositivo|prazo|revoga[çc][ãa]o|recurso|anexo|vig[êe]ncia|prever|"
+    r"indica[çc][ãa]o|detalhamento|abordagem)|omiss[ãa]o\s+de|"
+    r"n[ãa]o\s+(?:est[áa]|est[ãa]o|s[ãa]o|foram)\s+(?:previst\w*|inclu[íi]d\w*|"
+    r"preenchid\w*|contidad\w*|definid\w*|indicad\w*|assentad\w*|abordad\w*|"
+    r"citad\w*|citando)|n[ãa]o\s+abordad\w*|n[ãa]o\s+detalh\w*)\b",
+    re.IGNORECASE,
+)
+
+# Defeito OBJETIVO citado no item: falta, erro, inconsistência, divergência...
+# Só isto (e a instrução corretiva) justifica "Problemas identificados".
+_RE_DEFEITO = re.compile(
+    r"\bfalt\w*|\bexcede\b|\bultrapassa\b|\berro|\berros\b|"
+    r"inconsist\w*|diverg\w*|contradit[óo]ri\w*|contradi[çc][ãa]o|amb[íi]gu\w*|"
+    r"incongru\w*|imprecis\w*|redund\w*|duplic\w*|equivoc\w*|repeti[çc][ãa]o|"
+    r"n[ãa]o\s+(?:est[áa]|est[ãa]o|[ée]|s[ãa]o|foram)\s+"
+    r"(?:corret|adequad|conform|coerente|consistente)|inadequad\w*|"
+    r"n[ãa]o\s+correspond\w*|incoerente|ilegal|inválid\w*|caduc\w*",
+    re.IGNORECASE,
+)
+
+# Pedido EXPLÍCITO de validação/confirmação: vira ponto de atenção, mesmo que
+# o item contenha uma palavra de conformidade ("estão adequadas").
+_RE_VALIDACAO = re.compile(
+    r"\b(?:confirm\w+|valid\w+|verific\w+|avaliar|avalia[çc][ãa]o|"
+    r"necess[áa]ri\w*\s+(?:verificar|confirmar|validar)|"
+    r"cabe\s+(?:avaliar|verificar|confirmar)|"
+    r"a\s+ser\s+(?:avaliad|validad|confirmad)|"
+    r"sujeito\s+a\s+valida[çc][ãa]o|requer\s+valida[çc][ãa]o)\b",
     re.IGNORECASE,
 )
 
 # Conclusão POSITIVA/conformidade do item ("...: ok", "está correta",
-# "estão adequadas"). Só vale se NÃO houver negação nem verbo de ausência.
+# "estão adequadas", "Competência e assinaturas: adequadas."). Aceita ponto
+# final e a forma "Rótulo: <conclusão>" sem verbo.
 _RE_POSITIVA = re.compile(
-    r":\s*(?:ok\b|adequad[oa]s?|corret[oa]s?|conformes?|consistente|"
-    r"coerente\b|de\s+acordo|regular(?:es)?\b|dentro\s+dos\s+padr[õo]es)\s*$|"
-    r"\b(?:est[áa]\s+corret\w*|est[áa]o\s+adequad\w*|est[áa]o\s+corret\w*|"
+    r":\s*(?:ok\b|adequad[oa]s?\b|corret[oa]s?\b|conformes?\b|consistente\b|"
+    r"coerente\b|de\s+acordo|regular(?:es)?\b|dentro\s+dos\s+padr[õo]es)\s*[.;]?\s*$|"
+    r"\b(?:est[áa]\s+corret\w*|est[ãa]o\s+adequad\w*|est[ãa]o\s+corret\w*|"
     r"est[áa]\s+adequad\w*|corresponde\s+ao\s+(?:previst|disposto)|"
     r"em\s+conformidade\s+com|coerente\s+com\s+o\s+corpo)\b",
     re.IGNORECASE,
@@ -185,7 +246,8 @@ _RE_POSITIVA = re.compile(
 
 _RE_NEGACAO_POSITIVA = re.compile(
     r"\b(?:n[ãa]o\s+est[áa]\s+corret\w*|n[ãa]o\s+est[ãa]o\s+adequad\w*|"
-    r"n[ãa]o\s+(?:est[áa]|[ée]|foram)\s+(?:corret|adequad|conform)|"
+    r"n[ãa]o\s+(?:est[áa]|[ée]|foram|se\s+encontra)\s+"
+    r"(?:corret|adequad|conform|detalhad\w*|definid\w*|clar\w*)|"
     r"inadequad\w*|incorret\w*)\b",
     re.IGNORECASE,
 )
@@ -194,12 +256,12 @@ _RE_NEGACAO_POSITIVA = re.compile(
 _RE_ESPECULATIVA = re.compile(
     r"\b(?:seria\s+(?:[uú]til|interessante|bom|prudente|importante)|"
     r"pode(?:ria)?\s+(?:haver|ser|apresentar|gerar|ensejar|suscitar|trazer|"
-    r"representar|causar)|pode(?:m)?\s+haver\b|cabe\s+(?:avaliar|verificar|"
-    r"confirmar|validar)|seria\s+necess[áa]rio\b|recomendo\s+(?:avaliar|"
-    r"verificar|confirmar|validar|c[oó]mputar|prever)|sugere-se\s+(?:avaliar|"
-    r"verificar|confirmar)|conv[ée]m\s+(?:avaliar|verificar)|se\s+for\s+o\s+"
-    r"caso\s+incluir|a\s+ser\s+(?:avaliad|validad|confirmad)|sujeito\s+a\s+"
-    r"valida[çc][ãa]o|requer\s+valida[çc][ãa]o|valida[çc][ãa]o\s+"
+    r"representar|causar|detalhar|complementar|revisar)|pode(?:m)?\s+haver\b|"
+    r"cabe\s+(?:avaliar|verificar|confirmar|validar)|seria\s+necess[áa]rio\b|"
+    r"recomendo\s+(?:avaliar|verificar|confirmar|validar|c[oó]mputar|prever)|"
+    r"sugere-se\s+(?:avaliar|verificar|confirmar)|conv[ée]m\s+(?:avaliar|verificar)|"
+    r"se\s+for\s+o\s+caso\s+incluir|a\s+ser\s+(?:avaliad|validad|confirmad)|"
+    r"sujeito\s+a\s+valida[çc][ãa]o|requer\s+valida[çc][ãa]o|valida[çc][ãa]o\s+"
     r"(?:jur[íi]dica|extern)\w*|se\s+o\s+documento\s+(?:n[ãa]o\s+)?"
     r"(?:existe|est[áa]|prev\w*))",
     re.IGNORECASE,
@@ -211,35 +273,71 @@ _RE_ELOGIO = re.compile(
     r"detalhad|sequenciad|delinead)|bem\s+definid\w*|boa\s+reda[çc][ãa]o|"
     r"linguagem\s+clara\b|estrutura\s+(?:clara|l[óo]gica|adequada)|"
     r"embasamento\s+(?:jur[íi]dico\s+)?(?:s[óo]lid|adequad|corret)|"
-    r"reda[çc][ãa]o\s+(?:formal\s+e\s+t[ée]cnica|clara)|crit[ée]rios\s+"
-    r"objetivos|previs[ãa]o\s+detalhad\w*|bem\s+cobert|aspectos\s+positiv|"
-    r"est[áa]\s+bem\s+(?:coberto|detalhad))",
+    r"reda[çc][ãa]o\s+(?:formal\s+e\s+t[ée]cnica|clara|est[áa]\s+formal)|"
+    r"crit[ée]rios\s+objetivos|previs[ãa]o\s+detalhad\w*|bem\s+cobert|"
+    r"aspectos\s+positiv|est[áa]\s+bem\s+(?:coberto|detalhad))\b",
     re.IGNORECASE,
 )
 
-# Instruções corretivas / apontamentos de correção (verbo de ação ou ameaça
-# objetiva: "erro", "inconsistência", "divergência", "falta", "corrigir"...).
-_RE_CORRECAO = re.compile(
-    r"\b(?:corrig|corrija|ajust|consert|arrum|refa[çc]|retific|inclu\w*|"
-    r"acrescent|adicion\w*|inser\w*|prev[êe]|preveja|incluam|renumer|reorden|"
-    r"reorganiz|remov\w*|retir\w*|substitu\w*|troq\w*|reformul\w*|reescrev|"
-    r"esclarec\w*|detalh\w*|padroniz\w*|etiquet\w*|numer\w*|harmoniz|"
-    r"atualiz\w*|complet\w*|definir|estabelecer\w*|garant\w*|contempl\w*|"
-    r"falta\w*|aus\w*|omiss\w*|erro|erros|inconsist\w*|diverg\w*|contradi[çc]\w*"
-    r"|incongru\w*|amb[íi]gu\w*|imprecis\w*|redund\w*|incorret\w*|"
-    r"duplic\w*|equivoc\w*|n[ãa]o\s+const\w*|n[ãa]o\s+(?:est[áa]|est[ãa]o|"
-    r"[ée]|s[ãa]o)\s+(?:corret|adequad|conform|coerente|consistente)|"
-    r"faltou\w*|pendente\w*)",
+# Descrição NEUTRA/POSITIVA do que o ato faz ("define as modalidades",
+# "estabelece critérios", "está prevista e razoável"). Sem sinal de defeito,
+# é ponto forte — nunca problema.
+_RE_DESCRITIVO = re.compile(
+    r"\b(?:define|estabelece|estabelecem|normatiza|regulamenta|trata|"
+    r"indica|contempla|descreve|apresenta|possui|oferece|organiza|"
+    r"detalha|aborda|prev[êe]|preveem|abrang|detalhad\w*|"
+    r"est[áa]s?\s+(?:bem\s+)?(?:organizad\w*|definid\w*|detalhad\w*|"
+    r"estruturad\w*|clara\w*|cobert\w*|previst\w*|redigid\w*|formal|"
+    r"razo[áa]vel|coerente|consistente|objetiv\w*))\b",
+    re.IGNORECASE,
+)
+
+# (Verbos de ação como "estabelece", "detalha", "inclui" NÃO entram aqui: eles
+# aparecem tanto em defecto real ("Falta incluir X") quanto em descrição
+# neutra do ato ("estabelece critérios objetivos"). Quem separa os dois casos é
+# _RE_DEFEITO (problema), _RE_DESCRITIVO (ponto forte) e _RE_INSTRUCAO.)
+
+_RE_PLACEHOLDER = re.compile(
+    r"^\s*[-*•‣▪]?\s*n[ãa]o\s+foram\s+identificados\s+|"
+    r"^\s*[-*•‣▪]?\s*nenhum\s+item\s+de\s+",
+    re.IGNORECASE,
+)
+
+# Sufixos de verbo que indicam ORDEM/INSTRUÇÃO (infinitivo, imperativo,
+# gerúndio). Particípios ("incluída", "garantido", "reorganizada") NÃO entram:
+# descrevem o ato, não pedem correção.
+_VERB = r"(?:ar|ar-se|er|er-se|e|amos|em|ando|ando-se)"
+
+# Instrução corretiva EXPLÍCITA (imperativo ou infinitivo do analista). Tem
+# prioridade sobre uma conclusão positiva: "está correta, mas corrija a
+# vírgula" é problema.
+_RE_INSTRUCAO = re.compile(
+    r"\b(?:"
+    r"corrig\w*" + _VERB + r"|ajust\w*" + _VERB + r"|consert\w*" + _VERB + r"|"
+    r"arrum\w*" + _VERB + r"|refa[çz]\w*" + _VERB + r"|retific\w*" + _VERB + r"|"
+    r"retifica[çc][ãa]o(?:es)?|retifica[çc][õo]es|"
+    r"inclu\w*" + _VERB + r"|inser\w*" + _VERB + r"|acrescent\w*" + _VERB + r"|"
+    r"prever|preveja|prev[êe]r-se|"
+    r"retir\w*" + _VERB + r"|remov\w*" + _VERB + r"|exclu\w*" + _VERB + r"|"
+    r"substitu\w*" + _VERB + r"|troqu\w*" + _VERB + r"|atualiz\w*" + _VERB + r"|"
+    r"complement\w*" + _VERB + r"|detalhar|detalhe|"
+    r"padroniz\w*" + _VERB + r"|uniformiz\w*" + _VERB + r"|renumer\w*" + _VERB + r"|"
+    r"reorden\w*" + _VERB + r"|reorganiz\w*" + _VERB + r"|"
+    r"esclare[çc]\w*" + _VERB + r"|esclarecimento|explicite\b|explicitar\b|"
+    r"harmoniz\w*" + _VERB + r"|garant\w*" + _VERB + r"|contempl\w*" + _VERB + r"|"
+    r"recomendo\b|recomenda(?:-se)?\b|recomendamos\b|"
+    r"sugiro\b|sugere(?:-se)?\b|sugerimos\b|"
+    r"verific\w*" + _VERB + r"|reformul\w*" + _VERB + r"|reescrev\w*" + _VERB + r")",
     re.IGNORECASE,
 )
 
 
 def _classificar_item(item: _Item) -> _Item:
     t = (item.texto or "").strip()
-    t_low = t.lower()
 
-    # 1) Sem nada dizer: cai na seção que o originou (na falta de marcador).
-    if not t:
+    # 0) Placeholder da própria remontagem: não é item da análise.
+    if not t or _RE_PLACEHOLDER.search(t):
+        item.classe = ""
         return item
 
     ausencia = bool(_RE_AUSENCIA.search(t))
@@ -248,37 +346,46 @@ def _classificar_item(item: _Item) -> _Item:
     positiva = bool(_RE_POSITIVA.search(t))
     especulativa = bool(_RE_ESPECULATIVA.search(t))
     elogio = bool(_RE_ELOGIO.search(t))
-    correcao = bool(_RE_CORRECAO.search(t))
+    descritivo = bool(_RE_DESCRITIVO.search(t))
+    defeito = bool(_RE_DEFEITO.search(t))
+    validacao = bool(_RE_VALIDACAO.search(t))
+    instrucao = bool(_RE_INSTRUCAO.search(t))
 
     nova_classe = item.secao or ""
 
-    if (ausencia or correcao) and not negativa_pos:
-        # 2a) Ausência COM fundamento concreto => problema objetivo.
-        if ausencia and fundamento:
-            nova_classe = SECAO_PROBLEMAS
-        # 2b) Ausência SEM fundamento => ponto de atenção (validação necessária).
-        elif ausencia:
-            nova_classe = SECAO_ATENCAO
-        # 2c) Instrução corretiva explícita => problema.
-        elif correcao:
-            nova_classe = SECAO_PROBLEMAS
-    elif especulativa:
-        # 3) Recomendação especulativa / depende de validação => atenção.
+    # Problema exige SINAL POSITIVO: defeito objetivo citado, negação de
+    # positiva ou ausência com fundamento. Verbo descritivo ("estabelece",
+    # "detalha") sozinho NÃO cria problema.
+    if negativa_pos or defeito or (ausencia and fundamento):
+        # 1) Defeito objetivo => problema.
+        nova_classe = SECAO_PROBLEMAS
+    elif validacao:
+        # 2) Pedido de confirmação/verificação => atenção, mesmo que o item
+        #    cite uma palavra de conformidade ("estão adequadas").
         nova_classe = SECAO_ATENCAO
+    elif especulativa:
+        # 3) Recomendação especulativa / condicional ("poderia detalhar...") =>
+        #    atenção: não é defeito constatado.
+        nova_classe = SECAO_ATENCAO
+    elif positiva:
+        # 4) Conclusão de conformidade ("X: ok", "está adequada") NUNCA é
+        #    problema, nem por token fraco no rótulo ("numeração:").
+        nova_classe = (
+            SECAO_PONTOS_FORTES
+            if item.secao == SECAO_PONTOS_FORTES
+            else SECAO_CHECKLIST
+        )
+    elif instrucao:
+        # 5) Instrução corretiva explícita (imperativo do analista) => problema.
+        nova_classe = SECAO_PROBLEMAS
+    elif ausencia:
+        # 6) Ausência SEM fundamento => ponto de atenção (validação).
+        nova_classe = SECAO_ATENCAO
+    elif elogio or descritivo:
+        # 7) Elogio ou descrição positiva do ato => pontos fortes.
+        nova_classe = SECAO_PONTOS_FORTES
     else:
-        # 4) Conclusão positiva/elogio: nunca vira problema — forças/checklist.
-        if positiva and not item.secao:
-            nova_classe = SECAO_CHECKLIST
-        elif elogio:
-            nova_classe = SECAO_PONTOS_FORTES
-        elif positiva:
-            nova_classe = (
-                SECAO_CHECKLIST
-                if item.secao in (SECAO_PROBLEMAS, SECAO_ATENCAO)
-                else SECAO_PONTOS_FORTES
-            )
-        else:
-            nova_classe = item.secao or SECAO_ATENCAO
+        nova_classe = item.secao or SECAO_ATENCAO
 
     item.classe = nova_classe
     return item
@@ -317,14 +424,22 @@ def reestruturar_analise(texto: str | None) -> str | None:
         return texto
 
     intro: list[str] = []
-    corpos: list[list[_Item]] = [[] for _ in _ORDEM_SECOES]
-    secao_atual = ""
     itens_por_secao: dict[str, list[_Item]] = {}
+    secao_atual = ""
+
+    # O texto declara as classes canônicas? Se sim, os bullets que aparecerem
+    # sem cabeçalho (lista solta antes/dentro da análise) também são
+    # classificados pelo conteúdo — é o formato que o modelo costuma devolver.
+    declara_classes = _declara_classes_canonicas(linhas)
 
     for linha in linhas:
         s = linha.strip()
         if not s:
             secao_atual = ""
+            continue
+
+        # Placeholder da remontagem anterior: descarta, não é item nem intro.
+        if _RE_PLACEHOLDER.search(s):
             continue
 
         m_head = (
@@ -336,15 +451,28 @@ def reestruturar_analise(texto: str | None) -> str | None:
             if classe:
                 secao_atual = classe
                 continue
-            # Cabeçalho não reconhecido (nome do documento, etc.): vira texto
-            # introdutório preservado.
+            # Cabeçalho não reconhecido (ex.: "## Análise da IN"): o título
+            # fica no texto introdutório e os bullets abaixo dele são
+            # classificados pelo conteúdo, já que nenhuma classe foi declarada.
             intro.append(linha)
+            secao_atual = _SECAO_SOLTA
             continue
 
+        # Rótulo de categoria solto ("Pontos fortes") vira cabeçalho.
+        m_livre = _RE_ROTULO_LIVRE.match(s)
+        if m_livre:
+            classe = _classificar_secao((m_livre.group("rotulo") or "").strip())
+            if classe:
+                secao_atual = classe
+                continue
+
         mb = _RE_BULLET.match(s)
-        if mb and secao_atual:
-            itens_por_secao.setdefault(secao_atual, []).append(
-                _Item(mb.group("texto").strip(), secao_atual)
+        if mb and (secao_atual or declara_classes):
+            # Itens soltos (sem cabeçalho) não têm classe de origem: são
+            # classificados apenas pelo conteúdo.
+            origem_item = "" if secao_atual in ("", _SECAO_SOLTA) else secao_atual
+            itens_por_secao.setdefault(secao_atual or _SECAO_SOLTA, []).append(
+                _Item(mb.group("texto").strip(), origem_item)
             )
             continue
 
@@ -364,33 +492,47 @@ def reestruturar_analise(texto: str | None) -> str | None:
 
         # Linha qualquer entre bullets de uma seção (parágrafo de continuação).
         if secao_atual and itens_por_secao.get(secao_atual):
-            itens_por_secao[secao_atual].append(_Item(s, secao_atual))
+            origem_item = "" if secao_atual == _SECAO_SOLTA else secao_atual
+            itens_por_secao[secao_atual].append(_Item(s, origem_item))
             continue
 
         intro.append(linha)
 
-    # Classifica e reorganiza.
-    saida: list[str] = []
-    bullets_ja_vistos: set[str] = set()
-    for secao in _ORDEM_SECOES:
-        itens = itens_por_secao.get(secao, [])
-        if not itens:
-            continue
-        saida.append(f"## {secao}")
-        usados = 0
+    # Classifica cada item e o devolve para a SUA classe canônica final (um item
+    # reclassificado não pode ser emitido na seção de origem nem duplicado).
+    por_classe: dict[str, list[_Item]] = {secao: [] for secao in _ORDEM_SECOES}
+    for secao, itens in itens_por_secao.items():
         for item in itens:
             item = _classificar_item(item)
-            alvo = item.classe or secao
-            # Não duplica o mesmo texto dentro da mesma seção canônica.
-            chave = (alvo, " ".join((item.texto or "").lower().split()))
-            if chave in bullets_ja_vistos:
-                continue
-            if alvo == secao:
-                bullets_ja_vistos.add(chave)
-                saida.append(_secao_para_bullet(item.texto, alvo))
-                usados += 1
+            alvo = item.classe or (secao if secao in por_classe else "")
+            if alvo not in por_classe:
+                alvo = SECAO_ATENCAO
+            por_classe[alvo].append(item)
 
-        if usados == 0:
+    # Deduplica o mesmo texto dentro da mesma seção canônica.
+    for secao, itens in por_classe.items():
+        vistos: set[str] = set()
+        unicos: list[_Item] = []
+        for item in itens:
+            chave = " ".join((item.texto or "").lower().split())
+            if not chave or chave in vistos:
+                continue
+            vistos.add(chave)
+            unicos.append(item)
+        por_classe[secao] = unicos
+
+    # Nada foi classificado (ex.: lista solta sem classes declaradas): devolver
+    # o texto intacto. Nunca emitir 4 seções vazias no lugar do conteúdo.
+    if not any(por_classe.values()):
+        return texto
+
+    saida: list[str] = []
+    for secao in _ORDEM_SECOES:
+        saida.append(f"## {secao}")
+        itens = por_classe[secao]
+        if itens:
+            saida.extend(_secao_para_bullet(item.texto, secao) for item in itens)
+        else:
             saida.append(_secao_para_bullet(_PLACEHOLDER[secao], secao))
 
     # "## X: - A" continuava sem bullets? Garantir todas as 4 seções (com o
@@ -409,11 +551,25 @@ def parecer_analise(texto: str | None) -> bool:
     return _parecer_analise(texto)
 
 
+def eh_tarefa_de_correcao(texto: str | None) -> bool:
+    """O item é um PROBLEMA objetivo (pode virar apontamento acionável)?
+
+    Mesmo classificador da exibição: garante que a lista de tarefas de
+    correção nunca include elogio, conformidade ("X: ok") ou pedido de
+    validação — que são exibidos, mas não corrigidos. Usado por
+    ``analysis_registry`` como veto: item que não é problema nunca vira tarefa.
+    """
+    if not texto or not texto.strip():
+        return False
+    return _classificar_item(_Item(texto.strip(), "")).classe == SECAO_PROBLEMAS
+
+
 __all__ = [
-    "SECAO_PONTOS_FORTES",
-    "SECAO_PROBLEMAS",
     "SECAO_ATENCAO",
     "SECAO_CHECKLIST",
-    "reestruturar_analise",
+    "SECAO_PONTOS_FORTES",
+    "SECAO_PROBLEMAS",
+    "eh_tarefa_de_correcao",
     "parecer_analise",
+    "reestruturar_analise",
 ]

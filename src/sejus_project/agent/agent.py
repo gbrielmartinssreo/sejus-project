@@ -9,6 +9,7 @@ from sejus_project.agent.skills.loader import (
 from sejus_project.llm.ia import perguntar
 from sejus_project.tools.document_infra import docx_validacao
 from sejus_project.tools.llm_tools import analysis_registry
+from sejus_project.tools.llm_tools.analise_formatacao import reestruturar_analise
 from sejus_project.tools.llm_tools.document_generation import (
     aceitar_proposta,
     analise_para_correcao,
@@ -118,25 +119,38 @@ SYSTEM_INSTRUCTIONS = (
     "concluir a analise; nao resuma nem ignore o restante do arquivo.\n"
     "ANALISE DE DOCUMENTO ENVIADO: quando o usuario pedir a analise de um "
     "documento/minuta que ele enviou, responda com a analise COMPLETA e "
-    "densa, nunca com um panorama generico. FORMATE a resposta em Markdown "
-    "para ficar legivel no chat: abra com um titulo de secao (ex.: '## "
-    "Analise da Instrucao Normativa ...'); escreva cada bullet em uma linha "
-    "propria com '-' no inicio da linha, precedido e seguido de uma linha em "
-    "branco, e use titulos '## ' antes de 'Pontos fortes' e de 'Pontos "
-    "fracos / apontamentos de correcao'. NUNCA escreva varios itens na mesma "
+    "densa, nunca com um panorama generico. Use EXATAMENTE estas quatro "
+    "secoes, nessa ordem, cada titulo '## ' em uma linha sozinha: "
+    "'## Pontos fortes', '## Problemas identificados', '## Pontos de atencao "
+    "/ validacoes necessarias' e '## Checklist de conformidade'. Escreva cada "
+    "bullet em uma linha propria com '-' no inicio da linha, precedido e "
+    "seguido de uma linha em branco. NUNCA escreva varios itens na mesma "
     "linha nem texto corrido apos ':' (ex.: 'Pontos fortes: - A. - B.' e "
     "errado — cada bullet vai em uma linha propria com '-' no inicio; "
-    "'## Titulo' vai em uma linha sozinha). Conteudo: (1) bloco curto de "
-    "'Pontos fortes' (3-5 bullets de uma linha); (2) corpo principal de "
-    "'Pontos fracos / apontamentos de correcao' - um problema por bullet, "
-    "anunciado direto ('Falta...', 'Nao ha...', 'Ausente...'), com por que e "
-    "ruim, referencia (Art./Anexo) e sugestao de correcao; errado vira "
-    "apontamento acionavel (analysis_registry). Percorra todo o checklist "
+    "'## Titulo' vai em uma linha sozinha). Regras de classificacao (siga "
+    "nesta ordem): (1) constatem conformidade no formato 'Item: ok' / "
+    "'Item: adequadas' / 'Item: correta' (o 'ok' e as conclusoes positivas "
+    "NUNCA vao para 'Problemas identificados') — vao para 'Checklist de "
+    "conformidade'; (2) ausencia/omissao so vira 'Problemas identificados' "
+    "quando houver fundamento concreto para exigir aquilo (ex.: Art./Lei "
+    "citado, revogacao expressa exigida pelo ato, clausula obrigatoria); "
+    "quando nao houver fundamento (ex.: 'recurso administrativo', 'prazo "
+    "especifico', 'assinaturas adicionais', 'anexos' sem base juridica que "
+    "o exija), o item vai para 'Pontos de atencao / validacoes necessarias' "
+    "como pergunta de validacao, NAO como problema; (3) recomendacao "
+    "especulativa sem erro observavel (ex.: 'pode...', 'seria util...', 'se "
+    "for o caso...') tambem vai para 'Pontos de atencao / validacoes "
+    "necessarias'; (4) 'Problemas identificados' = um problema real por "
+    "bullet, anunciado direto ('Falta...', 'Nao ha...', 'Ausente...'), com "
+    "por que e ruim, referencia (Art./Anexo) e sugestao de correcao; erro "
+    "objetivo vira apontamento acionavel (analysis_registry). Elogios e "
+    "destaques vao para 'Pontos fortes'. Percorra todo o checklist "
     "normativo (numeracao, ementa x corpo, fundamentacao, revogacoes/"
     "vigencia, assinaturas/competencia, consistencia de nomes) e lacunas de "
     "seguranca juridica (prazo de validade, recurso administrativo, "
     "monitoramento/prestacao de contas, terminologia). Se um item do "
-    "checklist esta ok, diga em uma linha; nao o omita.\n"
+    "checklist esta ok, diga em uma linha em 'Checklist de conformidade'; "
+    "nao o omita.\n"
     "CORRECAO APOS ANALISE: se o usuario ja enviou um documento, voce o "
     "analisou nesta conversa e agora ele pede para corrigir/ajustar/entregar "
     "o arquivo corrigido (ex.: 'consegue fazer a correcao?', 'me de o arquivo "
@@ -1009,6 +1023,14 @@ def _executar_loop_agente(question: str = ""):
             troca = _resposta_reenvio_para_confirmacao(conteudo)
             if troca is not None:
                 conteudo = troca
+
+            # Análise de documento: reorganiza a resposta nas 4 classes
+            # canônicas (Pontos fortes / Problemas identificados / Pontos de
+            # atenção / Checklist de conformidade). Determinístico, sem nova
+            # chamada ao modelo e idempotente. Turnos de edição não entram
+            # (não são análise) e conversas comuns passam intactas.
+            if not fez_edicao:
+                conteudo = reestruturar_analise(conteudo) or conteudo
 
             messages.append({
                 "role": "assistant",

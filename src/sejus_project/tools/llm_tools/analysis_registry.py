@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import re
 
+from sejus_project.tools.llm_tools import analise_formatacao
+
 _SESSAO_ATUAL = 0
 _ORDEM = 0
 
@@ -82,9 +84,18 @@ _RE_SEM_ACAO = [
 # ação no item (um item pode elogiar E apontar algo a fazer).
 _RE_CONFORMIDADE = [
     re.compile(
+        # Conclusão de conformidade no formato "Rótulo: ok/adequadas/correta."
+        # (sem verbo — ex.: "Competência e assinaturas: adequadas."). É
+        # constatação, nunca tarefa.
+        r"^[^:]{1,80}:\s*(?:ok\b|adequad[oa]s?\b|corret[oa]s?\b|conformes?\b|"
+        r"consistente\b|coerente\b|de\s+acordo\b|regular(?:es)?\b|"
+        r"dentro\s+dos\s+padr[õo]es)\s*[.;]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\b(est[áa]|est[ãa]o|é|s[ãa]o|foi|foram)\b.{0,40}\b("
         r"consistente|conformidade|correta?|corret[oa]s?|adequad[oa]s?|"
-        r"de acordo|regulares?|ok|coerente|precisa|clara)\b",
+        r"de\s+acordo|regulares?|ok|coerente|precisa|clara)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -251,6 +262,13 @@ def _e_acionavel(item: str) -> bool:
     if any(padrao.search(texto) for padrao in _RE_CONFORMIDADE) and not (
         _RE_CORRECAO_FORTE.search(texto)
     ):
+        return False
+    # Veto de classificação: só item classificado como PROBLEMA pelo mesmo
+    # classificador da exibição vira tarefa. Elogio ("ementa bem definida"),
+    # descrição positiva do ato ("prevê a prestação de relatórios") e pedido de
+    # validação ("confirmar se o prazo é suficiente") aparecem na análise, mas
+    # não são correções — não podem virar apontamento acionável.
+    if not analise_formatacao.eh_tarefa_de_correcao(texto):
         return False
     return bool(_RE_ACIONAVEL.search(texto))
 
