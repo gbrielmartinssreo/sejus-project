@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()
+# Load .env from project root (works regardless of CWD)
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/sejus_project/rag/embedding.py -> project root
+load_dotenv(_PROJECT_ROOT / ".env")
 
 DEFAULT_MODEL = "text-embedding-3-small"
 
