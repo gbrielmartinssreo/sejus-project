@@ -125,6 +125,20 @@ MOTIVOS_DESCARTE = (
     DESCARTE_DECISAO_INSTITUCIONAL,
 )
 
+# Tipos de relação entre achado e mudança (para reconciliação precisa)
+RELACAO_DIRECT_FIX = "direct_fix"
+RELACAO_PARTIAL_FIX = "partial_fix"
+RELACAO_RELATED_IMPROVEMENT = "related_improvement"
+RELACAO_STRUCTURAL_PROPOSAL = "structural_proposal"
+RELACAO_NO_CHANGE = "no_change"
+RELACOES_ACHADO_MUDANCA = (
+    RELACAO_DIRECT_FIX,
+    RELACAO_PARTIAL_FIX,
+    RELACAO_RELATED_IMPROVEMENT,
+    RELACAO_STRUCTURAL_PROPOSAL,
+    RELACAO_NO_CHANGE,
+)
+
 # Palavras que ancoram cada motivo canônico no texto livre do modelo. A ordem
 # importa: o primeiro que casar vence.
 _MOTIVOS_TAXONOMIA = (
@@ -331,6 +345,73 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["alteracoes"] = {
                     "'iniciativa_modelo'."
                 ),
             },
+            "source_finding_id": {
+                "type": "string",
+                "description": (
+                    "Obrigatorio quando a mudanca executa um apontamento da "
+                    "analise ou uma oportunidade informada. ID do achado que a "
+                    "mudanca resolve (ex.: 'ap-1a2b3c4d' ou 'op-1'). Permite "
+                    "reconciliacao exata entre achado e mudanca sem depender de "
+                    "proximidade textual. Para mudancas de iniciativa do modelo "
+                    "sem achado associado, omitir ou usar null."
+                ),
+            },
+            "relationship": {
+                "type": "string",
+                "enum": list(RELACOES_ACHADO_MUDANCA),
+                "description": (
+                    "Obrigatorio quando 'source_finding_id' estiver presente. "
+                    "Tipo de relacao entre o achado e a mudanca: "
+                    "'direct_fix' = resolve diretamente o problema identificado "
+                    "(conta como aplicado); "
+                    "'partial_fix' = resolve apenas parte do problema "
+                    "(conta como parcialmente_aplicado); "
+                    "'related_improvement' = relacionada ao mesmo tema mas nao "
+                    "resolve o achado (nao conta como aplicacao); "
+                    "'structural_proposal' = propoe solucao estrutural/normativa "
+                    "para o achado (aparece separadamente, nao transforma "
+                    "automaticamente em aplicado); "
+                    "'no_change' = nenhuma mudanca valida sobreviveu para este "
+                    "achado."
+                ),
+            },
+            "material_parameters": {
+                "type": "array",
+                "description": (
+                    "Parâmetros normativos materiais criados ou modificados pela "
+                    "mudanca, cada um com seu lastro especifico. Exemplos: "
+                    "prazo (2 anos, 45 dias), percentual, quantidade, frequencia, "
+                    "autoridade competente, orgao responsavel, sancao, limite, "
+                    "condicao de elegibilidade, obrigacao nova. Cada item deve "
+                    "ter: 'value' (valor do parametro), 'type' (ex.: 'deadline', "
+                    "'percentage', 'quantity', 'authority', 'sanction', "
+                    "'eligibility', 'obligation'), 'source_document' (arquivo do "
+                    "RAG que sustenta), 'source_chunk_id' (chunk especifico), "
+                    "'source_reference' (ex.: 'Art. 13'), 'supported' (boolean). "
+                    "Se 'supported' = false, o valor nao deve entrar no texto -- "
+                    "use placeholder [PARAMETRO A DEFINIR] no 'novo_texto'."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "deadline", "percentage", "quantity",
+                                "frequency", "authority", "sanction",
+                                "limit", "eligibility", "obligation",
+                                "competence", "condition"
+                            ],
+                        },
+                        "source_document": {"type": "string"},
+                        "source_chunk_id": {"type": "string"},
+                        "source_reference": {"type": "string"},
+                        "supported": {"type": "boolean"},
+                    },
+                    "required": ["value", "type", "supported"],
+                },
+            },
         },
         "required": [
             "tipo",
@@ -419,6 +500,36 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["remocoes"] = {
                     "nenhum apontamento (decisao propria do modelo ao gerar o "
                     "patch). Se ausente, o sistema trata como "
                     "'iniciativa_modelo'."
+                ),
+            },
+            "source_finding_id": {
+                "type": "string",
+                "description": (
+                    "Obrigatorio quando a mudanca executa um apontamento da "
+                    "analise ou uma oportunidade informada. ID do achado que a "
+                    "mudanca resolve (ex.: 'ap-1a2b3c4d' ou 'op-1'). Permite "
+                    "reconciliacao exata entre achado e mudanca sem depender de "
+                    "proximidade textual. Para mudancas de iniciativa do modelo "
+                    "sem achado associado, omitir ou usar null."
+                ),
+            },
+            "relationship": {
+                "type": "string",
+                "enum": list(RELACOES_ACHADO_MUDANCA),
+                "description": (
+                    "Obrigatorio quando 'source_finding_id' estiver presente. "
+                    "Tipo de relacao entre o achado e a mudanca: "
+                    "'direct_fix' = resolve diretamente o problema identificado "
+                    "(conta como aplicado); "
+                    "'partial_fix' = resolve apenas parte do problema "
+                    "(conta como parcialmente_aplicado); "
+                    "'related_improvement' = relacionada ao mesmo tema mas nao "
+                    "resolve o achado (nao conta como aplicacao); "
+                    "'structural_proposal' = propoe solucao estrutural/normativa "
+                    "para o achado (aparece separadamente, nao transforma "
+                    "automaticamente em aplicado); "
+                    "'no_change' = nenhuma mudanca valida sobreviveu para este "
+                    "achado."
                 ),
             },
         },
@@ -547,6 +658,73 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["adicoes_estruturais
                     "'iniciativa_modelo'."
                 ),
             },
+            "source_finding_id": {
+                "type": "string",
+                "description": (
+                    "Obrigatorio quando a mudanca executa um apontamento da "
+                    "analise ou uma oportunidade informada. ID do achado que a "
+                    "mudanca resolve (ex.: 'ap-1a2b3c4d' ou 'op-1'). Permite "
+                    "reconciliacao exata entre achado e mudanca sem depender de "
+                    "proximidade textual. Para mudancas de iniciativa do modelo "
+                    "sem achado associado, omitir ou usar null."
+                ),
+            },
+            "relationship": {
+                "type": "string",
+                "enum": list(RELACOES_ACHADO_MUDANCA),
+                "description": (
+                    "Obrigatorio quando 'source_finding_id' estiver presente. "
+                    "Tipo de relacao entre o achado e a mudanca: "
+                    "'direct_fix' = resolve diretamente o problema identificado "
+                    "(conta como aplicado); "
+                    "'partial_fix' = resolve apenas parte do problema "
+                    "(conta como parcialmente_aplicado); "
+                    "'related_improvement' = relacionada ao mesmo tema mas nao "
+                    "resolve o achado (nao conta como aplicacao); "
+                    "'structural_proposal' = propoe solucao estrutural/normativa "
+                    "para o achado (aparece separadamente, nao transforma "
+                    "automaticamente em aplicado); "
+                    "'no_change' = nenhuma mudanca valida sobreviveu para este "
+                    "achado."
+                ),
+            },
+            "material_parameters": {
+                "type": "array",
+                "description": (
+                    "Parâmetros normativos materiais criados ou modificados pela "
+                    "adicao, cada um com seu lastro especifico. Exemplos: "
+                    "prazo (2 anos, 45 dias), percentual, quantidade, frequencia, "
+                    "autoridade competente, orgao responsavel, sancao, limite, "
+                    "condicao de elegibilidade, obrigacao nova. Cada item deve "
+                    "ter: 'value' (valor do parametro), 'type' (ex.: 'deadline', "
+                    "'percentage', 'quantity', 'authority', 'sanction', "
+                    "'eligibility', 'obligation'), 'source_document' (arquivo do "
+                    "RAG que sustenta), 'source_chunk_id' (chunk especifico), "
+                    "'source_reference' (ex.: 'Art. 13'), 'supported' (boolean). "
+                    "Se 'supported' = false, o valor nao deve entrar no texto -- "
+                    "use placeholder [PARAMETRO A DEFINIR] no 'texto'."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "deadline", "percentage", "quantity",
+                                "frequency", "authority", "sanction",
+                                "limit", "eligibility", "obligation",
+                                "competence", "condition"
+                            ],
+                        },
+                        "source_document": {"type": "string"},
+                        "source_chunk_id": {"type": "string"},
+                        "source_reference": {"type": "string"},
+                        "supported": {"type": "boolean"},
+                    },
+                    "required": ["value", "type", "supported"],
+                },
+            },
         },
         # 'texto' e required: sem ele a adicao nao tem o que inserir e seria
         # descartada em silencio pelo filtro do patch.
@@ -648,6 +826,26 @@ MELHORIA_DEFINITION["function"]["parameters"]["properties"]["plano_melhoria"] = 
                     "Como a mudanca resolve o achado. Se nao resolve "
                     "diretamente, diga por que (ex.: 'consolida 3 artigos "
                     "dispersos sobre comunicacao')."
+                ),
+            },
+            "relationship": {
+                "type": "string",
+                "enum": list(RELACOES_ACHADO_MUDANCA),
+                "description": (
+                    "Obrigatorio quando 'source_finding_id' estiver presente na "
+                    "mudanca correspondente. Tipo de relacao entre o achado e a "
+                    "mudanca: "
+                    "'direct_fix' = resolve diretamente o problema identificado "
+                    "(conta como aplicado); "
+                    "'partial_fix' = resolve apenas parte do problema "
+                    "(conta como parcialmente_aplicado); "
+                    "'related_improvement' = relacionada ao mesmo tema mas nao "
+                    "resolve o achado (nao conta como aplicacao); "
+                    "'structural_proposal' = propoe solucao estrutural/normativa "
+                    "para o achado (aparece separadamente, nao transforma "
+                    "automaticamente em aplicado); "
+                    "'no_change' = nenhuma mudanca valida sobreviveu para este "
+                    "achado."
                 ),
             },
             "referencia": {
@@ -945,6 +1143,38 @@ def _sistema_melhoria():
         "e justificado no 'motivo' (o sistema registra a proposta como "
         "pendente de decisao). Nao transforme a correcao de um tema em "
         "reescrita integral de outro trecho.\n"
+        "20. VINCULO EXPLICITO ACHADO-MUDANCA (OBRIGATORIO): em cada item de "
+        "'alteracoes'/'remocoes'/'adicoes_estruturais' que execute um apontamento "
+        "da analise ou uma oportunidade informada, preencha 'source_finding_id' "
+        "com o ID do achado (ex.: 'ap-1a2b3c4d' ou 'op-1') e 'relationship' "
+        "com o tipo de relacao: 'direct_fix' (resolve diretamente o problema, "
+        "conta como aplicado), 'partial_fix' (resolve parte, conta como "
+        "parcialmente_aplicado), 'related_improvement' (mesmo tema mas nao "
+        "resolve o achado, nao conta como aplicacao), 'structural_proposal' "
+        "(propoe solucao estrutural/normativa, aparece separadamente), "
+        "'no_change' (nenhuma mudanca valida sobreviveu). Mudancas de iniciativa "
+        "do modelo sem achado associado devem omitir 'source_finding_id' ou usar "
+        "null. NAO invente associacao posterior entre mudanca autonoma e achado "
+        "apenas para melhorar a cobertura.\n"
+        "21. PARAMETROS NORMATIVOS MATERIAIS COM LASTRO ESPECIFICO: quando uma "
+        "mudanca criar ou modificar parametro material (prazo, percentual, "
+        "quantidade, frequencia, autoridade competente, orgao responsavel, "
+        "sancao, limite, condicao de elegibilidade, obrigacao nova), preencha "
+        "'material_parameters' com array de objetos contendo: 'value' (valor), "
+        "'type' (deadline/percentage/quantity/frequency/authority/sanction/"
+        "limit/eligibility/obligation/competence/condition), "
+        "'source_document', 'source_chunk_id', 'source_reference', 'supported' "
+        "(boolean). Se 'supported' = false, o valor NAO deve entrar no texto -- "
+        "use placeholder [PARAMETRO A DEFINIR] no 'novo_texto'/'texto'. A "
+        "proposta nao vira 'unsupported' so porque o numero nao existe; o "
+        "CONCEITO permanece valido e o placeholder sinaliza decisao institucional "
+        "pendente.\n"
+        "22. PLANO DE MELHORIA COM RELATIONSHIP: no 'plano_melhoria', inclua "
+        "'relationship' (mesmo vocabulario do item 20) para cada achado avaliado. "
+        "Isso permite que a reconcilicao final determine corretamente se o achado "
+        "foi 'aplicado', 'parcialmente_aplicado', 'nao_aplicado' ou gerou apenas "
+        "'related_improvement'/'structural_proposal', sem depender de proximidade "
+        "textual.\n"
         "Retorne apenas o JSON da funcao apresentar_documento_melhorado."
     )
 
@@ -1935,6 +2165,55 @@ _RE_IMPEDIMENTO_CONCRETO = re.compile(
 )
 
 
+def _validar_parametros_materiais(item: dict) -> dict:
+    """Valida parâmetros normativos materiais e aplica placeholders quando
+    sem suporte.
+
+    Para cada entrada em 'material_parameters' com 'supported' = false,
+    substitui o valor no 'novo_texto'/'texto' pelo placeholder
+    '[PARAMETRO A DEFINIR]' e marca o item com 'parametros_sem_suporte'.
+
+    Retorna o item modificado (mutação in-place)."""
+    params = item.get("material_parameters") or []
+    if not params:
+        return item
+
+    texto_campos = []
+    if item.get("novo_texto"):
+        texto_campos.append("novo_texto")
+    if item.get("texto"):
+        texto_campos.append("texto")
+
+    sem_suporte = []
+    for param in params:
+        if not isinstance(param, dict):
+            continue
+        if not param.get("supported", True):
+            valor = str(param.get("value") or "").strip()
+            if not valor:
+                continue
+            sem_suporte.append(valor)
+            for campo in texto_campos:
+                texto_atual = item.get(campo) or ""
+                if valor in texto_atual:
+                    item[campo] = texto_atual.replace(valor, "[PARAMETRO A DEFINIR]")
+
+    if sem_suporte:
+        item["parametros_sem_suporte"] = sem_suporte
+
+    return item
+
+
+def _aplicar_validacao_parametros_materiais(
+    alteracoes: list[dict], remocoes: list[dict], adicoes: list[dict]
+) -> None:
+    """Aplica validação de parâmetros materiais em todas as listas de mudanças."""
+    for grupo in (alteracoes, remocoes, adicoes):
+        for item in grupo:
+            if isinstance(item, dict):
+                _validar_parametros_materiais(item)
+
+
 def _motivo_concreto(motivo: str) -> bool:
     """Diz se o motivo é um impedimento concreto (não uma justificativa vaga).
 
@@ -2324,9 +2603,9 @@ def reconciliar_plano(
     remocoes: list[dict],
     adicoes: list[dict],
 ) -> list[dict]:
-    """Reconstroi o plano de melhoria a partir do que o patch EFETIVAMENTE faz.
+    """Reconstrói o plano de melhoria a partir do que o patch EFETIVAMENTE faz.
 
-    Tres responsabilidades:
+    Três responsabilidades:
 
     1. Só entra linha de plano para o que existe de fato no patch — uma
        decisão 'aplicar' sem mudança correspondente vira 'descartado', nunca
@@ -2337,6 +2616,13 @@ def reconciliar_plano(
        cobrir todos os achados.
     3. Preserva a relação declarada entre achado e alteração
        ('relacao_com_o_achado', 'dispositivo_alvo', 'fundamento', risco).
+
+    A reconciliação usa 'source_finding_id' das mudanças para vincular
+    exatamente achado → mudança, sem depender de proximidade textual.
+    O campo 'relationship' determina o status final:
+    - direct_fix / partial_fix → aplicado / parcialmente_aplicado
+    - related_improvement / structural_proposal → relacionado / proposto
+    - no_change → nao_aplicado
 
     Oportunidades que o modelo não declarou entram como 'nao avaliada' para que
     a lacuna de cobertura fique visível em vez de silenciosa.
@@ -2371,9 +2657,38 @@ def reconciliar_plano(
     def _chave_id(achado_id: str) -> str:
         return "id:" + _chave_texto(achado_id) if achado_id else ""
 
+    # Build index of changes by source_finding_id for exact matching
+    mudancas_por_finding: dict[str, list[tuple[str, dict, str]]] = {}
+    for item in alteracoes:
+        if isinstance(item, dict):
+            sfid = (item.get("source_finding_id") or "").strip()
+            if sfid:
+                mudancas_por_finding.setdefault(sfid, []).append(
+                    ("alteracao", item, item.get("rotulo") or "")
+                )
+    for item in remocoes:
+        if isinstance(item, dict):
+            sfid = (item.get("source_finding_id") or "").strip()
+            if sfid:
+                mudancas_por_finding.setdefault(sfid, []).append(
+                    ("remocao", item, item.get("rotulo") or "")
+                )
+    for item in adicoes:
+        if isinstance(item, dict):
+            sfid = (item.get("source_finding_id") or "").strip()
+            if sfid:
+                mudancas_por_finding.setdefault(sfid, []).append(
+                    ("adicao", item, item.get("o_que") or "")
+                )
+
+    def _localizar_mudanca_por_finding(
+        source_finding_id: str,
+    ) -> list[tuple[str, dict, str]]:
+        return mudancas_por_finding.get(source_finding_id, [])
+
     # O planner pode citar o ID da oportunidade e parafrasear o texto; casar
     # pelo ID evita marcar como "nao avaliada" um achado que ele de fato
-    #_avaliou (o texto exato do plano raramente e identico ao da analise).
+    # avaliou (o texto exato do plano raramente e identico ao da analise).
     ids_oportunidade = {
         str(o.get("id") or "").strip()
         for o in (oportunidades or [])
@@ -2390,22 +2705,53 @@ def reconciliar_plano(
             continue
         decisao = (d.get("decisao") or "").strip().casefold()
         referencia = (d.get("referencia") or "").strip()
-        localizada = _localizar_mudanca(referencia, alteracoes, remocoes, adicoes)
+        source_finding_id = (d.get("achado_id") or "").strip()
         canonico = normalizar_motivo_descarte(d.get("motivo"))
+        relationship = (d.get("relationship") or "").strip().casefold()
+
+        # Use source_finding_id for exact matching first
+        mudancas_vinculadas = _localizar_mudanca_por_finding(source_finding_id) if source_finding_id else []
+        # Fallback to reference-based matching if no source_finding_id match
+        localizada = None
+        if mudancas_vinculadas:
+            # Pick the first matching change (they all share the same source_finding_id)
+            localizada = mudancas_vinculadas[0]
+        elif referencia:
+            localizada = _localizar_mudanca(referencia, alteracoes, remocoes, adicoes)
 
         if localizada is not None:
             _tipo, item, rotulo = localizada
-            if item.get("requer_decisao_juridica"):
+            # Use relationship field to determine status
+            if relationship in (RELACAO_DIRECT_FIX, RELACAO_PARTIAL_FIX):
+                if item.get("requer_decisao_juridica"):
+                    efetiva = STATUS_PENDENTE
+                    status_txt = (
+                        "proposta inserida e marcada para validação jurídica "
+                        f"({_categoria_declarada(item)})"
+                    )
+                    decisao = decisao or "propor"
+                else:
+                    if relationship == RELACAO_PARTIAL_FIX:
+                        efetiva = STATUS_NAO_APLICADO  # Will be reported as parcialmente_aplicado in UI
+                        status_txt = f"parcialmente aplicada ({_categoria_declarada(item)})"
+                    else:
+                        efetiva = STATUS_APLICADO
+                        status_txt = f"aplicada ({_categoria_declarada(item)})"
+                    decisao = decisao or "aplicar"
+            elif relationship == RELACAO_RELATED_IMPROVEMENT:
+                # Related improvement doesn't count as application of the finding
+                efetiva = STATUS_NAO_APLICADO
+                status_txt = f"melhoria relacionada ({_categoria_declarada(item)})"
+                decisao = "propor"
+            elif relationship == RELACAO_STRUCTURAL_PROPOSAL:
                 efetiva = STATUS_PENDENTE
-                status_txt = (
-                    "proposta inserida e marcada para validação jurídica "
-                    f"({_categoria_declarada(item)})"
-                )
-                decisao = decisao or "propor"
-            else:
-                efetiva = STATUS_APLICADO
-                status_txt = f"aplicada ({_categoria_declarada(item)})"
-                decisao = decisao or "aplicar"
+                status_txt = f"proposta estrutural ({_categoria_declarada(item)})"
+                decisao = "propor"
+            else:  # no_change or unknown
+                efetiva = STATUS_NAO_APLICADO
+                status_txt = "sem mudança válida para este achado"
+                decisao = "descartar"
+
             linhas.append(
                 {
                     "achado_id": d.get("achado_id") or "",
@@ -2417,6 +2763,7 @@ def reconciliar_plano(
                     "referencia": rotulo or referencia,
                     "fundamento": (d.get("fundamento") or d.get("lastro") or ""),
                     "relacao_com_o_achado": (d.get("relacao_com_o_achado") or ""),
+                    "relationship": relationship,
                     "status": efetiva,
                     "status_detalhe": status_txt,
                 }
@@ -2450,6 +2797,7 @@ def reconciliar_plano(
                 "referencia": referencia,
                 "fundamento": (d.get("fundamento") or d.get("lastro") or ""),
                 "relacao_com_o_achado": (d.get("relacao_com_o_achado") or ""),
+                "relationship": relationship,
                 "status": efetiva,
                 "status_detalhe": status_txt,
                 "motivo_canonico": canonico,
@@ -2478,6 +2826,7 @@ def reconciliar_plano(
                 "referencia": "",
                 "fundamento": "",
                 "relacao_com_o_achado": "",
+                "relationship": "",
                 "status": STATUS_FALHOU,
                 "status_detalhe": (
                     f"oportunidade '{o.get('tipo', '')}' não avaliada pelo "
@@ -3067,6 +3416,10 @@ def gerar_estrutura_melhoria(
     descartados_categoria = aplicar_politica_categorias(
         alteracoes, remocoes, adicoes
     )
+
+    # Validação de parâmetros normativos materiais: substitui valores sem
+    # suporte por placeholder [PARAMETRO A DEFINIR] no texto da mudança.
+    _aplicar_validacao_parametros_materiais(alteracoes, remocoes, adicoes)
 
     # Não aplica patch inválido: descarta itens sem âncora ou que causariam
     # duplicação. Se nada sobrar, a entrega será a cópia intacta do original.

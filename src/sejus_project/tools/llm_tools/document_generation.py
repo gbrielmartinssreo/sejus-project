@@ -1588,6 +1588,12 @@ def _melhorar_e_relatar(
     textos = _textos_antes_depois(conteudo, depois)
     lacunas_sem = _filtrar_lacunas_sem_precedente(lacunas, precedente or {})
 
+    # Validação de parâmetros normativos materiais no patch final (após
+    # todas as redes de segurança, incluindo validação DOCX).
+    document_improvement._aplicar_validacao_parametros_materiais(
+        alteracoes, remocoes, adicoes
+    )
+
     # Reconciliação FINAL do plano contra o patch que SOBREVIVEU a TODAS as
     # redes de segurança (filtro, lastro, duplicação, validação DOCX 5 passagens).
     plano_melhoria = document_improvement.reconciliar_plano(
